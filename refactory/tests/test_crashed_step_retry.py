@@ -579,7 +579,8 @@ def test_the_optimizer_is_told_what_a_crash_does():
     text = "\n".join(composition_section(nn_edits.catalogue(), nodes, state["edges"]))
     assert "**crashes**" in text and "fresh session" in text and "no answer" in text
     assert "**running out of output**" in text and "model failing that question" in text
-    assert "It is not retried" in text and "vote" in text
+    assert "It is not retried" in text
+    assert "vote" not in text and "Address it" not in text, "the fact, not a remedy"
 
 
 # ── the outer loop: a flaky candidate is still scored on every item ─────────

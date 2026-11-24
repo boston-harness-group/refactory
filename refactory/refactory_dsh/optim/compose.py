@@ -133,7 +133,7 @@ class PickedParent(Optimizer):
             decision = {**ctx.strategy,
                         "parent_picker": f"not used this round: the strategy chose "
                                          f"candidate {parent.id}, so {self.picker.name} did not"}
-            ctx = replace(ctx, parent=parent.id, strategy=decision)
+            ctx = replace(ctx, parent=parent.id, strategy=decision, val_item_scores={})
             proposals = self.proposer.propose(ctx, n, [parent]) or []
             return [replace(proposal, parent=parent.id) for proposal in proposals]
         parent = by_id.get(ctx.parent or "")
@@ -148,6 +148,8 @@ class PickedParent(Optimizer):
         decision = {**ctx.strategy,
                     "parent_picker": f"{self.picker.name} chose candidate {parent.id}: "
                                      f"{self.picker.reason(parent)}"}
-        ctx = replace(ctx, parent=parent.id, strategy=decision)
+        # The per-item val scores are the picker's: the proposer writes edits from
+        # train evidence and never sees them.
+        ctx = replace(ctx, parent=parent.id, strategy=decision, val_item_scores={})
         proposals = self.proposer.propose(ctx, n, [parent]) or []
         return [replace(proposal, parent=parent.id) for proposal in proposals]

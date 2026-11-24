@@ -19,11 +19,10 @@ def _flat(text: str) -> str:
     return " ".join(text.split())
 
 
-def test_rule_seven_is_about_harness_timeouts_only():
+def test_the_analysts_propose_no_change_timeouts_included():
+    # The analysts propose no change at all now, timeouts or otherwise.
     flat = _flat(analysts.FAILURE_SYSTEM)
-    assert ("Do not ask for what the pipeline already does, or for retries or any other "
-            "change aimed at harness timeouts") in flat
-    assert "A retry, a check or a loop aimed at a wrong answer is a change like any other." in flat
+    assert "Do not propose changes: say what happens, not what to do." in flat
     assert "for retries, or for a change aimed at timeouts" not in flat
 
 
@@ -63,8 +62,8 @@ def test_the_note_is_weighed_as_evidence_never_a_rule_against_untried_designs():
     for shown in (memory.context_block(note), "\n".join(memory.request_lines(note))):
         flat = _flat(shown)
         assert "Prefer it when the current evidence is ambiguous" not in flat
-        assert ("do not let it rule out a change nobody has tried, or a different design "
-                "(other instructions, criteria, place or limit) of a change that failed") in flat
+        assert ("It is a record of facts, not advice: where it and the current traces "
+                "differ, the current traces hold.") in flat
     rejected = "\n".join(memory.request_lines(
         {**note, "prev": "inc", "rejected": {"child": "rej"}}))
     assert "the unchanged incumbent `inc` and its rejected change `rej`" in rejected

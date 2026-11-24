@@ -86,6 +86,43 @@ def swe_rollout_result(record: dict[str, Any], knobs: dict[str, Any]) -> dict[st
     return result
 
 
+def steps_rollout_result(record: dict[str, Any], knobs: dict[str, Any]) -> dict[str, Any]:
+    """One steps item record as SkillOpt's ``claude_code_exec`` result, as swe's with the
+    steps' transcripts in order: each step's final message, headed by its step, then the
+    verification block; the target's prompts are each step's prompt as sent and its
+    appended system prompt (its ``<step>__system_prompt`` knob), each headed by its step.
+    A step an edit added is shown where it ran, as the seed's steps are."""
+    from .steps_mode import system_prompt_knob
+
+    result = sb_view._base(record)  # noqa: SLF001
+    meta = record.get("metadata") or {}
+    result["task_type"] = meta.get("category", "")
+    exchanges = [e for e in (record.get("exchanges") or []) if isinstance(e, dict)]
+    if record.get("error_text") is not None or not exchanges \
+            or str(record.get("fail_reason") or "").startswith(NO_ANSWER):
+        return result
+    conversation = [message
+                    for e in exchanges
+                    for message in agent_port.conversation(
+                        f"[{e.get('node', '')} step]\n{e.get('response') or ''}")]
+    verification = str(record.get("prediction") or record.get("fail_reason") or "")
+    if verification:
+        conversation.append({"role": "system",
+                             "content": f"[POST-EXECUTION VERIFICATION]\n\n{verification}"})
+    steps = list(dict.fromkeys(str(e.get("node", "")) for e in exchanges))
+    result.update({
+        "n_turns": len(exchanges),
+        "target_system_prompt": "\n\n".join(
+            f"### {step} step\n{knobs.get(system_prompt_knob(step), '')}" for step in steps),
+        "target_user_prompt": "\n\n".join(
+            f"### {e.get('node', '')} step\n{e.get('prompt') or ''}" for e in exchanges),
+        "spreadsheet_preview": _preview(meta),
+        "conversation": conversation,
+    })
+    return result
+
+
 rollout_result = agent_rollout_result
 #: The package's modes.
-MODE_VIEWS = {"agent": agent_rollout_result, "swe": swe_rollout_result}
+MODE_VIEWS = {"agent": agent_rollout_result, "swe": swe_rollout_result,
+              "steps": steps_rollout_result}

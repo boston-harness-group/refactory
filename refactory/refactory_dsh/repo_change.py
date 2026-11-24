@@ -1294,10 +1294,24 @@ def _check_copy(ctx: Any, found: worktree.Worktree, timeout: float
     problems that stopped its preparation, and the prep-failure dict of the step that
     failed (None when it worked).
     """
+    from refactory_dsh import base_check
+    from refactory_dsh.invocations import CHECK_COPY_HOME
+
     target = Path(found.target)
     run_id = Path(found.path).name.removeprefix("run-")
     path = _check_copy_path(target, run_id)
+    copy = worktree.Worktree(path=str(path), branch=f"{worktree.BRANCH_PREFIX}check-{run_id}",
+                             base=found.base, head=found.head, target=found.target, run=found.run)
+    home = Path(ctx.workdir).resolve() / CHECK_COPY_HOME
+    home.mkdir(parents=True, exist_ok=True)
+    key = base_check.prepared_key(ctx, found.head)
     if path.exists():
+        # Prepared for this commit already, and nothing has changed its files since but
+        # caches: reused as it is, without installing, generating or setting up again.
+        state = base_check.prepared_state(path, found.head, key)
+        if state and state == base_check.worktree_state(copy):
+            return copy, worktree.check_environment(path, home), home, [], None
+        base_check.clear_prepared(path)
         try:
             worktree.git(path, "checkout", "-q", "--force", "--detach", found.head)
             worktree.git(path, "clean", "-fdq")
@@ -1307,15 +1321,11 @@ def _check_copy(ctx: Any, found: worktree.Worktree, timeout: float
         worktree.git(target, *worktree.NO_HOOKS, "worktree", "add", "-q", "--detach",
                      str(path), found.head)
     worktree._isolate_hooks(target, path)
-    copy = worktree.Worktree(path=str(path), branch=f"{worktree.BRANCH_PREFIX}check-{run_id}",
-                             base=found.base, head=found.head, target=found.target, run=found.run)
-    from refactory_dsh.invocations import CHECK_COPY_HOME
-
-    home = Path(ctx.workdir).resolve() / CHECK_COPY_HOME
-    home.mkdir(parents=True, exist_ok=True)
     copy, env, problems, prep_fail = prepare_check_environment(
         copy, ctx.facts, amend=False, commit_lockfiles=False, run=ctx.workdir, home=home,
         timeout=timeout, budget=getattr(ctx, "budget", None))
+    if not problems:
+        base_check.mark_prepared(path, key, base_check.worktree_state(copy))
     return copy, env, home, problems, prep_fail
 
 
@@ -1369,8 +1379,13 @@ def refused(ctx: Any) -> str:
 
 def run_check(ctx: Any, command: str, timeout: float,
               *, triage_prep: bool = True, prepared: bool = False,
-              beside_reviews: bool = False) -> Any:
+              beside_reviews: bool = False, per_step: bool = False) -> Any:
     """Run ``command`` where the run works, and return its `sandbox.SandboxResult`.
+
+    With ``per_step``, a chained command runs as its marker script (`base_check.run_chain`):
+    the result is the command's own, and its ``step_results`` are each step's record from
+    this one run (None when the command is not a chain, or its steps could not be read),
+    so the comparison with the base never runs the chain again.
 
     In the run's worktree it runs on the committed attempt -- what a check or reviewer
     changed is put back first -- in the worktree's own environment: its dependencies
@@ -1388,6 +1403,10 @@ def run_check(ctx: Any, command: str, timeout: float,
     instead (`_check_copy`): neither can see, or delete, what the other leaves, and the
     run's worktree is not touched.
     """
+    if per_step:
+        return check_steps(ctx, command, lambda script: run_check(
+            ctx, script, timeout, triage_prep=triage_prep, prepared=prepared,
+            beside_reviews=beside_reviews), beside_reviews=beside_reviews)
     found = worktree.recorded(ctx.workdir)
     if found is None:
         root = _artifact_root(str(ctx.facts["name"]))
@@ -1456,6 +1475,47 @@ def run_check(ctx: Any, command: str, timeout: float,
                           f"the reviews and the next attempt see the committed attempt: "
                           f"{target_guard._named(changed)}")
     return result
+
+
+def check_steps(ctx: Any, command: str, run: Any, *, beside_reviews: bool) -> Any:
+    """Run ``command`` once through ``run`` (a `run_check` call), as its marker script when
+    it is a chain (`base_check.run_chain`), and return the result with ``step_results``:
+    each step's record from that run, or None when the command is not a chain, its steps
+    could not be read, or its preparation failed before any of it ran."""
+    from refactory_dsh import base_check
+
+    plan = base_check.chain_plan(command)
+    if plan is None:
+        result = run(command)
+        result.step_results = None
+        return result
+    result = run(plan.script)
+    if getattr(result, "prep_failure", None) is not None or \
+            getattr(result, "change_caused_prep", None) is not None:
+        result.step_results = None  # nothing of the command ran
+    else:
+        result.step_results = base_check.read_chain_run(result, plan,
+                                                        _check_roots(ctx, beside_reviews))
+    return result
+
+
+def _check_roots(ctx: Any, beside_reviews: bool) -> list[tuple[str, str]]:
+    """The run-specific paths a check's step output names where it ran (`base_check._roots`)."""
+    from refactory_dsh import base_check
+    from refactory_dsh.invocations import CHECK_COPY_HOME
+
+    found = worktree.recorded(ctx.workdir)
+    run = Path(ctx.workdir).resolve()
+    if found is None:
+        return base_check._roots((run, "<run>"))
+    places: list[tuple[Path | str, str]] = [(Path(found.path), "<root>")]
+    if beside_reviews:
+        run_id = Path(found.path).name.removeprefix("run-")
+        places += [(_check_copy_path(Path(found.target), run_id), "<root>"),
+                   (run / CHECK_COPY_HOME, "<home>")]
+    else:
+        places.append((run / worktree.CHECK_HOME, "<home>"))
+    return base_check._roots(*places, (ctx.workdir, "<run>"))
 
 
 def report(ctx: Any, name: str, payload: dict[str, Any]) -> dict[str, Any]:

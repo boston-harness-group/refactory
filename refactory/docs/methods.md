@@ -1,0 +1,108 @@
+# Adding an optimization method
+
+refactory is meant to be the PyTorch of harnesses: an optimization method (an outer
+loop, a parent policy, a proposer) is put together from building blocks that already
+exist, not written as a private copy of them. This page lists those blocks, where they
+live, and the rule for adding one.
+
+## The rule
+
+1. **Compose what exists.** A new method uses the core parent pickers, proposers,
+   validation gate, final evaluation, budgets and trace below, rather than writing
+   its own.
+2. **Register through the package route.** A new parent picker or proposer goes in a
+   package's `Package.optimizers`; a new outer loop goes in `Package.strategies`. Both are
+   then selectable by name through the normal settings (`optimizer`, `parent_picker`,
+   `strategy`), with no new CLI flag and no edit to a core table.
+3. **A genuinely new general piece goes in core, once.** If the method needs something
+   other methods could use (a selection rule, a frontier, a sampler), put it in
+   `refactory_dsh` (one copy) and make the method import it. A method package keeps
+   only what is specific to that method.
+4. **A faithful port says so and pins it.** A port that must reproduce an upstream
+   algorithm exactly says so in its module docstring and pins its behaviour with a
+   fixed-seed test that compares the whole decision trace, so moving a shared piece
+   into core cannot change it unnoticed.
+
+Review checks this: a new method reuses the core pickers, proposers, gate, final
+evaluation and trace, and any helper it duplicated has been moved to core.
+
+## The building blocks
+
+| block | where | what it gives a method |
+|---|---|---|
+| parent pickers: `archive`, `evolutionary`, `islands`, `hill_climb`, `map_elites`, `pareto` (GEPA's per-item frontier; its functions in `refactory_dsh/optim/pareto.py`) | `refactory_dsh/optim/policies.py` (`ParentSelector`) | which candidate to edit next. Write `select` only. Each picker gets `ProposalContext.val_scores` (one val mean per candidate); one that sets `uses_item_scores = True` (as `pareto` does) also gets `ProposalContext.val_item_scores` (each judged candidate's per-item val scores, keyed by the run's HMAC of the item id, never test; a proposer never sees them). It draws from `ParentSelector.rng`, so a resumed run picks again what it picked before |
+| proposers: `autoresearch` (the model proposer), `random` | `refactory_dsh/optim/random_optimizer.py` (`Optimizer`) | the edits. Write `propose`. The base class validates every proposal before it costs an evaluation. A proposer that calls a model gets the run's model through `bind_model` |
+| picker + proposer pairing | `refactory_dsh/optim/compose.py` (`PickedParent`) | a picker chooses the parent and any proposer writes the edits (`parent_picker` setting) |
+| registration | two routes: `optim.register` / `strategies.register` for the library's own table, and `Package.optimizers` / `Package.strategies` (`refactory_dsh/nn/package.py`) for a package, found by `registry.contributed` | selectable by name. `optim.resolve` / `strategies.resolve` look in the library's table, then in the usable packages. A package that reuses a library name or another package's name (or lists a class of the wrong kind) is left out whole, as a package that fails to load is: listings show it under `unavailable_packages` with why, and a run or profile naming one of its pieces is refused with that reason. Profiles validate both, against the project's packages |
+| the strategy API | `refactory_dsh/outerloop.py` (`OuterLoop`, `Run`) | `Run.attempt` (apply and validate a proposal), `Run.evaluate` / `Run.evaluate_many` (`EvalRequest`: a candidate, a part, chosen items, a seed), `Run.part_item_scores` (per-item val scores, HMAC-keyed, val only), `Run.shared_scores`, budgets (`Run.budget_left`, `Run.rollouts_left`, `BudgetStopped`), `Run.keep`, `Run.stop`, `Run.save_strategy_state` |
+| validation gate | `outerloop.ValidationGate` | accept a candidate only on a strictly higher val score; the incumbent; shared-item scoring when an incident left an item out |
+| final evaluation | `outerloop.FinalEvaluation` | score the winner and the seed on test once, at the end |
+| strategy trace | `refactory_dsh/strategy_trace.py` (`TraceRecorder`, `ask`) | one JSONL trace of decisions and model calls, with retries and call keys, so a run can be replayed |
+| early stop | `OuterLoop.should_stop` | a hook a strategy overrides to end the search early |
+| train minibatches | `train_minibatch` setting (default loop); `EvalRequest.items` (strategies) | score a candidate on a sample of train rather than all of it |
+
+## Worked examples
+
+- **GEPA** (`refactory_packages/gepa`): the core per-item frontier
+  (`refactory_dsh/optim/pareto.py`, the same code as the `pareto` picker) fed by
+  `Run.part_item_scores`, plus GEPA reflection (its prompt, its instruction
+  extractor, its merge), `ValidationGate`, `FinalEvaluation` and `TraceRecorder`. Its
+  package keeps only the program pool and the GEPA-specific steps. It passes its one
+  shared generator to the core frontier functions, so its draws are GEPA's, pinned by
+  `test_fixed_seed_gepa_trace_is_unchanged`.
+- **SkillOpt** (`refactory_packages/skillopt`): its analysts, merge and slow update
+  (`SkillOptProposer`), plus `ValidationGate`, `FinalEvaluation`, `TraceRecorder`
+  and `Run.evaluate_many`. Its early stop is the `should_stop` hook.
+
+## A picker and a proposer in a package
+
+```python
+from refactory_dsh.nn import Package
+from refactory_dsh.optim import Optimizer, ParentSelector, Proposal
+
+
+class Freshest(ParentSelector):
+    """Breed from the newest candidate."""
+
+    name = "freshest"
+    policy = "the newest candidate"
+
+    def select(self, ctx, n, parents):
+        return list(parents[-1:]) * n
+
+
+class SetTone(Optimizer):
+    name = "set_tone"
+
+    def __init__(self, *, k=3, seed=0):
+        super().__init__(k=k)
+
+    def propose(self, ctx, n, parents):
+        return [Proposal(edit={"op": "set_knob", "name": "tone", "value": "terse"},
+                         parent=parents[0].id)]
+
+
+PACKAGE = Package(name="my_methods", optimizers=(Freshest, SetTone))
+```
+
+Where the package lives decides who can select it:
+
+- **A project's packages** (`<project>/.factory/packages/<name>/`, put there by
+  `python -m refactory_dsh.registry add <dir> --project <project>` or by create
+  mode): selectable in runs and profiles of that project (`--project <project>` on
+  the command line). `python -m refactory_dsh.registry disable <name>`
+  switches a package off for the project, and its strategies and optimizers go with
+  its modes.
+- **Installed packages** (`refactory/refactory_packages/<name>/`, shipped with
+  refactory): selectable everywhere.
+
+Then a run selects them by name: `--optimizer set_tone`, or `parent_picker: freshest`
+in a profile, paired with any proposer. A run records which package and version
+provided each package strategy, optimizer and picker, and a resume refuses a
+different one. A picker keeps `population = True` (the default) to get every judged
+candidate under `selection: pool`, and set it to `False` for a single-line picker, as
+`hill_climb` does, which keeps `selection: checkpoint` as its default.
+`tests/test_package_optimizers.py` runs this route end to end through the command
+line.
+
+More guides (benchmark packages, edit operations, node kinds and judges) will follow.

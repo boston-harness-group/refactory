@@ -31,6 +31,7 @@ import random
 from typing import Any, Callable, Sequence
 
 from refactory_dsh.nn import edits as nn_edits
+from refactory_dsh.optim import pareto
 from refactory_dsh.optim.base import Candidate, Optimizer, Proposal, ProposalContext
 
 
@@ -81,6 +82,10 @@ class ParentSelector(Optimizer):
     #: islands, niches). Under the validation gate's ``pool`` selection it is handed
     #: every judged candidate, not the top ``pool_size``, and applies its own rule.
     population: bool = True
+    #: Whether the policy compares candidates item by item: only then does the loop
+    #: work out each judged candidate's per-item val scores and hand them over
+    #: (``ProposalContext.val_item_scores``). A proposer never gets them.
+    uses_item_scores: bool = False
 
     def __init__(self, *, k: int = 3, seed: int = 0) -> None:
         super().__init__(k=k)
@@ -373,3 +378,57 @@ class MapElitesSelector(ParentSelector):
             return []
         rng = self.rng(ctx, n)
         return [self.cells[rng.choice(occupied)] for _ in range(n)]
+
+
+class ParetoSelector(ParentSelector):
+    """GEPA's parent selection (Agrawal et al., 2025): a candidate on the per-item
+    Pareto frontier of validation, drawn with probability proportional to the number
+    of val items it is best on (ties included).
+
+    A candidate that is best on some items is kept as a parent even when its mean is
+    lower than another's: two specialists that each win half the items both stay on
+    the frontier, where a mean-ranked policy breeds only from the one with the higher
+    mean. Dominated candidates (every item it is best on, another is best on too) are
+    pruned first, the lowest mean tested first, as GEPA does.
+
+    The per-item scores are ``ProposalContext.val_item_scores`` (the default loop's
+    validation gate; keyed by the run's HMAC of each item id, never a raw id, never
+    test). The frontier is core's (:mod:`refactory_dsh.optim.pareto`), the same code
+    the GEPA strategy runs; the draws come from :meth:`ParentSelector.rng`, so a
+    resumed run draws what an uninterrupted one would. Without per-item val scores
+    (no validation gate, or a task without item scores) it breeds from the best by
+    :meth:`ParentSelector.fitness`, and says so.
+    """
+
+    name = "pareto"
+    policy = "on the per-item Pareto frontier of validation"
+    uses_item_scores = True
+
+    def __init__(self, *, k: int = 3, seed: int = 0) -> None:
+        super().__init__(k=k, seed=seed)
+        #: The last selection's frontier: candidate id -> val items it is best on.
+        self.wins: dict[str, int] = {}
+        self.items = 0
+
+    def select(self, ctx, n, parents):
+        items = dict(getattr(ctx, "val_item_scores", None) or {})
+        scored = [c for c in parents if items.get(c.id)]
+        if not scored:
+            self.wins, self.items = {}, 0
+            ranked = self._ranked(ctx, parents)
+            return ranked[:1] * n if ranked else []
+        subscores = [items[c.id] for c in scored]
+        fronts = pareto.build_fronts(subscores)
+        means = [pareto.aggregate(s) for s in subscores]
+        self.wins = {scored[p].id: count for p, count in pareto.front_wins(fronts, means).items()}
+        self.items = len(fronts)
+        rng = self.rng(ctx, n)
+        return [scored[pareto.select_from_pareto_front(fronts, means, rng)] for _ in range(n)]
+
+    def reason(self, candidate: Candidate) -> str:
+        """Why this candidate, in a few words, for the request."""
+        if candidate.id not in self.wins:
+            return "no per-item validation scores yet: the best by validation"
+        # The request shows gate decisions, never val scores, so the reason does not
+        # say how many val items the candidate wins.
+        return f"{self.policy}: one of {len(self.wins)} candidate(s) on it"

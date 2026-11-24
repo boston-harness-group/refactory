@@ -339,11 +339,12 @@ def _seen(graph: Graph, state: Mapping[str, Any], there: set[tuple[str, str]],
     """What a new (or rewired) step will see: ``default``, or what ``sees`` names, kept
     to what is there before it on every path, facts before files, each sorted."""
     if sees is None:
-        # A sealed step's session log (`workspace.SEALED_SESSION`) goes with its dispatch
+        # A sealed step's session log (`workspace.is_session_log`) goes with its dispatch
         # and nothing reads it, so a default never hands it on; 'sees' may still name it.
-        from refactory_dsh.workspace import SEALED_SESSION
+        from refactory_dsh.workspace import is_session_log
 
-        chosen = {key for key in set(default) & there if key != ("file", SEALED_SESSION)}
+        chosen = {key for key in set(default) & there
+                  if not (key[0] == "file" and is_session_log(key[1]))}
     else:
         if isinstance(sees, str):
             sees = [sees]
@@ -2796,10 +2797,11 @@ def _expand_route(edit: dict, state: dict) -> list[dict]:
         way_seen = _seen(graph, state, there, view, spec.get("sees"))
         if over is not None and spec.get("sees") is None:
             # By default it sees what it rewrites, wherever before the route that was made.
-            from refactory_dsh.workspace import SEALED_SESSION
+            from refactory_dsh.workspace import is_session_log
 
             # What the step it redoes left, but never its session log (nothing reads it).
-            redone = (_readable(graph, state, _outputs(over)) & there) - {("file", SEALED_SESSION)}
+            redone = {key for key in _readable(graph, state, _outputs(over)) & there
+                      if not (key[0] == "file" and is_session_log(key[1]))}
             way_seen = sorted(set(way_seen) | redone, key=lambda key: (key[0] != "fact", key[1]))
         nodes = _step_nodes(graph, state, spec, node_id, way_seen,
                             settings_from=anchor if anchor.kind == "agent" else None,

@@ -405,8 +405,11 @@ OTHER_USES = {
     ("refactory_dsh/optim/base.py", "traces"): 2,
     # Prompt prose, no file names: "both full traces", split-evidence #655; #705's memory
     # prompt ("from the comparison and the traces"), the rejected-change comparison ("their
-    # traces are not shown") and MEMORY_WEIGHT ("the current traces agree ... override it").
-    ("refactory_dsh/optim/memory.py", "traces"): 10,
+    # traces are not shown"), MEMORY_WEIGHT ("the current traces hold") and the record's
+    # rules ("where in the pipeline the traces show it starts", "what the traces show").
+    ("refactory_dsh/optim/memory.py", "traces"): 12,
+    # The analysts' summary: "with quotes from the traces".
+    ("refactory_dsh/optim/analysts.py", "traces"): 1,
     ("refactory_dsh/tools/gen_tutorial.py", "traces"): 2,
     ("refactory_packages/java_build_pack/mode.py", "item.json"): 2,
     ("refactory_packages/java_build_pack/ops.py", "item.json"): 1,

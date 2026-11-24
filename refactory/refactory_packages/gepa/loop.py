@@ -9,7 +9,9 @@ Per iteration:
 
 1. (merge on) Right after an iteration that accepted a child, try a merge (``merge.py``).
 2. Draw a parent from the per-instance Pareto frontier, weighted by the instances it
-   is best on (``pareto.py``), and the iteration's minibatch of train ids
+   is best on (core's ``refactory_dsh/optim/pareto.py``, the same frontier the
+   ``pareto`` parent picker draws from; the pool is ``pareto.py``), and the
+   iteration's minibatch of train ids
    (``sampler.py``).
 3. Roll the parent out on the minibatch; skip the iteration if every item is perfect.
 4. Pick the parent's next component round robin, build its reflective dataset from
@@ -107,9 +109,8 @@ from refactory_dsh.outerloop import (
 )
 
 from refactory_packages.gepa import merge as merge_mod
-from refactory_packages.gepa.pareto import (
-    ProgramPool, find_dominator_programs, select_from_pareto_front,
-)
+from refactory_dsh.optim.pareto import find_dominator_programs, select_from_pareto_front
+from refactory_packages.gepa.pareto import ProgramPool
 from refactory_packages.gepa.reflection import (
     DEFAULT_PROMPT_TEMPLATE, check_template, extract_instruction, outcome_dataset,
     reflection_prompt, reflective_dataset,
@@ -191,7 +192,9 @@ class GepaLoop(OuterLoop):
         """The search state before the first iteration, every draw seeded by ``seed``."""
         self.base_seed = int(seed)
         # One shared generator for frontier sampling, minibatches and merge (``api.py:304``),
-        # and the DSPy adapter's own for picking a call (``dspy_adapter.py:111``).
+        # and the DSPy adapter's own for picking a call (``dspy_adapter.py:111``). The
+        # core frontier functions are handed this generator, never their own, so GEPA's
+        # draws stay GEPA's (``test_fixed_seed_gepa_trace_is_unchanged``).
         self.rng = random.Random(self.base_seed)
         self.adapter_rng = random.Random(0)
         self.sampler = EpochShuffledBatchSampler(self.minibatch_size, self.rng)

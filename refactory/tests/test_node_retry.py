@@ -700,6 +700,12 @@ def test_other_modes_declare_no_retry():
             assert {k: n["retry"] for k, n in nodes.items() if "retry" in n} == \
                 {"solve": {"on": ["crash"], "times": 1, "timeout_factor": 2}}
             continue
+        if key == "spreadsheetbench_v2-steps":
+            # The steps mode's four steps keep swe's solve retry, each.
+            assert {k: n["retry"] for k, n in nodes.items() if "retry" in n} == \
+                {step: {"on": ["crash"], "times": 1, "timeout_factor": 2}
+                 for step in ("inspect", "plan", "implement", "verify")}
+            continue
         assert all("retry" not in node for node in nodes.values()), key
 
 

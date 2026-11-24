@@ -706,7 +706,9 @@ Documentation: [refactory/docs/cli.md](../../../refactory/docs/cli.md)
       "base": "base",
       "brief": "brief",
       "check": "check",
+      "finish": "finish",
       "generate": "generate",
+      "items": "items",
       "model": "model",
       "name": "name",
       "noPr": "no_pr",
@@ -730,6 +732,8 @@ Documentation: [refactory/docs/cli.md](../../../refactory/docs/cli.md)
       "noPr",
       "refine",
       "reviewComments",
+      "finish",
+      "items",
       "attempts",
       "approve",
       "provider",
@@ -771,6 +775,16 @@ Documentation: [refactory/docs/cli.md](../../../refactory/docs/cli.md)
         "review_comments": true
       },
       "explanation": "Follow up an open pull request: the run starts from its branch, designs straight from the pull request (its description and diff; no research or strategy step), goes through the full review, and pushes onto that branch, fast-forward only. The pull request's title and description are left as they are."
+    },
+    {
+      "arguments": {
+        "brief": "Finish the pull request's open items",
+        "check": "python -m pytest -q",
+        "finish": true,
+        "name": "report_format",
+        "refine": "https://github.com/owner/repository/pull/12"
+      },
+      "explanation": "Finish a pull request a run left as a draft with an Open items section: a truncated refine that works on its open items (every one that is not a judgment_call, or those items names), in one fix round, pushes onto the same branch and marks each item resolved or still open, with its evidence, in the description. Environment items are re-checked by the run's check, never given to the builder; the approval gate is skipped when every item worked on is concrete and the design review passed; an item is resolved only on evidence, and every other line of the description is left as written."
     }
   ],
   "interfaces": {
@@ -834,11 +848,33 @@ Documentation: [refactory/docs/cli.md](../../../refactory/docs/cli.md)
       "required": false,
       "type": "string"
     },
+    "finish": {
+      "default": false,
+      "description": "with --refine: finish the pull request's Open items in one fix round",
+      "flags": [
+        "--finish"
+      ],
+      "nargs": 0,
+      "positional": false,
+      "required": false,
+      "type": "boolean"
+    },
     "generate": {
       "default": "",
       "description": "a command run in the worktree after dependencies are installed, before setup and each check; whatever it changes in tracked files is amended into the attempt. A generator that itself needs a build includes that build in its own command",
       "flags": [
         "--generate"
+      ],
+      "nargs": null,
+      "positional": false,
+      "required": false,
+      "type": "string"
+    },
+    "items": {
+      "default": "",
+      "description": "with --finish: the Open items to work on",
+      "flags": [
+        "--items"
       ],
       "nargs": null,
       "positional": false,
@@ -982,7 +1018,7 @@ Documentation: [refactory/docs/cli.md](../../../refactory/docs/cli.md)
     }
   },
   "purpose": "Build and check software from a brief and a check command, on its own branch in a git worktree: of the repository `target` names, or of a new project. Once its reviews pass it opens a pull request (a new project's private GitHub repository is created then), unless noPr. No reusable mode is required. Prefer wf_open default_pack/design with user gates.",
-  "reviewed_schema": "3ef0b8b154a559cefd20015bde750558aa5e267b2d8f3a0e5c1e99b9c8475c65"
+  "reviewed_schema": "8f4f591b73ac9b1a0a3a20b4484d07f7a372b526f025afef037caa956fe1d49c"
 }
 ```
 
@@ -2557,7 +2593,7 @@ Documentation: [refactory/docs/optimization-profiles.md](../../../refactory/docs
     },
     "parent_picker": {
       "default": null,
-      "description": "pair a parent picker (archive, evolutionary, islands, hill_climb, map_elites) with --optimizer: the picker chooses the candidate each step edits, the optimizer writes the edits (default: none)",
+      "description": "pair a parent picker (archive, evolutionary, islands, hill_climb, map_elites, pareto, or one a package contributes) with --optimizer: the picker chooses the candidate each step edits, the optimizer writes the edits; pareto keeps GEPA's per-item frontier of val (with selection pool, its default) and draws parents weighted by the val items each is best on (default: none)",
       "flags": [
         "--parent-picker"
       ],
@@ -2879,7 +2915,7 @@ Documentation: [refactory/docs/optimization-profiles.md](../../../refactory/docs
     }
   },
   "purpose": "Preview a scored mode\u2019s effective optimization settings, immutable contract and worker provenance without launching a search. The validation gate is on whenever the parts manifest has val items (there is no switch). The selection option (with the gate) is checkpoint, single or pool; empty picks checkpoint for the default loop with a single-parent optimizer and pool otherwise, and pool_size (8) sizes the pool. The omit_steering option leaves graph controls and correction audits active while excluding the ledger from candidate model prompts. Under single and pool the candidate the optimizer edits is re-scored on each epoch's train sample with that epoch's seed, unless it was scored this epoch, so its evidence is fresh; its id and scores stay. Every default-loop proposal is first run on two of its parent's train items (the smoke check): one that fails there with an error is refused (E-smoke) and goes to the repair call. One proposal may bundle up to 4 changes, applied in order as one candidate and judged once; a structural edit, the edits that connect it and the tuning of the steps that read its output count as one change, and no proposal carries more than 12 edits. The strategy_option option (KEY=VALUE, repeatable) adds to a profile's strategy_options, as knob adds to its knobs; a strategy option the strategy does not read, an unknown setting or a value of the wrong type is refused. The parent_picker option (empty by default) pairs a parent picker (archive, evolutionary, islands, hill_climb, map_elites) with the optimizer: the picker chooses the candidate each step edits and the optimizer writes the edits against it; under the validation gate a population picker selects by val score under the pool selection. The portfolio option (off by default; prompt+pipeline, with the autoresearch optimizer) asks the model proposer each round for one prompt/knob-level and one pipeline-level candidate and evaluates both; the report counts the evaluations beyond batch_size. The run_ledger, lessons and step_review options (on by default) show the model proposer every candidate of the run with what its edits did (its kind only a label) and train fixed/broken counts, the memory note a per-epoch memory pass writes (one optimizer-model call comparing the previous and current candidate on 20 train items, or the unchanged incumbent and the round's rejected change on the items it moved, SkillOpt's meta skill, shown to every analyst, merge and proposal call and kept across a resume), and a review of each step the last round added (one optimizer-model call per step); structure_guidance (off by default) adds what makes a new step pay off. The integrity_judge option (off by default) has one optimizer-model call per proposal ask whether its benefit depends on how the data, grader or environment happen to be built: on (or veto) refuses an exploit or suspect verdict about what the change adds before evaluation (E-integrity) in every category by default (never an inherited finding, a judge error or a salvaged reply), flag (or warn) only shows the verdicts; an object with mode, default and a per-category policy (off, warn, veto) sets categories one by one; a run's per-category setting comes first, then a Task's integrity_allowances (off), then the run's default, which overrides a Task's integrity_policy. The analysts option (off by default) runs SkillOpt's per-round analysis before each model proposal: failure and success analysts read the edited candidate's train items in full in batches of analyst_group_size (8), one optimizer-model call per batch, and merges of analyst_merge_batch_size (8) lists rank their findings into one list that replaces the readers' summaries; analyst_max_batches (0, no limit) caps the analyst calls per round, failure batches first.",
-  "reviewed_schema": "9825aeb6b704aec93246b3e995e2041c8415fa3309f02a1d910232d1cff403bf"
+  "reviewed_schema": "562ccd3eb3422eb973d1e41c3bae21bbe1521bdb5dccd911fceb0d27a2965112"
 }
 ```
 
@@ -4198,7 +4234,7 @@ Documentation: [refactory/docs/optimization-profiles.md](../../../refactory/docs
     },
     "parent_picker": {
       "default": null,
-      "description": "pair a parent picker (archive, evolutionary, islands, hill_climb, map_elites) with --optimizer: the picker chooses the candidate each step edits, the optimizer writes the edits (default: none)",
+      "description": "pair a parent picker (archive, evolutionary, islands, hill_climb, map_elites, pareto, or one a package contributes) with --optimizer: the picker chooses the candidate each step edits, the optimizer writes the edits; pareto keeps GEPA's per-item frontier of val (with selection pool, its default) and draws parents weighted by the val items each is best on (default: none)",
       "flags": [
         "--parent-picker"
       ],
@@ -4531,7 +4567,7 @@ Documentation: [refactory/docs/optimization-profiles.md](../../../refactory/docs
     }
   },
   "purpose": "Optimize a scored mode in a separate process; returns a durable run ID for status. Project defaults, profile and explicit settings resolve before launch. The omit_steering option leaves graph controls and correction audits active while excluding the ledger from candidate model prompts. The validation gate (on whenever the parts manifest has val items, with no switch; without val items the run selects on train scores and warns) selects on val, the last epoch's proposals are scored, and with a test part the final candidate's val check and the seed, best and final candidates' test scores are run and reported. With it, selection says how val selects: checkpoint (the default for the default loop with a single-parent optimizer: each round's change is applied unless its graph is broken -- refused, vetoed, failing its smoke check or its train run -- and only the applied candidate is scored on val, once; train rollouts use one seed for the run; the winner is the best checkpoint on val), single (SkillOpt's line: per-epoch train seeds, every candidate scored on val, the incumbent changes only on a strictly higher val score and is the only parent and the winner) or pool (the default otherwise: parents come from the pool_size, 8 by default, best candidates on val, ties at the edge kept). With it, early_stop_patience (0, off, by default) stops after that many epochs without a better best val score, and early_stop_at_full_val once the best val score is 1.0. The train_minibatch option (0, the whole train part, by default; it needs the validation gate) scores each epoch's candidates on that many train items sampled with the per-epoch seed, and the optimizer's evidence is that minibatch; val and test are not sampled. The allow_code_nodes option (on by default) lets an edit add a code node, an op or gate whose Python the optimizer writes, run sandboxed; off, or where the sandbox is unavailable, a new code node is refused (E-code-nodes). The new_step_tools option (on by default) lets a step an edit adds have tools, run sealed (only the files it reads, no network, no grader files); off, as an ablation, no tool step is offered and every new agent step with tools is refused (E-new-node-tools). Under single and pool the candidate the optimizer edits is re-scored on each epoch's train sample with that epoch's seed, unless it was scored this epoch, so its evidence is fresh; its id and scores stay. Every default-loop proposal is first run on two of its parent's train items (the smoke check): one that fails there with an error is refused (E-smoke) and goes to the repair call. One proposal may bundle up to 4 changes, applied in order as one candidate and judged once; a structural edit, the edits that connect it and the tuning of the steps that read its output count as one change, and no proposal carries more than 12 edits. The strategy_option option (KEY=VALUE, repeatable) adds to a profile's strategy_options, as knob adds to its knobs; a strategy option the strategy does not read, an unknown setting or a value of the wrong type is refused. The parent_picker option (empty by default) pairs a parent picker (archive, evolutionary, islands, hill_climb, map_elites) with the optimizer: the picker chooses the candidate each step edits and the optimizer writes the edits against it; under the validation gate a population picker selects by val score under the pool selection. The portfolio option (off by default; prompt+pipeline, with the autoresearch optimizer) asks the model proposer each round for one prompt/knob-level and one pipeline-level candidate and evaluates both; the report counts the evaluations beyond batch_size. The run_ledger, lessons and step_review options (on by default) show the model proposer every candidate of the run with what its edits did (its kind only a label) and train fixed/broken counts, the memory note a per-epoch memory pass writes (one optimizer-model call comparing the previous and current candidate on 20 train items, or the unchanged incumbent and the round's rejected change on the items it moved, SkillOpt's meta skill, shown to every analyst, merge and proposal call and kept across a resume), and a review of each step the last round added (one optimizer-model call per step); structure_guidance (off by default) adds what makes a new step pay off. The integrity_judge option (off by default) has one optimizer-model call per proposal ask whether its benefit depends on how the data, grader or environment happen to be built: on (or veto) refuses an exploit or suspect verdict about what the change adds before evaluation (E-integrity) in every category by default (never an inherited finding, a judge error or a salvaged reply), flag (or warn) only shows the verdicts; an object with mode, default and a per-category policy (off, warn, veto) sets categories one by one; a run's per-category setting comes first, then a Task's integrity_allowances (off), then the run's default, which overrides a Task's integrity_policy. The analysts option (off by default) runs SkillOpt's per-round analysis before each model proposal: failure and success analysts read the edited candidate's train items in full in batches of analyst_group_size (8), one optimizer-model call per batch, and merges of analyst_merge_batch_size (8) lists rank their findings into one list that replaces the readers' summaries; analyst_max_batches (0, no limit) caps the analyst calls per round, failure batches first.",
-  "reviewed_schema": "0d8ca2dd7060dc29dfdff12bbdfd1932e6020b6517cca105acfe16377e842c51"
+  "reviewed_schema": "da71c1dde4c94d8091b3f1510a1f76c295a64143bc0fb00b6bd7fef0a0732dcf"
 }
 ```
 
@@ -5299,6 +5335,16 @@ Documentation: [refactory/docs/cli.md](../../../refactory/docs/cli.md)
     {
       "arguments": {
         "check": "python -m pytest -q",
+        "finish": true,
+        "mode": "design",
+        "refine": "https://github.com/owner/repository/pull/12",
+        "what": "finish the pull request's open items"
+      },
+      "explanation": "Finish a pull request's Open items: a truncated refine (no research or strategy) that works on every open item that is not a judgment_call (--items id1,id2 to choose), gets one fix round, pushes onto the same branch and updates each item in the description as resolved or still open, with its evidence. It skips the approval gate when every item worked on is concrete and the design review passed, resolves an item only on evidence (its tests passed, or the QA judge confirmed it), and re-checks environment items with the run's check instead of giving them to the builder."
+    },
+    {
+      "arguments": {
+        "check": "python -m pytest -q",
         "mode": "design_fast",
         "target": "/path/to/repository",
         "what": "add a --json flag to the report command"
@@ -5367,6 +5413,17 @@ Documentation: [refactory/docs/cli.md](../../../refactory/docs/cli.md)
       "required": false,
       "type": "string"
     },
+    "finish": {
+      "default": false,
+      "description": "design only, with --refine: finish the pull request's Open items in one fix round and update them in its description; the approval gate is skipped when every item worked on is concrete",
+      "flags": [
+        "--finish"
+      ],
+      "nargs": 0,
+      "positional": false,
+      "required": false,
+      "type": "boolean"
+    },
     "generate": {
       "default": "",
       "description": "design and design_fast: a command run in the worktree after dependencies are installed, before setup and each check; whatever it changes in tracked files is amended into the attempt. A generator that itself needs a build includes that build in its own command",
@@ -5394,6 +5451,17 @@ Documentation: [refactory/docs/cli.md](../../../refactory/docs/cli.md)
       "description": "run a mode: what this run is for, in your words; authored runs take the brief itself as the intent",
       "flags": [
         "--intent"
+      ],
+      "nargs": null,
+      "positional": false,
+      "required": false,
+      "type": "string"
+    },
+    "items": {
+      "default": "",
+      "description": "with --finish: the Open items to work on (default: every open item that is not a judgment_call)",
+      "flags": [
+        "--items"
       ],
       "nargs": null,
       "positional": false,
@@ -5799,7 +5867,7 @@ Documentation: [refactory/docs/cli.md](../../../refactory/docs/cli.md)
     }
   },
   "purpose": "Run a named mode or author a package/artifact from a brief in the terminal; worker file defaults apply at preparation. CEO conversation and graph worker routes are distinct. Its run flags are the walker mains' own (python -m refactory_dsh.design, create, edit): the same knobs, route and limits either way; --verdict is an alias of --approve, and --attempts of the mode's attempts knob.",
-  "reviewed_schema": "84b6d35bf2c83341c9ac6e4624b606f4a8179e9ba2721d89275805cd8b5cf712"
+  "reviewed_schema": "13eb1f7f4a830574d922bf9dcba3ab8b7acea778745af4ecab9923bf2313c63d"
 }
 ```
 
@@ -6265,7 +6333,7 @@ Documentation: [refactory/docs/optimization-profiles.md](../../../refactory/docs
     },
     "optimizer": {
       "default": null,
-      "description": "how candidates are proposed: random, hill_climb, evolutionary, archive, islands, map_elites or autoresearch (default: autoresearch)",
+      "description": "how candidates are proposed: random, hill_climb, evolutionary, archive, islands, map_elites, pareto, autoresearch or one a package contributes (default: autoresearch)",
       "flags": [
         "--optimizer"
       ],
@@ -6400,7 +6468,7 @@ Documentation: [refactory/docs/optimization-profiles.md](../../../refactory/docs
     }
   },
   "purpose": "Search a scored mode through the terminal with profile/project defaults and explicit overrides; resume retains the saved run identity. The command line takes a short list of flags: mode, profile and profile_version, project, runs_root, resume, verbose, seed, epochs, batch_size, max_evaluations, optimizer, preset, evaluator, strategy, strategy_option, knob, intent, seed_results, max_items_in_flight, provider, model and effort. Every other setting is set only in a saved profile (profile-save, then profile); its flag is refused, naming the profile key. Profile settings: omit_steering leaves graph controls and correction audits active while excluding the ledger from candidate model prompts. The validation gate (on whenever the parts manifest has val items, with no switch; without val items the run selects on train scores and warns) selects on val, the last epoch's proposals are scored, and with a test part the final candidate's val check and the seed, best and final candidates' test scores are run and reported. With it, selection says how val selects: checkpoint (the default for the default loop with a single-parent optimizer: each round's change is applied unless its graph is broken -- refused, vetoed, failing its smoke check or its train run -- and only the applied candidate is scored on val, once; train rollouts use one seed for the run; the winner is the best checkpoint on val), single (SkillOpt's line: per-epoch train seeds, every candidate scored on val, the incumbent changes only on a strictly higher val score and is the only parent and the winner) or pool (the default otherwise: parents come from the pool_size, 8 by default, best candidates on val, ties at the edge kept). With it, early_stop_patience (0, off, by default) stops after that many epochs without a better best val score, and early_stop_at_full_val once the best val score is 1.0. The train_minibatch option (0, the whole train part, by default; it needs the validation gate) scores each epoch's candidates on that many train items sampled with the per-epoch seed, and the optimizer's evidence is that minibatch; val and test are not sampled. The allow_code_nodes option (on by default) lets an edit add a code node, an op or gate whose Python the optimizer writes, run sandboxed; off, or where the sandbox is unavailable, a new code node is refused (E-code-nodes). The new_step_tools option (on by default) lets a step an edit adds have tools, run sealed (only the files it reads, no network, no grader files); off, as an ablation, no tool step is offered and every new agent step with tools is refused (E-new-node-tools). Under single and pool the candidate the optimizer edits is re-scored on each epoch's train sample with that epoch's seed, unless it was scored this epoch, so its evidence is fresh; its id and scores stay. Every default-loop proposal is first run on two of its parent's train items (the smoke check): one that fails there with an error is refused (E-smoke) and goes to the repair call. One proposal may bundle up to 4 changes, applied in order as one candidate and judged once; a structural edit, the edits that connect it and the tuning of the steps that read its output count as one change, and no proposal carries more than 12 edits. The strategy_option option (KEY=VALUE, repeatable) adds to a profile's strategy_options, as knob adds to its knobs; a strategy option the strategy does not read, an unknown setting or a value of the wrong type is refused. The parent_picker option (empty by default) pairs a parent picker (archive, evolutionary, islands, hill_climb, map_elites) with the optimizer: the picker chooses the candidate each step edits and the optimizer writes the edits against it; under the validation gate a population picker selects by val score under the pool selection. The portfolio option (off by default; prompt+pipeline, with the autoresearch optimizer) asks the model proposer each round for one prompt/knob-level and one pipeline-level candidate and evaluates both; the report counts the evaluations beyond batch_size. The run_ledger, lessons and step_review options (on by default) show the model proposer every candidate of the run with what its edits did (its kind only a label) and train fixed/broken counts, the memory note a per-epoch memory pass writes (one optimizer-model call comparing the previous and current candidate on 20 train items, or the unchanged incumbent and the round's rejected change on the items it moved, SkillOpt's meta skill, shown to every analyst, merge and proposal call and kept across a resume), and a review of each step the last round added (one optimizer-model call per step); structure_guidance (off by default) adds what makes a new step pay off. The integrity_judge option (off by default) has one optimizer-model call per proposal ask whether its benefit depends on how the data, grader or environment happen to be built: on (or veto) refuses an exploit or suspect verdict about what the change adds before evaluation (E-integrity) in every category by default (never an inherited finding, a judge error or a salvaged reply), flag (or warn) only shows the verdicts; an object with mode, default and a per-category policy (off, warn, veto) sets categories one by one; a run's per-category setting comes first, then a Task's integrity_allowances (off), then the run's default, which overrides a Task's integrity_policy. The analysts option (off by default) runs SkillOpt's per-round analysis before each model proposal: failure and success analysts read the edited candidate's train items in full in batches of analyst_group_size (8), one optimizer-model call per batch, and merges of analyst_merge_batch_size (8) lists rank their findings into one list that replaces the readers' summaries; analyst_max_batches (0, no limit) caps the analyst calls per round, failure batches first.",
-  "reviewed_schema": "d03bd8e623195c33984d5ac6b816bd405d2cd1015a839aad01f92f2aa9f446e2"
+  "reviewed_schema": "c80cb1a7887d197e15bea609d8159f15d8cc4302d3ac2d1cce92b73aca08908e"
 }
 ```
 
@@ -9558,7 +9626,9 @@ Build a software artifact from a brief, name and acceptance command, as commits 
         "repo_owner",
         "repo_visibility",
         "refine",
-        "review_comments"
+        "review_comments",
+        "finish",
+        "finish_items"
       ],
       "notes": "read the brief and the command that decides whether it is done",
       "role": "ceo"
@@ -9664,7 +9734,7 @@ Build a software artifact from a brief, name and acceptance command, as commits 
       "id": "route_refine_design",
       "kind": "gate",
       "knobs": [],
-      "notes": "on a refine, skip research and strategy and go straight to design_doc",
+      "notes": "on a refine, skip research and strategy and go straight to design_doc; on a finish whose items are all concrete, answer gate_strategy proceed up front",
       "role": "ceo"
     },
     {
@@ -9964,6 +10034,30 @@ Build a software artifact from a brief, name and acceptance command, as commits 
       "default": "",
       "description": "system prompt for explore_code",
       "frozen": false,
+      "kind": "str",
+      "range": [
+        null,
+        null
+      ],
+      "value": "",
+      "values": []
+    },
+    "finish": {
+      "default": false,
+      "description": "with refine: a truncated refine that fixes the pull request's Open items, in one fix round, and updates them in its description (`refactory_dsh.finish`)",
+      "frozen": true,
+      "kind": "bool",
+      "range": [
+        null,
+        null
+      ],
+      "value": false,
+      "values": []
+    },
+    "finish_items": {
+      "default": "",
+      "description": "with finish: the ids of the Open items to work on, comma separated (default: every open item that is not a judgment_call)",
+      "frozen": true,
       "kind": "str",
       "range": [
         null,
@@ -10331,6 +10425,19 @@ Build a software artifact from a brief, name and acceptance command, as commits 
           "name": "report_format",
           "refine": "https://github.com/owner/repository/pull/12"
         }
+      },
+      {
+        "explanation": "Finish a pull request's Open items in one fix round, on its own branch, and update them in its description; its approval gate is answered for one visit when every item worked on is concrete and the design review passed.",
+        "knobs": {
+          "brief": "Finish the pull request's open items",
+          "check": "python -m pytest -q",
+          "check_attempt_cap": 0,
+          "check_attempts": 2,
+          "finish": true,
+          "name": "report_format",
+          "refine": "https://github.com/owner/repository/pull/12",
+          "self_check_fixups": 0
+        }
       }
     ],
     "interfaces": {
@@ -10339,7 +10446,7 @@ Build a software artifact from a brief, name and acceptance command, as commits 
       "panel": "Mode picker; Run once executes enabled modes including authoring; Optimize requires a scored mode. Use chat for stepwise gates."
     },
     "purpose": "Build a software artifact from a brief, name and acceptance command, as commits on the run's own branch in a git worktree: of the repository `target` names, or of a new project when it names none. Research, strategy and the design go straight to the approval gate, with no design reviewer: the design is written once to a light template (Summary, Changes, Tests), a claims check lists what it cannot confirm, and only a design with no ## Changes goes back for a rewrite (`design_review_attempts`, default 1); everything else is shown on the approval card. Before research, a bounded change sizer (`size_change`, 600 s, read only) reads the code the change touches, and the research footprint rule turns its verdict into the research scope, full unless the code proves it small; a lean research whose footprint reaches further is widened once at full scope, and both scales are on the approval card. A scoped change (a refine, or one whose research footprint is small) skips the perspectives step, and a refine skips the sizer, research and pitfalls too: its design starts from the pull request's description and diff. The builder works in a prepared clone of the last attempt (installs, setup and generate done), where it changes the code and runs the tests its change touches and the brief's own example (the full check runs beside the reviews in fork_qa); the clone's diff becomes the attempt. Every attempt \u2014 first or fix-up \u2014 runs only the tests the change touches in the self-check. The full check runs beside the three reviews, the verifier and the early asks judge in fork_qa. gate_check composes one send-back from check failures and early-asks findings without spending an attempt (`self_check_fixups` times an attempt; past that, failures stop the attempt and not-built items alone go on to the reviews, listed for the QA judge and Overwatch), a fix-up's self-check runs the last failures and what the fix-up changed within `self_check_timeout_s`, and a failure the base shares is inherited unless the brief or a correction names it. The command runs in that worktree beside the separate QA reviews (on the commit both see, running the full check beside them) and stays binding; a QA judge then reads the reviews and decides whether the build goes on or back, and Overwatch judges acceptance with an audit of the person's gate corrections as evidence (a correction given after the approval is applied to the design before the builder's next round, because every send-back to the builder goes through the corrections step, and Overwatch does not pass the change while one is unapplied); final current validation evidence is required. Only an ask, a correction, a failed health check or a critical or high defect sends the build back, and a correction Overwatch finds unmet always does; other findings are listed on the pull request as follow-ups. A judge whose verdict cannot be read is asked again once (`judge_rereads`), with no builder round. Once they pass, the branch is delivered as a pull request (into the branch its base came from, or the default branch), which the approval gate's question names first (`pr=0` keeps it local, with its pull request text in pull-request.md and finishing commands in delivery.json; `refine` updates an open one, rewriting only the sections delivery wrote in its description). When a limit stops the build (the check's, the reviews', all attempts', or refused emissions') at an applied commit with current check evidence, that commit is delivered as a draft pull request listing what is unresolved, marked [check failing] when its check fails. Before sizing, a code knowledge graph of the worktree is built in the background (on by default; `code_graph=0`, --no-graph, REFACTORY_CODE_GRAPH=0 or the \"code_graph\" object in refactory.workers.json turn it off) (graphify, outside the checkout; `code_graph_timeout_s` and `code_graph_max_files` bound the build), and before sizing a code explorer (`explore_code`, 600 s, read only) waits up to `code_graph_wait_s` for it, maps the code the brief names with `refactory graph query|explain|path` (or, without a graph, from the files) into graph-context.md, headed by which it was made from; the sizer (told to confirm it in the code), research, strategy, design and the builder read it, and may query the graph for more; design.json counts the queries per node.",
-    "reviewed_schema": "0d0b0663b5349d230a8140476bcb6513dfcd419064d4769ebcef146d27570901"
+    "reviewed_schema": "fcf5b46756a3420583349244586a3bf680c51938b40555b524e5d38d823edced"
   }
 }
 ```
@@ -14959,6 +15066,337 @@ solve a SpreadsheetBench 2 task with SkillOpt's Claude Code agent harness (the g
     },
     "purpose": "solve a SpreadsheetBench 2 task with SkillOpt's Claude Code agent harness (the graph of spreadsheetbench/agent): one sealed Claude Code session with Read and Bash, given SkillOpt's prompt and a task.md holding V2's instruction, input file and output path, writes solution.py, which is run on a copy of the input in the code sandbox; the output is recalculated by LibreOffice as V2's open_spreadsheet.py does and graded by V2's evaluation.py (1% tolerance, 99.8% of unchanged cells). Items are the 277 file-graded tasks of the prepared release, split by workbook/project (66 train, 38 val, 173 test). No gold feedback; no wall-clock or turn cap. Needs the claude_code worker in skip (bypassPermissions) mode, SB2_DATA (a prepared directory) and LibreOffice. The skill is the only unfrozen knob; the graph around it is editable too. Optimize only when scored; higher is better.",
     "reviewed_schema": "5ebf8a40be0067bbf492cf4e297d08d426124e6b498dd016c56912e0bcfb819c"
+  }
+}
+```
+
+## spreadsheetbench_v2/steps
+
+solve a SpreadsheetBench 2 task with V2's agent setup (as spreadsheetbench_v2/swe) split into its workflow's steps: inspect -> plan -> implement -> verify, four sealed Claude Code sessions with Bash, view_xlsx and LibreOffice on the PATH. Each step's prompt is V2's instance template with the workflow cut to its stages plus a section naming its files, and V2's system template appended; both are the step's own open knobs (<step>__task, <step>__system_prompt). Steps hand on inspect_notes.md, plan.md and output.xlsx; verify may correct output.xlsx, which is graded by V2's pipeline after the last step; no output.xlsx fails the item. Same 277 items and split as spreadsheetbench_v2/agent. Each step has the 50-turn cap, 60 s per Bash command and 10,000 characters of output shown; final.json records each step's turns and the total. The skill (one SKILL.md every step reads; empty by default) and the eight step texts are open knobs; the graph is editable too. A different starting point from V2's one session: baseline to be measured. Needs the claude_code worker in skip (bypassPermissions) mode, SB2_DATA, LibreOffice and Linux. Optimize only when scored; higher is better.
+
+```json
+{
+  "description": "solve a SpreadsheetBench 2 task with V2's agent setup split into its workflow's steps: four sealed Claude Code sessions (inspect, plan, implement, verify), each with its own prompt, hand on notes, a plan and output.xlsx",
+  "edges": [
+    {
+      "condition": "skip",
+      "source": "has_case",
+      "target": "finalize"
+    },
+    {
+      "condition": "proceed",
+      "source": "has_case",
+      "target": "inspect"
+    },
+    {
+      "condition": null,
+      "source": "implement",
+      "target": "verify"
+    },
+    {
+      "condition": null,
+      "source": "inspect",
+      "target": "plan"
+    },
+    {
+      "condition": null,
+      "source": "plan",
+      "target": "implement"
+    },
+    {
+      "condition": null,
+      "source": "prepare",
+      "target": "has_case"
+    },
+    {
+      "condition": null,
+      "source": "verify",
+      "target": "finalize"
+    }
+  ],
+  "gates": [
+    {
+      "id": "has_case",
+      "user": false
+    }
+  ],
+  "guidance": "Four sealed steps run in order -- inspect, plan, implement, verify -- each with its own prompt (<step>__task) and system prompt (<step>__system_prompt); they hand on inspect_notes.md, plan.md and output.xlsx, and the output.xlsx left after the last step is graded. The skill is one SKILL.md every step reads. The graph can be edited too (only data and finalize are protected). Keep every change general -- it must help on items no rollout saw.",
+  "id": "spreadsheetbench_v2/steps",
+  "nodes": [
+    {
+      "call": "",
+      "id": "data",
+      "kind": "data",
+      "knobs": [
+        "data_parallelism"
+      ],
+      "notes": "",
+      "role": "ceo"
+    },
+    {
+      "call": "refactory_packages.spreadsheetbench_v2.steps_ops:finalize",
+      "id": "finalize",
+      "kind": "op",
+      "knobs": [],
+      "notes": "take the last step's output.xlsx as the item's output",
+      "role": "ceo"
+    },
+    {
+      "call": "refactory_packages.spreadsheetbench.ops:has_case",
+      "gate_kind": "fn",
+      "id": "has_case",
+      "kind": "gate",
+      "knobs": [],
+      "notes": "an item with no test case skips the steps",
+      "role": "ceo"
+    },
+    {
+      "call": "",
+      "id": "implement",
+      "kind": "agent",
+      "knobs": [
+        "implement__task",
+        "implement__system_prompt",
+        "max_turns",
+        "bash_timeout_ms",
+        "bash_output_chars"
+      ],
+      "notes": "a sealed Claude Code session (Bash): the implement step, writes output.xlsx",
+      "role": "solver"
+    },
+    {
+      "call": "",
+      "id": "inspect",
+      "kind": "agent",
+      "knobs": [
+        "inspect__task",
+        "inspect__system_prompt",
+        "max_turns",
+        "bash_timeout_ms",
+        "bash_output_chars"
+      ],
+      "notes": "a sealed Claude Code session (Bash): the inspect step, writes inspect_notes.md",
+      "role": "solver"
+    },
+    {
+      "call": "",
+      "id": "plan",
+      "kind": "agent",
+      "knobs": [
+        "plan__task",
+        "plan__system_prompt",
+        "max_turns",
+        "bash_timeout_ms",
+        "bash_output_chars"
+      ],
+      "notes": "a sealed Claude Code session (Bash): the plan step, writes plan.md",
+      "role": "solver"
+    },
+    {
+      "call": "refactory_packages.spreadsheetbench_v2.steps_ops:prepare",
+      "id": "prepare",
+      "kind": "op",
+      "knobs": [
+        "skill"
+      ],
+      "notes": "record the item's start and lay the steps' workspace files",
+      "role": "ceo"
+    },
+    {
+      "call": "",
+      "id": "verify",
+      "kind": "agent",
+      "knobs": [
+        "verify__task",
+        "verify__system_prompt",
+        "max_turns",
+        "bash_timeout_ms",
+        "bash_output_chars"
+      ],
+      "notes": "a sealed Claude Code session (Bash): the verify step, writes verify_report.md, output.xlsx",
+      "role": "solver"
+    }
+  ],
+  "parameters": {
+    "bash_output_chars": {
+      "default": 10000,
+      "description": "the most of a command's output the model sees (V2's max_observation_length)",
+      "frozen": true,
+      "kind": "int",
+      "range": [
+        1,
+        null
+      ],
+      "value": 10000,
+      "values": []
+    },
+    "bash_timeout_ms": {
+      "default": 60000,
+      "description": "each Bash command's timeout in ms (V2's execution_timeout)",
+      "frozen": true,
+      "kind": "int",
+      "range": [
+        1,
+        null
+      ],
+      "value": 60000,
+      "values": []
+    },
+    "data_parallelism": {
+      "default": 8,
+      "description": "concurrent items",
+      "frozen": true,
+      "kind": "int",
+      "range": [
+        1,
+        64
+      ],
+      "value": 8,
+      "values": []
+    },
+    "implement__system_prompt": {
+      "default": "You are a helpful Spreadsheet Automation Engineer that interacts with a computer shell to solve data tasks.\nYou operate in a REPL (Read-Eval-Print Loop) environment where you must issue exactly ONE command at a time.",
+      "description": "text appended to Claude Code's system prompt for the implement step: V2's system template",
+      "frozen": false,
+      "kind": "str",
+      "range": [
+        null,
+        null
+      ],
+      "value": "You are a helpful Spreadsheet Automation Engineer that interacts with a computer shell to solve data tasks.\nYou operate in a REPL (Read-Eval-Print Loop) environment where you must issue exactly ONE command at a time.",
+      "values": []
+    },
+    "implement__task": {
+      "default": "<task_context>\n\n## Important\n- When completing spreadsheet tasks, strictly avoid altering any cells that already contain values unless explicitly instructed. Modify only the cells that are required for the task.\n- You need to complete the instructions and ensure that the original formatting is preserved as much as possible.\n\n## Tools\nYou are provided with four tools: `Bash`, `view_xlsx` and `submit`. You must use these tools to complete the target task.\n**Important: You can only call ONE tool at a time per response.**\n- `Bash`: run shell commands (e.g., file operations, calling Python scripts with `python3`)\n- `view_xlsx`: inspect `.xlsx` files (list sheets, view sheet contents, see original formulas and values); a command on your PATH: run it with `Bash`\n- `submit`: finalize and submit your solution after verification; to submit, end your turn with a short final reply (there is no `submit` command)\n\n## Environment\nYou can complete the corresponding spreadsheet tasks using the following Python environment:\n`Pandas`, `openpyxl`, `numpy` and `LibreOffice`\nYou can use these environments to manipulate the spreadsheet data.\n\n## Recommended Workflow\n3. **Implement**: Create a python script (e.g., `process_data.py`) that performs the edit.\n   - You can use `Bash` tool to write Python code directly, e.g., cat > /tmp/script.py << 'EOF' ... EOF), which can then be used to verify syntax correctness.\n\n4. **Execute**: Run the python script using `python3 /tmp/script.py`\n\n## This Step\nThis is step 3 of 4 (Implement and Execute). Read `inspect_notes.md` (the Inspect step's notes) and `plan.md` (the Plan step's plan), then write {{output_path}} from {{spreadsheet_path}} as planned. The next step verifies it. When {{output_path}} is written, end your turn with a short final reply.\n\n{{skill_section}}</task_context>\n\n<instructions>\n\n## Task instructions\nYou need to process a spreadsheet file based on specific instructions.\n**Instruction:** {{instruction}}\n\n## Input and Output\nYou are provided with an input spreadsheet file and you need to generate an output spreadsheet file based on the output_path.\n**Input File:** {{spreadsheet_path}}\n**Output Path:** {{output_path}}\n\n</instructions>",
+      "description": "the implement step's prompt: V2's instance template with its workflow cut to this step's stages",
+      "frozen": false,
+      "kind": "str",
+      "range": [
+        null,
+        null
+      ],
+      "value": "<task_context>\n\n## Important\n- When completing spreadsheet tasks, strictly avoid altering any cells that already contain values unless explicitly instructed. Modify only the cells that are required for the task.\n- You need to complete the instructions and ensure that the original formatting is preserved as much as possible.\n\n## Tools\nYou are provided with four tools: `Bash`, `view_xlsx` and `submit`. You must use these tools to complete the target task.\n**Important: You can only call ONE tool at a time per response.**\n- `Bash`: run shell commands (e.g., file operations, calling Python scripts with `python3`)\n- `view_xlsx`: inspect `.xlsx` files (list sheets, view sheet contents, see original formulas and values); a command on your PATH: run it with `Bash`\n- `submit`: finalize and submit your solution after verification; to submit, end your turn with a short final reply (there is no `submit` command)\n\n## Environment\nYou can complete the corresponding spreadsheet tasks using the following Python environment:\n`Pandas`, `openpyxl`, `numpy` and `LibreOffice`\nYou can use these environments to manipulate the spreadsheet data.\n\n## Recommended Workflow\n3. **Implement**: Create a python script (e.g., `process_data.py`) that performs the edit.\n   - You can use `Bash` tool to write Python code directly, e.g., cat > /tmp/script.py << 'EOF' ... EOF), which can then be used to verify syntax correctness.\n\n4. **Execute**: Run the python script using `python3 /tmp/script.py`\n\n## This Step\nThis is step 3 of 4 (Implement and Execute). Read `inspect_notes.md` (the Inspect step's notes) and `plan.md` (the Plan step's plan), then write {{output_path}} from {{spreadsheet_path}} as planned. The next step verifies it. When {{output_path}} is written, end your turn with a short final reply.\n\n{{skill_section}}</task_context>\n\n<instructions>\n\n## Task instructions\nYou need to process a spreadsheet file based on specific instructions.\n**Instruction:** {{instruction}}\n\n## Input and Output\nYou are provided with an input spreadsheet file and you need to generate an output spreadsheet file based on the output_path.\n**Input File:** {{spreadsheet_path}}\n**Output Path:** {{output_path}}\n\n</instructions>",
+      "values": []
+    },
+    "inspect__system_prompt": {
+      "default": "You are a helpful Spreadsheet Automation Engineer that interacts with a computer shell to solve data tasks.\nYou operate in a REPL (Read-Eval-Print Loop) environment where you must issue exactly ONE command at a time.",
+      "description": "text appended to Claude Code's system prompt for the inspect step: V2's system template",
+      "frozen": false,
+      "kind": "str",
+      "range": [
+        null,
+        null
+      ],
+      "value": "You are a helpful Spreadsheet Automation Engineer that interacts with a computer shell to solve data tasks.\nYou operate in a REPL (Read-Eval-Print Loop) environment where you must issue exactly ONE command at a time.",
+      "values": []
+    },
+    "inspect__task": {
+      "default": "<task_context>\n\n## Important\n- When completing spreadsheet tasks, strictly avoid altering any cells that already contain values unless explicitly instructed. Modify only the cells that are required for the task.\n- You need to complete the instructions and ensure that the original formatting is preserved as much as possible.\n\n## Tools\nYou are provided with four tools: `Bash`, `view_xlsx` and `submit`. You must use these tools to complete the target task.\n**Important: You can only call ONE tool at a time per response.**\n- `Bash`: run shell commands (e.g., file operations, calling Python scripts with `python3`)\n- `view_xlsx`: inspect `.xlsx` files (list sheets, view sheet contents, see original formulas and values); a command on your PATH: run it with `Bash`\n- `submit`: finalize and submit your solution after verification; to submit, end your turn with a short final reply (there is no `submit` command)\n\n## Environment\nYou can complete the corresponding spreadsheet tasks using the following Python environment:\n`Pandas`, `openpyxl`, `numpy` and `LibreOffice`\nYou can use these environments to manipulate the spreadsheet data.\n\n## Recommended Workflow\n1. **Inspect**: Use `view_xlsx` to inspect the data. This will allow you to understand the structure and contents of the spreadsheet.\n   - You must choose mode `list` or `content` to inspect the data.\n   - List all sheets: `view_xlsx {{spreadsheet_path}} list`\n   - View specific sheet: `view_xlsx {{spreadsheet_path}} content \"Sheet1\"`\n   - View row range: `view_xlsx {{spreadsheet_path}} content \"Sheet1\" 1 50`\n\n## This Step\nThis is step 1 of 4 (Inspect). Later steps plan, implement and verify the edit, each in a new session that starts from the files named here. Inspect the input and write your notes to `inspect_notes.md` in the working directory: the workbook's structure, the sheets and cells relevant to the instruction, and the conventions you see (formulas, formats, layout). Do not write {{output_path}}: a later step does. When the notes are written, end your turn with a short final reply.\n\n{{skill_section}}</task_context>\n\n<instructions>\n\n## Task instructions\nYou need to process a spreadsheet file based on specific instructions.\n**Instruction:** {{instruction}}\n\n## Input and Output\nYou are provided with an input spreadsheet file and you need to generate an output spreadsheet file based on the output_path.\n**Input File:** {{spreadsheet_path}}\n**Output Path:** {{output_path}}\n\n</instructions>",
+      "description": "the inspect step's prompt: V2's instance template with its workflow cut to this step's stages",
+      "frozen": false,
+      "kind": "str",
+      "range": [
+        null,
+        null
+      ],
+      "value": "<task_context>\n\n## Important\n- When completing spreadsheet tasks, strictly avoid altering any cells that already contain values unless explicitly instructed. Modify only the cells that are required for the task.\n- You need to complete the instructions and ensure that the original formatting is preserved as much as possible.\n\n## Tools\nYou are provided with four tools: `Bash`, `view_xlsx` and `submit`. You must use these tools to complete the target task.\n**Important: You can only call ONE tool at a time per response.**\n- `Bash`: run shell commands (e.g., file operations, calling Python scripts with `python3`)\n- `view_xlsx`: inspect `.xlsx` files (list sheets, view sheet contents, see original formulas and values); a command on your PATH: run it with `Bash`\n- `submit`: finalize and submit your solution after verification; to submit, end your turn with a short final reply (there is no `submit` command)\n\n## Environment\nYou can complete the corresponding spreadsheet tasks using the following Python environment:\n`Pandas`, `openpyxl`, `numpy` and `LibreOffice`\nYou can use these environments to manipulate the spreadsheet data.\n\n## Recommended Workflow\n1. **Inspect**: Use `view_xlsx` to inspect the data. This will allow you to understand the structure and contents of the spreadsheet.\n   - You must choose mode `list` or `content` to inspect the data.\n   - List all sheets: `view_xlsx {{spreadsheet_path}} list`\n   - View specific sheet: `view_xlsx {{spreadsheet_path}} content \"Sheet1\"`\n   - View row range: `view_xlsx {{spreadsheet_path}} content \"Sheet1\" 1 50`\n\n## This Step\nThis is step 1 of 4 (Inspect). Later steps plan, implement and verify the edit, each in a new session that starts from the files named here. Inspect the input and write your notes to `inspect_notes.md` in the working directory: the workbook's structure, the sheets and cells relevant to the instruction, and the conventions you see (formulas, formats, layout). Do not write {{output_path}}: a later step does. When the notes are written, end your turn with a short final reply.\n\n{{skill_section}}</task_context>\n\n<instructions>\n\n## Task instructions\nYou need to process a spreadsheet file based on specific instructions.\n**Instruction:** {{instruction}}\n\n## Input and Output\nYou are provided with an input spreadsheet file and you need to generate an output spreadsheet file based on the output_path.\n**Input File:** {{spreadsheet_path}}\n**Output Path:** {{output_path}}\n\n</instructions>",
+      "values": []
+    },
+    "max_turns": {
+      "default": 50,
+      "description": "each step's turn cap (V2's per_instance_call_limit, Claude Code's --max-turns)",
+      "frozen": true,
+      "kind": "int",
+      "range": [
+        1,
+        null
+      ],
+      "value": 50,
+      "values": []
+    },
+    "plan__system_prompt": {
+      "default": "You are a helpful Spreadsheet Automation Engineer that interacts with a computer shell to solve data tasks.\nYou operate in a REPL (Read-Eval-Print Loop) environment where you must issue exactly ONE command at a time.",
+      "description": "text appended to Claude Code's system prompt for the plan step: V2's system template",
+      "frozen": false,
+      "kind": "str",
+      "range": [
+        null,
+        null
+      ],
+      "value": "You are a helpful Spreadsheet Automation Engineer that interacts with a computer shell to solve data tasks.\nYou operate in a REPL (Read-Eval-Print Loop) environment where you must issue exactly ONE command at a time.",
+      "values": []
+    },
+    "plan__task": {
+      "default": "<task_context>\n\n## Important\n- When completing spreadsheet tasks, strictly avoid altering any cells that already contain values unless explicitly instructed. Modify only the cells that are required for the task.\n- You need to complete the instructions and ensure that the original formatting is preserved as much as possible.\n\n## Tools\nYou are provided with four tools: `Bash`, `view_xlsx` and `submit`. You must use these tools to complete the target task.\n**Important: You can only call ONE tool at a time per response.**\n- `Bash`: run shell commands (e.g., file operations, calling Python scripts with `python3`)\n- `view_xlsx`: inspect `.xlsx` files (list sheets, view sheet contents, see original formulas and values); a command on your PATH: run it with `Bash`\n- `submit`: finalize and submit your solution after verification; to submit, end your turn with a short final reply (there is no `submit` command)\n\n## Environment\nYou can complete the corresponding spreadsheet tasks using the following Python environment:\n`Pandas`, `openpyxl`, `numpy` and `LibreOffice`\nYou can use these environments to manipulate the spreadsheet data.\n\n## Recommended Workflow\n2. **Plan**: Decide how to manipulate the data using `openpyxl` or `LibreOffice`.\n\n## This Step\nThis is step 2 of 4 (Plan). The Inspect step's notes are in `inspect_notes.md`: read them first (you may also view {{spreadsheet_path}}). Write your plan to `plan.md` in the working directory: which cells to change and how. Do not write {{output_path}}: the next step implements your plan. When the plan is written, end your turn with a short final reply.\n\n{{skill_section}}</task_context>\n\n<instructions>\n\n## Task instructions\nYou need to process a spreadsheet file based on specific instructions.\n**Instruction:** {{instruction}}\n\n## Input and Output\nYou are provided with an input spreadsheet file and you need to generate an output spreadsheet file based on the output_path.\n**Input File:** {{spreadsheet_path}}\n**Output Path:** {{output_path}}\n\n</instructions>",
+      "description": "the plan step's prompt: V2's instance template with its workflow cut to this step's stages",
+      "frozen": false,
+      "kind": "str",
+      "range": [
+        null,
+        null
+      ],
+      "value": "<task_context>\n\n## Important\n- When completing spreadsheet tasks, strictly avoid altering any cells that already contain values unless explicitly instructed. Modify only the cells that are required for the task.\n- You need to complete the instructions and ensure that the original formatting is preserved as much as possible.\n\n## Tools\nYou are provided with four tools: `Bash`, `view_xlsx` and `submit`. You must use these tools to complete the target task.\n**Important: You can only call ONE tool at a time per response.**\n- `Bash`: run shell commands (e.g., file operations, calling Python scripts with `python3`)\n- `view_xlsx`: inspect `.xlsx` files (list sheets, view sheet contents, see original formulas and values); a command on your PATH: run it with `Bash`\n- `submit`: finalize and submit your solution after verification; to submit, end your turn with a short final reply (there is no `submit` command)\n\n## Environment\nYou can complete the corresponding spreadsheet tasks using the following Python environment:\n`Pandas`, `openpyxl`, `numpy` and `LibreOffice`\nYou can use these environments to manipulate the spreadsheet data.\n\n## Recommended Workflow\n2. **Plan**: Decide how to manipulate the data using `openpyxl` or `LibreOffice`.\n\n## This Step\nThis is step 2 of 4 (Plan). The Inspect step's notes are in `inspect_notes.md`: read them first (you may also view {{spreadsheet_path}}). Write your plan to `plan.md` in the working directory: which cells to change and how. Do not write {{output_path}}: the next step implements your plan. When the plan is written, end your turn with a short final reply.\n\n{{skill_section}}</task_context>\n\n<instructions>\n\n## Task instructions\nYou need to process a spreadsheet file based on specific instructions.\n**Instruction:** {{instruction}}\n\n## Input and Output\nYou are provided with an input spreadsheet file and you need to generate an output spreadsheet file based on the output_path.\n**Input File:** {{spreadsheet_path}}\n**Output Path:** {{output_path}}\n\n</instructions>",
+      "values": []
+    },
+    "skill": {
+      "default": "",
+      "description": "the skill, written to SKILL.md, which every step reads; empty, no prompt mentions it",
+      "frozen": false,
+      "kind": "str",
+      "range": [
+        null,
+        null
+      ],
+      "value": "",
+      "values": []
+    },
+    "verify__system_prompt": {
+      "default": "You are a helpful Spreadsheet Automation Engineer that interacts with a computer shell to solve data tasks.\nYou operate in a REPL (Read-Eval-Print Loop) environment where you must issue exactly ONE command at a time.",
+      "description": "text appended to Claude Code's system prompt for the verify step: V2's system template",
+      "frozen": false,
+      "kind": "str",
+      "range": [
+        null,
+        null
+      ],
+      "value": "You are a helpful Spreadsheet Automation Engineer that interacts with a computer shell to solve data tasks.\nYou operate in a REPL (Read-Eval-Print Loop) environment where you must issue exactly ONE command at a time.",
+      "values": []
+    },
+    "verify__task": {
+      "default": "<task_context>\n\n## Important\n- When completing spreadsheet tasks, strictly avoid altering any cells that already contain values unless explicitly instructed. Modify only the cells that are required for the task.\n- You need to complete the instructions and ensure that the original formatting is preserved as much as possible.\n\n## Tools\nYou are provided with four tools: `Bash`, `view_xlsx` and `submit`. You must use these tools to complete the target task.\n**Important: You can only call ONE tool at a time per response.**\n- `Bash`: run shell commands (e.g., file operations, calling Python scripts with `python3`)\n- `view_xlsx`: inspect `.xlsx` files (list sheets, view sheet contents, see original formulas and values); a command on your PATH: run it with `Bash`\n- `submit`: finalize and submit your solution after verification; to submit, end your turn with a short final reply (there is no `submit` command)\n\n## Environment\nYou can complete the corresponding spreadsheet tasks using the following Python environment:\n`Pandas`, `openpyxl`, `numpy` and `LibreOffice`\nYou can use these environments to manipulate the spreadsheet data.\n\n## Recommended Workflow\n5. **Verify**: Check the output file exists, ensure the answer is correct.\n   - Do NOT combine verify and submit commands (e.g., `python3 script.py && submit`). Run them separately to ensure verification is complete before submission.\n   - Ensure the existing structure, layout, and formatting of the model are preserved throughout the process.\n\n6. **Submit**: When verification is successful, submit: end your turn with a short final reply.\n\n## This Step\nThis is step 4 of 4 (Verify and Submit). {{output_path}} was written by the Implement step from `plan.md` (the Plan step's plan) and `inspect_notes.md` (the Inspect step's notes). Check it against the instruction and {{spreadsheet_path}}, recalculating with LibreOffice as needed, and correct {{output_path}} where it is wrong: it is graded as you leave it. Write what you checked and found to `verify_report.md` in the working directory, then submit.\n\n{{skill_section}}</task_context>\n\n<instructions>\n\n## Task instructions\nYou need to process a spreadsheet file based on specific instructions.\n**Instruction:** {{instruction}}\n\n## Input and Output\nYou are provided with an input spreadsheet file and you need to generate an output spreadsheet file based on the output_path.\n**Input File:** {{spreadsheet_path}}\n**Output Path:** {{output_path}}\n\n</instructions>",
+      "description": "the verify step's prompt: V2's instance template with its workflow cut to this step's stages",
+      "frozen": false,
+      "kind": "str",
+      "range": [
+        null,
+        null
+      ],
+      "value": "<task_context>\n\n## Important\n- When completing spreadsheet tasks, strictly avoid altering any cells that already contain values unless explicitly instructed. Modify only the cells that are required for the task.\n- You need to complete the instructions and ensure that the original formatting is preserved as much as possible.\n\n## Tools\nYou are provided with four tools: `Bash`, `view_xlsx` and `submit`. You must use these tools to complete the target task.\n**Important: You can only call ONE tool at a time per response.**\n- `Bash`: run shell commands (e.g., file operations, calling Python scripts with `python3`)\n- `view_xlsx`: inspect `.xlsx` files (list sheets, view sheet contents, see original formulas and values); a command on your PATH: run it with `Bash`\n- `submit`: finalize and submit your solution after verification; to submit, end your turn with a short final reply (there is no `submit` command)\n\n## Environment\nYou can complete the corresponding spreadsheet tasks using the following Python environment:\n`Pandas`, `openpyxl`, `numpy` and `LibreOffice`\nYou can use these environments to manipulate the spreadsheet data.\n\n## Recommended Workflow\n5. **Verify**: Check the output file exists, ensure the answer is correct.\n   - Do NOT combine verify and submit commands (e.g., `python3 script.py && submit`). Run them separately to ensure verification is complete before submission.\n   - Ensure the existing structure, layout, and formatting of the model are preserved throughout the process.\n\n6. **Submit**: When verification is successful, submit: end your turn with a short final reply.\n\n## This Step\nThis is step 4 of 4 (Verify and Submit). {{output_path}} was written by the Implement step from `plan.md` (the Plan step's plan) and `inspect_notes.md` (the Inspect step's notes). Check it against the instruction and {{spreadsheet_path}}, recalculating with LibreOffice as needed, and correct {{output_path}} where it is wrong: it is graded as you leave it. Write what you checked and found to `verify_report.md` in the working directory, then submit.\n\n{{skill_section}}</task_context>\n\n<instructions>\n\n## Task instructions\nYou need to process a spreadsheet file based on specific instructions.\n**Instruction:** {{instruction}}\n\n## Input and Output\nYou are provided with an input spreadsheet file and you need to generate an output spreadsheet file based on the output_path.\n**Input File:** {{spreadsheet_path}}\n**Output Path:** {{output_path}}\n\n</instructions>",
+      "values": []
+    }
+  },
+  "ports": [],
+  "scored": true,
+  "usage": {
+    "doc": "refactory/docs/spreadsheetbench.md",
+    "examples": [
+      {
+        "explanation": "Solve SpreadsheetBench 2 tasks with V2's agent setup split into its workflow's steps: four sealed Claude Code sessions per item (inspect, plan, implement, verify), each with Claude Code's Bash, view_xlsx and LibreOffice on its PATH and its own prompt; they hand on inspect_notes.md, plan.md and output.xlsx, and the output.xlsx left after verify is graded by V2's pipeline. Route it to the claude_code worker in skip (bypassPermissions) mode. Prepare the release once with python -m refactory_packages.spreadsheetbench_v2.prepare prepare SOURCE OUT then python -m refactory_packages.spreadsheetbench_v2.prepare check --grades OUT (required), and set SB2_DATA to OUT; LibreOffice must be installed (or named by SB_SOFFICE). Linux only (the sessions get a /tmp of their own).",
+        "knobs": {
+          "bash_output_chars": 10000,
+          "bash_timeout_ms": 60000,
+          "data_parallelism": 8,
+          "max_turns": 50
+        }
+      }
+    ],
+    "interfaces": {
+      "chat": "wf_open mode=spreadsheetbench_v2/steps; use refactory help topic=spreadsheetbench_v2/steps first",
+      "cli": "refactory ceo spreadsheetbench_v2/steps",
+      "panel": "Mode picker; Run once executes enabled modes including authoring; Optimize requires a scored mode. Use chat for stepwise gates."
+    },
+    "purpose": "solve a SpreadsheetBench 2 task with V2's agent setup (as spreadsheetbench_v2/swe) split into its workflow's steps: inspect -> plan -> implement -> verify, four sealed Claude Code sessions with Bash, view_xlsx and LibreOffice on the PATH. Each step's prompt is V2's instance template with the workflow cut to its stages plus a section naming its files, and V2's system template appended; both are the step's own open knobs (<step>__task, <step>__system_prompt). Steps hand on inspect_notes.md, plan.md and output.xlsx; verify may correct output.xlsx, which is graded by V2's pipeline after the last step; no output.xlsx fails the item. Same 277 items and split as spreadsheetbench_v2/agent. Each step has the 50-turn cap, 60 s per Bash command and 10,000 characters of output shown; final.json records each step's turns and the total. The skill (one SKILL.md every step reads; empty by default) and the eight step texts are open knobs; the graph is editable too. A different starting point from V2's one session: baseline to be measured. Needs the claude_code worker in skip (bypassPermissions) mode, SB2_DATA, LibreOffice and Linux. Optimize only when scored; higher is better.",
+    "reviewed_schema": "6f1603a7836c6a4cd60bd3a48cc83d7ace374908e1c000cbd63a0e8f074e9678"
   }
 }
 ```

@@ -235,6 +235,14 @@ def knobs() -> dict[str, Knob]:
         "review_comments": Knob(False, "bool", frozen=True,
                                 description="with refine: add the pull request's reviews and comments to "
                                             "the run's steering"),
+        "finish": Knob(False, "bool", frozen=True,
+                       description="with refine: a truncated refine that fixes the pull request's Open "
+                                   "items, in one fix round, and updates them in its description "
+                                   "(`refactory_dsh.finish`)"),
+        "finish_items": Knob("", "str", frozen=True,
+                             description="with finish: the ids of the Open items to work on, comma "
+                                         "separated (default: every open item that is not a "
+                                         "judgment_call)"),
     }
 
 
@@ -1115,6 +1123,19 @@ def _deliver(ctx: Any, found: worktree.Worktree, planned: dict[str, Any], *,
 
     if merge.merge_commit:
         merge.check_reused = reusable_check(ctx, path, merge.merge_commit)
+    elif (not merge.conflicts and not merge.abandoned and not merge.infrastructure
+          and whole_suite_owed(ctx, path, reviewed_commit)):
+        # Nothing to merge, but the reviewed commit's check deselected what its self-check
+        # had passed: the whole suite runs once here, so the check stays binding (an
+        # order-dependent failure, a file only the run's worktree had).
+        check_failure, infra_flag = _check_merged(ctx, found, reviewed_commit, reviewed_commit,
+                                                   check_timeout_s, target_tip=found.base)
+        if check_failure:
+            if infra_flag:
+                raise ValueError(
+                    f"delivery stopped: infrastructure failure in the whole check: {check_failure}"
+                )
+            merge = MergeResult(check_failed=check_failure)
     if merge.merge_commit and not merge.check_reused:
         check_failure, infra_flag = _check_merged(ctx, found, merge.merge_commit, reviewed_commit,
                                                    check_timeout_s,
@@ -1319,10 +1340,24 @@ def _describe(ctx: Any, url: str, draft_delivery: dict[str, Any] | None) -> str:
                          "draft")
     body = (_with_draft_section(body, draft_delivery, state) if draft_delivery
             else _without_draft_section(body))
+    from refactory_dsh import finish
+
+    finishing = finish.fact(ctx)
+    if finishing is not None:
+        # A finish brings the description's Open items up to this run, markers or not: each
+        # item it worked on or re-checked is resolved or still open, with the evidence.
+        body = finish.update_body(body, finishing, finish.results(ctx, finishing, draft=draft_delivery))
     if legacy:
-        notes.append(f"the description of {url} was not updated: it has no delivery markers, so "
-                     + ("its text is kept as written, with the draft's section put above it"
-                        if draft_delivery else "all of it is kept as written"))
+        kept = ("its text is kept as written, with the draft's section put above it"
+                if draft_delivery else "all of it is kept as written")
+        if finishing is not None:
+            # A finish's results go into the Open items with or without delivery's markers.
+            kept = ("its text is kept as written" + (", with the draft's section put above it"
+                                                     if draft_delivery else "")
+                    + ", but for the results this finish added to its Open items")
+        what = (f"the sections delivery writes in the description of {url} were" if finishing is not None
+                else f"the description of {url} was")
+        notes.append(f"{what} not updated: it has no delivery markers, so {kept}")
     if body != old_body:
         sent = Path(ctx.workdir) / BODY
         sent.write_text(body)
@@ -1719,6 +1754,29 @@ def record_full_check(ctx: Any, path: Path, command: str) -> None:
     ledger.write_text(json.dumps(passed, indent=2) + "\n")
 
 
+#: The commits whose full check deselected the self-check's passes
+#: (`design_ops._full_check`): none of them stands for delivery's check. In the run
+#: directory, beside `PASSED_CHECKS`.
+DESELECTED_CHECKS = Path(".refactory") / "deselected-checks.json"
+
+
+def record_deselected_check(ctx: Any, commit: str) -> None:
+    """Note that ``commit``'s full check ran without what its self-check had passed."""
+    ledger = Path(ctx.workdir) / DESELECTED_CHECKS
+    known = list(worktree._json(ledger).get("commits") or [])
+    if commit and commit not in known:
+        ledger.parent.mkdir(parents=True, exist_ok=True)
+        ledger.write_text(json.dumps({"commits": [*known, commit]}, indent=1) + "\n")
+
+
+def whole_suite_owed(ctx: Any, path: Path, commit: str) -> bool:
+    """Whether delivery must run the whole check on ``commit``: its full check deselected
+    the self-check's passes, and no whole run of the suite on its tree passed since
+    (`reusable_check`)."""
+    known = worktree._json(Path(ctx.workdir) / DESELECTED_CHECKS).get("commits") or []
+    return commit in known and not reusable_check(ctx, path, commit)
+
+
 def reusable_check(ctx: Any, path: Path, commit: str) -> str:
     """The commit whose passing full check covers ``commit``'s tree, or ``""``.
 
@@ -1814,8 +1872,15 @@ def _check_merged(ctx: Any, found: worktree.Worktree, merge_commit: str,
     if not check:
         return "", False
 
-    result = sandbox.run_command(check, workdir=path, timeout_s=check_timeout_s, budget=budget,
-                                 env=env, home=home, exact_env=True)
+    from refactory_dsh import base_check
+
+    # Once, step by step when the check is a chain (`base_check.run_chain`): whether every
+    # step ran, and what each said, comes from this run.
+    result, steps = base_check.run_chain(
+        check, lambda script: sandbox.run_command(script, workdir=path, timeout_s=check_timeout_s,
+                                                  budget=budget, env=env, home=home,
+                                                  exact_env=True),
+        base_check._roots((path, "<root>"), (home, "<home>")))
     if result.ok:
         record_full_check(ctx, path, check)
         return "", False
@@ -1825,7 +1890,7 @@ def _check_merged(ctx: Any, found: worktree.Worktree, merge_commit: str,
     if target_tip:
         output = "\n".join((result.stdout or "", result.stderr or "")).strip()
         not_excused = _merged_excusal(ctx, found, path, env, home, check, output,
-                                      merge_commit, target_tip, check_timeout_s)
+                                      merge_commit, target_tip, check_timeout_s, steps=steps)
         if not not_excused:
             record_full_check(ctx, path, check)
             return "", False
@@ -1837,7 +1902,7 @@ def _check_merged(ctx: Any, found: worktree.Worktree, merge_commit: str,
 
 def _merged_excusal(ctx: Any, found: worktree.Worktree, path: Path, env: dict[str, str],
                     home: Path, check: str, output: str, merge_commit: str, target_tip: str,
-                    timeout: float) -> str:
+                    timeout: float, *, steps: list[dict] | None = None) -> str:
     """Why the merged result's failed check is not excused; empty when it is.
 
     The merged result passes only when every failure its output counts is named and
@@ -1846,15 +1911,21 @@ def _merged_excusal(ctx: Any, found: worktree.Worktree, path: Path, env: dict[st
     does not fail it again -- and nothing went unrun: `base_check.excusal_blocker` finds
     nothing (the runner's summary counts exactly the named failures, the last step is
     a test runner that did not stop at its first failure), and the chain ran every step
-    (`base_check.chain_incomplete`). Anything else is the check failing, so delivery
-    stays binding: a draft, or no push.
+    (`base_check.chain_incomplete`). For a chain, ``steps`` are the records of its one
+    run, step by step, and each failing step is held to that rule
+    (`base_check.steps_blocker`). Anything else is the check failing, so delivery stays
+    binding: a draft, or no push.
     """
-    from refactory_dsh import base_check, sandbox
+    from refactory_dsh import base_check
 
     failures = base_check.parse_test_failures(output)
     if not failures:
         return "no failing test could be read, so nothing is excused"
-    blocker = base_check.excusal_blocker(check, output, failures)
+    incomplete = base_check.chain_incomplete(check, steps)
+    if incomplete:
+        return f"not excused: {incomplete}"
+    blocker = (base_check.steps_blocker(steps) if steps is not None
+               else base_check.excusal_blocker(check, output, failures))
     if blocker:
         return f"not excused: {blocker}"
     t_result, _source = base_check.targeted_base_failures(
@@ -1892,13 +1963,6 @@ def _merged_excusal(ctx: Any, found: worktree.Worktree, path: Path, env: dict[st
     if not jr.all_excused:
         return "charged: " + ", ".join(
             f"{tid} ({jr.reasons.get(tid, 'new-failure')})" for tid in sorted(jr.charged))
-    incomplete = base_check.chain_incomplete(
-        check, lambda script: sandbox.run_command(
-            script, workdir=path, timeout_s=timeout, budget=getattr(ctx, "budget", None),
-            env=env, home=home, exact_env=True),
-        base_check._roots((path, "<root>"), (home, "<home>")))
-    if incomplete:
-        return f"not excused: {incomplete}"
     return ""
 
 
@@ -2430,6 +2494,11 @@ def _body(ctx: Any, found: worktree.Worktree, *, merge: MergeResult | None = Non
     if corrections:
         sections.append("## Corrections given at approval\n\n"
                         + "\n".join(f"- {item}" for item in corrections))
+    from refactory_dsh import finish
+
+    finishing = finish.fact(ctx)
+    if finishing is not None:
+        sections.append(_public(finish.pr_section(ctx, finishing, draft=draft_fact(ctx))))
     return f"{BODY_START}\n" + _unmarked("\n\n".join(sections)) + f"\n{BODY_END}\n"
 
 
@@ -2504,8 +2573,8 @@ def evaluate_delivery_conflicts(ctx: Any) -> "Verdict | str":
     if not target_tip:
         raise ValueError("delivery_gate: delivery_conflict_files set but delivery_target_tip missing")
 
-    # ── Bound the loop by check_attempts ──
-    allowed = int(ctx.knob("check_attempts", 3))
+    # ── Bound the loop by check_attempts, and a finish run by its one fix round ──
+    allowed = _conflict_reloops_allowed(ctx)
     used = int(ctx.facts.get("delivery_conflict_reloops", 0)) + 1
     ctx.set_fact("delivery_conflict_reloops", used)
     if used > allowed:
@@ -2525,7 +2594,22 @@ def evaluate_delivery_conflicts(ctx: Any) -> "Verdict | str":
     # excerpt of the hunks, never the files.
     description = _conflict_description(target_tip, conflict_files, detail)
     ctx.set_fact("validation", description)
-    return Verdict("reloop", description)
+    from refactory_dsh import finish
+
+    return finish.sent_back(ctx, Verdict("reloop", description))
+
+
+def _conflict_reloops_allowed(ctx: Any) -> int:
+    """How many times a conflict with the base goes back to the builder: ``check_attempts``,
+    and on a finish run one more than it has gone back only while the run's one fix round
+    is unspent (`finish.allows_round`)."""
+    from refactory_dsh import finish
+
+    allowed = int(ctx.knob("check_attempts", 3))
+    if finish.fact(ctx) is None:
+        return allowed
+    used = int(ctx.facts.get("delivery_conflict_reloops", 0) or 0)
+    return min(allowed, used + (1 if finish.allows_round(ctx) else 0))
 
 
 def _abort_pending_merge(ctx: Any) -> None:
@@ -2582,7 +2666,7 @@ def _conflict_budget_spent(ctx: Any, refused: NotDelivered,
     if draft_delivery is not None or merge is None or not merge.conflicts:
         return None
     used = int(ctx.facts.get("delivery_conflict_reloops", 0))
-    if used < int(ctx.knob("check_attempts", 3)):
+    if used < _conflict_reloops_allowed(ctx):
         return None
     files = ", ".join(merge.conflicts)
     return {"reason": f"delivered as draft: unresolved conflict with the base in {files}, after "

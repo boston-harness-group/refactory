@@ -422,32 +422,79 @@ def _without_errexit(step: str) -> str | None:
     return shlex.join(kept) if len(kept) > 1 else ":"
 
 
+def _errexit_change(step: str) -> bool | None:
+    """Whether a ``set`` step turns errexit on (True) or off (False); None when it leaves it."""
+    try:
+        words = shlex.split(step)
+    except ValueError:
+        return None
+    if not words or words[0] != "set":
+        return None
+    change: bool | None = None
+    i = 1
+    while i < len(words):
+        word = words[i]
+        if word in ("-", "--") or not word.startswith(("-", "+")):
+            break
+        letters = word[1:]
+        if "e" in letters.replace("o", ""):
+            change = word[0] == "-"
+        if letters.endswith("o") and i + 1 < len(words):
+            if words[i + 1] == "errexit":
+                change = word[0] == "-"
+            i += 1
+        i += 1
+    return change
+
+
 def _build_marker_script(steps: list[tuple[str, str]], marker_id: str) -> str:
     """A shell script that runs the chain's steps in one shell, each followed by a marker.
 
-    It begins with ``exec 2>&1``, so each step's output includes what it printed to
-    stderr (runners print summaries and errors there). A step after ``&&`` runs even
-    when the chain has failed by then -- running what ``&&`` skips is the point -- but
-    it leaves the chain's status as the shell would have it. A step after ``||`` runs
-    only when the shell would run it, on the chain's status so far, not only on the
-    previous step's exit: with ``a || b || c`` and ``a`` passing, neither ``b`` nor
-    ``c`` runs, and its marker says so. A ``set`` step runs without errexit
-    (`_without_errexit`), its other options kept.
+    It is how a chained check runs from the start (`chain_plan`), so each step's result is
+    known from that one run. It begins with ``exec 2>&1``, so each step's output includes
+    what it printed to stderr (runners print summaries and errors there). A step after
+    ``&&`` runs even when the chain has failed by then -- so the later steps' results
+    exist without a second run -- but it leaves the chain's status as the shell would
+    have it. A step after ``||`` runs only when the shell would run it, on the chain's
+    status so far, not only on the previous step's exit: with ``a || b || c`` and ``a``
+    passing, neither ``b`` nor ``c`` runs, and its marker says so. A ``set`` step runs
+    without errexit (`_without_errexit`), its other options kept; each step sees ``$?`` as
+    the shell would give it (the chain's status so far); and the script keeps the shell's
+    errexit rule itself: once a list (the steps up to a ``;``) ends on a
+    failure of its last step while errexit is on, the chain's status is that failure,
+    whatever the later steps do. The script exits with the chain's status, the exit the
+    command itself would have had.
     """
-    status, code = "__refactory_status", "__refactory_exit"
-    lines = ["exec 2>&1", f"{status}=0"]
+    status, code, would = "__refactory_status", "__refactory_exit", "__refactory_would"
+    last, stop, errexit = "__refactory_last", "__refactory_stop", "__refactory_errexit"
+    ret = "__refactory_ret"
+    lines = ["exec 2>&1", f'{ret}() {{ return "$1"; }}', f"{status}=0", f"{last}=-1", f"{stop}=0",
+             f"{errexit}=0"]
     for idx, (step_text, operator) in enumerate(steps):
+        change = _errexit_change(step_text)
         # errexit would end the shell at the first failing step, before the later markers.
-        step_text = _without_errexit(step_text) or step_text
+        # The bookkeeping between steps overwrites ``$?``: each step gets back the status
+        # the shell would give it, the chain's so far (``pytest || [ $? -eq 5 ]``).
+        step_text = f'{ret} "${status}"\n' + (_without_errexit(step_text) or step_text)
         mark = f"___REFACTORY_STEP_{marker_id}_{idx}_"
         record = f"{code}=$?; echo '{mark}EXIT_'${code}"
         if operator == "||":
-            lines += [f'if [ "${status}" -ne 0 ]; then', step_text, record,
-                      f"{status}=${code}", f"else echo '{mark}SKIPPED'; fi"]
+            lines += [f'if [ "${status}" -ne 0 ]; then {would}=1', step_text, record,
+                      f"else echo '{mark}SKIPPED'; {would}=0; fi"]
         elif operator == "&&":
-            lines += [step_text, record, f'if [ "${status}" -eq 0 ]; then {status}=${code}; fi']
+            lines += [f'if [ "${status}" -eq 0 ]; then {would}=1; else {would}=0; fi',
+                      step_text, record]
         else:
-            lines += [step_text, record, f"{status}=${code}"]
+            lines += [f"{would}=1", step_text, record]
+        # Whether the shell would have run it: only then is its exit the chain's status.
+        live = f'[ "${stop}" -eq 0 ] && [ "${would}" -eq 1 ]'
+        lines.append(f"if {live}; then {status}=${code}; {last}={idx}; fi")
+        if change is not None:
+            lines.append(f'if {live} && [ "${code}" -eq 0 ]; then {errexit}={int(change)}; fi')
+        if idx + 1 == len(steps) or steps[idx + 1][1] == ";":
+            lines.append(f'if [ "${stop}" -eq 0 ] && [ "${errexit}" -eq 1 ] '
+                         f'&& [ "${status}" -ne 0 ] && [ "${last}" -eq {idx} ]; then {stop}=1; fi')
+    lines.append(f'exit "${status}"')
     return "\n".join(lines)
 
 
@@ -532,12 +579,79 @@ def _run_chain_markers(
 
     ``run`` runs a script where the side being compared runs its check, and returns
     its `sandbox.SandboxResult`; ``roots`` are that side's own paths (`_signature`).
-    Returns ``None``, with a warning, when the per-step
-    results cannot be read: a timeout, a signal crash, or markers missing (the kept
-    output was cut, or a step ended the shell).
+    Returns ``None``, with a warning, when the per-step results cannot be read
+    (`read_chain_run`).
     """
     marker_id = uuid.uuid4().hex[:12]
-    result = run(_build_marker_script(steps, marker_id))
+    plan = ChainPlan(steps=steps, marker_id=marker_id,
+                     script=_build_marker_script(steps, marker_id))
+    return read_chain_run(run(plan.script), plan, roots)
+
+
+@dataclass
+class ChainPlan:
+    """How a chained check runs: its steps, and the marker script that runs them (`chain_plan`)."""
+    steps: list[tuple[str, str]]
+    marker_id: str
+    script: str
+
+
+def chain_plan(command: str) -> ChainPlan | None:
+    """The marker script a chained ``command`` runs as, from its first run; None when it
+    runs as written.
+
+    A command of two or more steps that `_chain_steps` can tell apart runs through
+    `_build_marker_script`, so its one run gives each step's result (`read_chain_run`)
+    and nothing has to run again to learn which step failed. One step, or steps that
+    cannot be told apart, run as written.
+    """
+    reason: list[str] = []
+    chain = chain_plan_steps(command, reason)
+    if chain is None:
+        if reason:
+            target_guard.warn(f"the check's chain is not split into steps: {reason[0]}")
+        return None
+    marker_id = uuid.uuid4().hex[:12]
+    return ChainPlan(steps=chain, marker_id=marker_id,
+                     script=_build_marker_script(chain, marker_id))
+
+
+def chain_plan_steps(command: str, reason: list[str] | None = None
+                     ) -> list[tuple[str, str]] | None:
+    """The steps `chain_plan` runs ``command`` as, or None when it runs as written."""
+    if len(_steps(command)) <= 1:
+        return None
+    chain = _chain_steps(command, reason=reason)
+    return chain if chain is not None and len(chain) > 1 else None
+
+
+def _strip_markers(text: str, marker_id: str) -> str:
+    """``text`` without the marker lines `_build_marker_script` prints."""
+    pattern = re.compile(r"___REFACTORY_STEP_" + re.escape(marker_id)
+                         + r"_\d+_(?:EXIT_\d+|SKIPPED)\n?")
+
+    def drop(match: re.Match[str]) -> str:
+        # A marker after output that did not end its line ends that line itself.
+        at_line_start = match.start() == 0 or text[match.start() - 1] == "\n"
+        return "" if at_line_start or not match.group(0).endswith("\n") else "\n"
+
+    return pattern.sub(drop, text)
+
+
+def read_chain_run(result: Any, plan: ChainPlan,
+                   roots: list[tuple[str, str]] = ()  # type: ignore[assignment]
+                   ) -> list[dict] | None:
+    """The per-step records of ``result``, a run of ``plan.script``; None, with a warning,
+    when they cannot be read: a timeout, a signal crash, or markers missing (the kept
+    output was cut, or a step ended the shell). The marker lines are taken out of the
+    result's output either way, so what the check printed reads as the command's own."""
+    stdout = "\n".join((result.stdout or "", result.stderr or "")).strip()
+    parsed = None if result.timed_out else _parse_step_results(stdout, plan.marker_id, plan.steps)
+    try:
+        result.stdout = _strip_markers(result.stdout or "", plan.marker_id)
+        result.stderr = _strip_markers(result.stderr or "", plan.marker_id)
+    except AttributeError:  # pragma: no cover -- a frozen result keeps its markers
+        pass
     if result.timed_out:
         target_guard.warn("the chain's per-step run timed out; its steps cannot be compared")
         return None
@@ -545,14 +659,27 @@ def _run_chain_markers(
     if crashed:
         target_guard.warn(f"the chain's per-step run was {signal_name}; its steps cannot be compared")
         return None
-    stdout = "\n".join((result.stdout or "", result.stderr or "")).strip()
-    parsed = _parse_step_results(stdout, marker_id, steps)
     if parsed is None:
-        found = len(re.findall(r'___REFACTORY_STEP_' + re.escape(marker_id) + r'_', stdout))
+        found = len(re.findall(r'___REFACTORY_STEP_' + re.escape(plan.marker_id) + r'_', stdout))
         target_guard.warn(f"the chain's per-step results could not be read: {found} of "
-                          f"{len(steps)} step markers in its kept output")
+                          f"{len(plan.steps)} step markers in its kept output")
         return None
     return [_step_record(sr, roots) for sr in parsed]
+
+
+def run_chain(command: str, run: Callable[[str], Any],
+              roots: list[tuple[str, str]] = ()  # type: ignore[assignment]
+              ) -> tuple[Any, list[dict] | None]:
+    """Run ``command`` once through ``run``, as its marker script when it is a chain
+    (`chain_plan`): ``(result, steps)``, where ``steps`` are the per-step records, None
+    for a command that runs as written or whose steps could not be read. The result's
+    exit is the command's own (`_build_marker_script`), and its output is the command's,
+    each step's after the one before."""
+    plan = chain_plan(command)
+    if plan is None:
+        return run(command), None
+    result = run(plan.script)
+    return result, read_chain_run(result, plan, roots)
 
 
 def _runner(step: str) -> str | None:
@@ -600,34 +727,183 @@ def _accounted(runner: str, output: str, failures: set[str]) -> bool:
     return int(tests[-1]) == len(failures) and (not files or int(files[-1]) <= len(named_files))
 
 
-def chain_incomplete(command: str, run: Callable[[str], Any],
-                     roots: list[tuple[str, str]] = ()) -> str | None:  # type: ignore[assignment]
+#: The most bytes of ``--deselect`` arguments `with_deselected` adds: the whole command is
+#: one argument to the shell, which Linux caps at 128 KiB.
+DESELECT_LIMIT_BYTES = 64 * 1024
+
+
+def plain_pytest_step(command: str) -> tuple[list[tuple[str, str]], int] | None:
+    """``command``'s steps and the index of its one pytest step, when it has exactly one and
+    that step is one plain command -- no pipe, redirection, background, substitution or
+    second line -- so arguments added to it reach pytest itself; else None."""
+    steps = _chain_steps(command) if len(_steps(command)) > 1 else [(command.strip(), "")]
+    if not steps:
+        return None
+    pytest_steps = [index for index, (step, _) in enumerate(steps) if _runner(step) == "pytest"]
+    if len(pytest_steps) != 1:
+        return None
+    step = steps[pytest_steps[0]][0]
+    if any(char in step for char in "|<>&;`$()\n") or _steps(step) != [step]:
+        return None
+    return steps, pytest_steps[0]
+
+
+def with_step(steps: list[tuple[str, str]], index: int, text: str) -> str:
+    """The command ``steps`` make with step ``index`` replaced by ``text``."""
+    parts = [(text if i == index else step, operator) for i, (step, operator) in enumerate(steps)]
+    return parts[0][0] + "".join(f" {operator} {step}" for step, operator in parts[1:])
+
+
+def with_deselected(command: str, test_ids: list[str]) -> tuple[str, list[str]]:
+    """``command`` with ``test_ids`` deselected from its pytest step, and the ids it
+    deselects: none when it has no single plain pytest step (`plain_pytest_step`).
+
+    The full check uses it for the tests the self-check already passed on the same commit
+    (`design_ops._full_check`). The last id is never deselected, in any mode: a step that
+    deselected all it collects would run none and exit 5, and under xdist -- turned on in
+    the command or in the project's ``addopts`` -- pytest's summary does not even count
+    what was deselected. So one passed test runs again, and the step can never exit 5 for
+    deselecting everything; `settle_deselected` stays as a second safeguard. Past
+    `DESELECT_LIMIT_BYTES` the rest are left to run.
+    """
+    found = plain_pytest_step(command) if test_ids else None
+    if found is None:
+        return command, []
+    steps, index = found
+    candidates = test_ids[:-1]
+    used: list[str] = []
+    size = 0
+    for test_id in candidates:
+        argument = shlex.quote(f"--deselect={test_id}")
+        if size + len(argument) + 1 > DESELECT_LIMIT_BYTES:
+            break
+        used.append(test_id)
+        size += len(argument) + 1
+    if not used:
+        return command, []
+    added = steps[index][0] + " " + " ".join(shlex.quote(f"--deselect={test_id}")
+                                             for test_id in used)
+    return with_step(steps, index, added), used
+
+
+#: pytest's summary when every test it collected was deselected: ``3 deselected in 0.01s``.
+_ALL_DESELECTED = re.compile(r"^=*\s*(\d+) deselected(?:, \d+ warnings?)? in [\d.]+s\b")
+_PYTEST_FINAL_LINE = re.compile(r"^=*\s*\d+ (?:failed|passed|errors?|skipped|deselected|xfailed|"
+                                r"xpassed|warnings?)\b.* in [\d.]+s\b.*$", re.MULTILINE)
+def _deselected_all(output: str, deselected: int) -> bool:
+    """Whether pytest's own summary says it deselected exactly ``deselected`` tests and ran
+    none: every test it collected was one of them."""
+    summaries = _PYTEST_FINAL_LINE.findall(strip_ansi(output))
+    found = _ALL_DESELECTED.match(summaries[-1].strip()) if summaries else None
+    return found is not None and int(found.group(1)) == deselected
+
+
+def _deselect_count(step: str) -> int:
+    try:
+        return sum(word.startswith("--deselect=") for word in shlex.split(step))
+    except ValueError:
+        return -1
+
+
+def chain_status(steps: list[dict]) -> int:
+    """The status the shell gives a chain whose steps ended as ``steps`` say, by the rule
+    `_build_marker_script` keeps: an ``&&`` step counts only after a success, an ``||``
+    step only after a failure, and errexit ends the chain at a list that ends failing."""
+    status, last, errexit = 0, -1, False
+    for index, sr in enumerate(steps):
+        operator = sr["operator"]
+        live = (operator in ("", ";") or (operator == "&&" and status == 0)
+                or (operator == "||" and status != 0))
+        if live and sr["ran"]:
+            status, last = int(sr["exit_code"]), index
+            change = _errexit_change(sr["step"])
+            if change is not None and status == 0:
+                errexit = change
+        if (index + 1 == len(steps) or steps[index + 1]["operator"] == ";") and errexit \
+                and status != 0 and last == index:
+            return status
+    return status
+
+
+def settle_deselected(result: Any, command: str) -> None:
+    """A check whose pytest step deselected every test it collected (`with_deselected`):
+    that step ran nothing and exited 5, which is no failure -- every test in it passed in
+    the self-check on this commit. It is read so only when pytest's own summary says it
+    deselected exactly as many tests as the step names with ``--deselect`` and ran none
+    (`_deselected_all`); then its exit becomes 0 and the command's status is worked out
+    again (`chain_status`). Any other exit 5 -- a step that collected nothing, or tests
+    the self-check named but the whole run does not collect -- stays failing. A second
+    safeguard: `with_deselected` always leaves one passed test to run."""
+    steps = getattr(result, "step_results", None)
+    if steps is not None:
+        changed = False
+        for sr in steps:
+            if sr["ran"] and sr["exit_code"] == 5 and _deselect_count(sr["step"]) > 0 \
+                    and _deselected_all(sr["output"], _deselect_count(sr["step"])):
+                sr.update(exit_code=0, accounted=True)
+                changed = True
+        if not changed:
+            return
+        status = chain_status(steps)
+    elif result.returncode == 5 and _runner(command) == "pytest" and _deselect_count(command) > 0 \
+            and _deselected_all("\n".join((result.stdout or "", result.stderr or "")),
+                                _deselect_count(command)):
+        status = 0
+    else:
+        return
+    result.returncode = status
+    result.ok = status == 0 and not result.timed_out
+
+
+def chain_incomplete(command: str, steps: list[dict] | None) -> str | None:
     """Why a failed ``command`` may not have run all its steps; None when it did.
 
     A chain such as ``pytest a && pytest b`` stops at its first failing step, so a
-    failure the base also has can hide that the steps after it never ran. The chain's
-    steps run again one by one (`_run_chain_markers`, through ``run``), and the shell's
-    own rule says which the real run skipped: a step after ``&&`` once the chain has
-    failed. A step after ``||`` the shell skips after a success is not missing. A
-    command whose steps cannot be split or read is never called complete.
+    failure the base also has can hide that the steps after it never ran. A chained
+    check runs as its marker script from the start (`run_chain`), which runs a step
+    after ``&&`` whatever came before, so ``steps`` -- that run's per-step records --
+    show every step the shell would run as run; a step after ``||`` the shell skips
+    after a success is not missing. A command whose steps cannot be split, or whose
+    records could not be read, is never called complete.
     """
     if len(_steps(command)) <= 1:
         return None
-    chain = _chain_steps(command)
-    if chain is None:
+    if chain_plan_steps(command) is None:
         return "the check's steps cannot be told apart, so whether each one ran is unknown"
-    if len(chain) <= 1:
-        return None
-    steps = _run_chain_markers(chain, run, roots)
     if steps is None:
-        return ("the check's steps could not be run one by one, so whether each one ran "
+        return ("the check's steps could not be read from its run, so whether each one ran "
                 "is unknown")
-    status = 0
     for sr in steps:
-        if sr["operator"] == "&&" and status != 0:
-            return f"step `{sr['step']}` never ran: an earlier step of the check failed"
-        if sr["ran"]:
-            status = sr["exit_code"]
+        if not sr["ran"] and sr["operator"] != "||":
+            return f"step `{sr['step']}` never ran"
+    return None
+
+
+def steps_blocker(steps: list[dict]) -> str | None:
+    """`excusal_blocker` for a chain whose per-step records are known: why its failures,
+    all inherited, still cannot excuse it; None when they can.
+
+    Each step that failed or named a failure must be a test runner refactory recognises,
+    must not stop at its first failure, and its own summary must count exactly the
+    failures it named; a step that failed without naming one (a build, a lint) blocks.
+    """
+    for sr in steps:
+        if not sr["ran"] or (sr["exit_code"] == 0 and not sr["failures"]):
+            continue
+        step = sr["step"]
+        if sr["runner"] is None:
+            return (f"step `{step}` failed (exit {sr['exit_code']}) and is not a test runner "
+                    "refactory recognises (pytest, vitest, jest)")
+        if not sr["failures"]:
+            return f"step `{step}` failed (exit {sr['exit_code']}) without naming a failing test"
+        try:
+            words = shlex.split(step)
+        except ValueError:
+            words = step.split()
+        if any(_EXIT_FIRST.match(word) for word in words):
+            return f"{sr['runner']} stops at its first failure in `{step}`, so the tests after it never ran"
+        if not sr["accounted"]:
+            return f"{sr['runner']}'s summary in `{step}` counts failures that are not identified by name"
     return None
 
 
@@ -1122,6 +1398,8 @@ def _check_base_clean(base_path: Path, base_commit: str, base_found: worktree.Wo
     )
     if not _dirt(status_out):
         return []
+    # What the reset and clean below remove may be what generate or setup made.
+    clear_prepared(base_path)
 
     # Parse NUL-delimited entries to find tracked edits for the warning.
     tracked_edits: list[str] = []
@@ -1173,6 +1451,190 @@ def _rebuild_base_worktree(target: Path, run_id: str, base_path: Path) -> None:
         worktree.git(target, "worktree", "remove", "--force", str(base_path))
     except ValueError:
         shutil.rmtree(base_path, ignore_errors=True)
+
+
+#: Where a prepared worktree records what it was prepared for: in its own git directory,
+#: which goes when the worktree does, so a removed or re-added worktree is never taken
+#: for prepared.
+PREPARED_MARKER = "refactory-prepared.json"
+
+
+def prepared_key(ctx: Any, commit: str) -> str:
+    """What a preparation of ``commit`` depends on: the commit and the run's generate and setup."""
+    return cache_key(commit, str(ctx.facts.get("setup") or "").strip(),
+                     str(ctx.facts.get("generate") or "").strip(), "")
+
+
+def _marker_path(path: Path) -> Path | None:
+    try:
+        return Path(worktree.git(path, "rev-parse", "--absolute-git-dir").strip()) / PREPARED_MARKER
+    except (ValueError, OSError):
+        return None
+
+
+def mark_prepared(path: Path, key: str, state: str = "") -> None:
+    """Record that the worktree at ``path`` is prepared (installs, generate, setup) for
+    ``key`` (`prepared_key`), and, for a copy that a check runs in, its files' state then."""
+    marker = _marker_path(path)
+    if marker is not None:
+        marker.write_text(json.dumps({"key": key, "state": state}) + "\n")
+
+
+def clear_prepared(path: Path) -> None:
+    """Forget that the worktree at ``path`` was prepared: something changed its files."""
+    marker = _marker_path(path) if path.is_dir() else None
+    if marker is not None:
+        marker.unlink(missing_ok=True)
+
+
+def prepared_state(path: Path, commit: str, key: str) -> str | None:
+    """The state the worktree at ``path`` recorded when it was prepared for ``key`` at
+    ``commit``; None when it was not (or is no longer at ``commit``)."""
+    if not _at(path, commit):
+        return None
+    marker = _marker_path(path)
+    data = _read_json(marker) if marker is not None and marker.is_file() else {}
+    return str(data.get("state") or "") if data.get("key") == key else None
+
+
+#: What a check copy's state leaves out: caches a run writes and nothing prepares.
+_STATE_CACHES = frozenset({"__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache"})
+
+
+def worktree_state(copy: worktree.Worktree) -> str:
+    """One hash of what a prepared worktree's files are -- the check copy's or the base's --
+    beside what the installs made and caches: its tracked changes, its untracked files'
+    bytes, and each ignored file's size and modification time. Equal before and after a
+    run, the run changed nothing that preparing it makes, so it is still prepared."""
+    path = Path(copy.path)
+    installed = {name.rstrip("/").split("/")[0] for name in
+                 worktree._json(worktree._record_path(copy)).get("installed", [])}
+    digest = hashlib.sha256()
+    try:
+        digest.update(worktree.git(path, "diff", "--binary", "HEAD").encode())
+        untracked = worktree.git(path, "ls-files", "-z", "--others", "--exclude-standard")
+        ignored = worktree.git(path, "ls-files", "-z", "--others", "--ignored",
+                               "--exclude-standard", "--directory")
+    except ValueError:
+        return ""
+
+    def skipped(name: str) -> bool:
+        parts = name.rstrip("/").split("/")
+        return parts[0] in installed or any(part in _STATE_CACHES for part in parts)
+
+    for name in sorted(filter(None, untracked.split("\0"))):
+        if skipped(name):
+            continue
+        digest.update(b"U" + name.encode() + b"\0")
+        try:
+            digest.update((path / name).read_bytes())
+        except OSError:
+            digest.update(b"<unreadable>")
+    for entry in sorted(filter(None, ignored.split("\0"))):
+        if skipped(entry):
+            continue
+        root = path / entry
+        files = [root] if root.is_file() else sorted(p for p in root.rglob("*") if p.is_file())
+        for file in files:
+            relative = file.relative_to(path).as_posix()
+            if skipped(relative):
+                continue
+            try:
+                info = file.stat()
+            except OSError:
+                continue
+            digest.update(f"I{relative}\0{info.st_size}\0{info.st_mtime_ns}\0".encode())
+    return digest.hexdigest()
+
+
+
+#: The most files, and bytes, `residue` reads before it gives up (and nothing is shared).
+RESIDUE_FILES = 20_000
+RESIDUE_BYTES = 256 * 1024 * 1024
+
+
+def residue(place: worktree.Worktree) -> str | None:
+    """One hash of what a worktree holds beside its commit: every untracked and ignored
+    file, by name and bytes -- each worktree's own path read as one placeholder -- beside
+    what its installs made and caches. Two places with the same residue run a test on the
+    same files. None when there is too much to read (`RESIDUE_FILES`, `RESIDUE_BYTES`) or
+    git cannot list it."""
+    path = Path(place.path)
+    installed = {name.rstrip("/").split("/")[0] for name in
+                 _read_json(worktree._record_path(place)).get("installed", [])}
+    try:
+        listed = worktree.git(path, "ls-files", "-z", "--others", "--exclude-standard")
+        ignored = worktree.git(path, "ls-files", "-z", "--others", "--ignored",
+                               "--exclude-standard", "--directory")
+    except ValueError:
+        return None
+
+    def skipped(name: str) -> bool:
+        parts = name.rstrip("/").split("/")
+        return parts[0] in installed or any(part in _STATE_CACHES for part in parts)
+
+    files: set[str] = {name for name in listed.split("\0") if name and not skipped(name)}
+    for entry in filter(None, ignored.split("\0")):
+        if skipped(entry):
+            continue
+        root = path / entry
+        if root.is_file():
+            files.add(entry)
+        else:
+            files.update(p.relative_to(path).as_posix() for p in root.rglob("*")
+                         if p.is_file() and not skipped(p.relative_to(path).as_posix()))
+    if len(files) > RESIDUE_FILES:
+        return None
+    roots = sorted({str(path).encode(), str(path.resolve()).encode()}, key=len, reverse=True)
+    digest, total = hashlib.sha256(), 0
+    for name in sorted(files):
+        try:
+            data = (path / name).read_bytes()
+        except OSError:
+            data = b"<unreadable>"
+        total += len(data)
+        if total > RESIDUE_BYTES:
+            return None
+        for root in roots:
+            data = data.replace(root, b"<root>")
+        digest.update(name.encode() + b"\0" + hashlib.sha256(data).digest())
+    return digest.hexdigest()
+
+
+def _base_descriptor(found: worktree.Worktree, path: Path) -> worktree.Worktree:
+    """The base worktree at ``path`` as a `worktree.Worktree`, as `_ensure_base_worktree`
+    describes it (its own branch name, so its install record is its own)."""
+    run_id = Path(found.path).name.removeprefix("run-")
+    return worktree.Worktree(path=str(path), branch=f"{worktree.BRANCH_PREFIX}base-{run_id}",
+                             base=found.base, head=found.base, target=found.target, run=found.run)
+
+
+def base_prepared(ctx: Any, found: worktree.Worktree, path: Path, commit: str) -> bool:
+    """Whether the base worktree at ``path`` is prepared at ``commit`` and its files are
+    exactly as that preparation left them (`worktree_state`): one shared record, so
+    `run_base_check` and `targeted_base_failures` prepare it once, and a base a run left
+    changed -- a test that rewrote a tracked file, a probe's residue -- is never used as
+    prepared."""
+    state = prepared_state(path, commit, prepared_key(ctx, commit))
+    return bool(state) and state == worktree_state(_base_descriptor(found, path))
+
+
+def mark_base_prepared(ctx: Any, found: worktree.Worktree, path: Path, commit: str) -> None:
+    """Record the base at ``path`` as prepared for ``commit``, with its files' state now."""
+    mark_prepared(path, prepared_key(ctx, commit), worktree_state(_base_descriptor(found, path)))
+
+
+def restore_base(ctx: Any, found: worktree.Worktree, path: Path, commit: str) -> None:
+    """After a run in the base worktree: when its files are no longer as prepared, put
+    tracked files back and remove what it left (`_check_base_clean`), and forget the
+    preparation, so the next base run prepares it again rather than run on residue."""
+    if base_prepared(ctx, found, path, commit):
+        return
+    clear_prepared(path)
+    try:
+        _check_base_clean(path, commit, _base_descriptor(found, path))
+    except ValueError as exc:
+        target_guard.warn(f"the base worktree could not be put back after a run: {exc}")
 
 
 def _ensure_base_worktree(ctx: Any) -> tuple[Path, worktree.Worktree, list[str]]:
@@ -1435,49 +1897,60 @@ def run_base_check(ctx: Any, command: str, timeout: float) -> BaseCheckResult:
         killed a preparation step and the base environment should be rebuilt.
         """
         nonlocal base_clean_flag
-        try:
-            base_path, base_found, repaired = _ensure_base_worktree(ctx)
-            if repaired:
-                base_clean_flag = False
-        except ValueError as exc:
-            err_str = str(exc)
-            # Classify: use structured result from ensure_environment.
-            # prep_fail returned by ensure_environment carries returncode.
-            is_crash = any(tok in err_str for tok in ("killed by SIG", "killed by signal"))
-            r = BaseCheckResult(
-                ok=False, failures=set(), output=err_str, exit_code=-1,
-                environment_failure=err_str,
-            )
-            r._crashed = is_crash  # type: ignore[attr-defined]
-            return r, is_crash
-
         home = Path(ctx.workdir).resolve() / worktree.BASE_CHECK_HOME
         home.mkdir(parents=True, exist_ok=True)
         budget_inner = getattr(ctx, "budget", None)
-        env = worktree.check_environment(base_path, home)
+        base_path = _base_worktree_path(Path(found.target), Path(found.path).name.removeprefix("run-"))
+        if base_prepared(ctx, found, base_path, found.base):
+            # `targeted_base_failures` (or an earlier call) prepared this base already:
+            # its installs, generate and setup are not run again.
+            env = worktree.check_environment(base_path, home)
+        else:
+            try:
+                base_path, base_found, repaired = _ensure_base_worktree(ctx)
+                if repaired:
+                    base_clean_flag = False
+            except ValueError as exc:
+                err_str = str(exc)
+                # Classify: use structured result from ensure_environment.
+                # prep_fail returned by ensure_environment carries returncode.
+                is_crash = any(tok in err_str for tok in ("killed by SIG", "killed by signal"))
+                r = BaseCheckResult(
+                    ok=False, failures=set(), output=err_str, exit_code=-1,
+                    environment_failure=err_str,
+                )
+                r._crashed = is_crash  # type: ignore[attr-defined]
+                return r, is_crash
 
-        from refactory_dsh.repo_change import prepare_commands as _prep
+            env = worktree.check_environment(base_path, home)
 
-        _, problems, prep_fail = _prep(
-            ctx, base_found, env, home, timeout, budget_inner, amend=False)
-        if problems:
-            # Check if any problem is a signal crash.
-            is_crash = False
-            if prep_fail is not None and isinstance(prep_fail.get("returncode"), int):
-                prc = prep_fail["returncode"]
-                is_crash = prc < 0 or prc in sandbox._AMBIGUOUS_SHELL_EXITS
-            detail = "on the base: " + "\n".join(problems)
-            r = BaseCheckResult(
-                ok=False, failures=set(), output=detail, exit_code=-1,
-                environment_failure=detail,
-            )
-            r._crashed = is_crash  # type: ignore[attr-defined]
-            return r, is_crash
+            from refactory_dsh.repo_change import prepare_commands as _prep
 
-        check_result = sandbox.run_command(
-            command, workdir=base_path, timeout_s=timeout,
+            _, problems, prep_fail = _prep(
+                ctx, base_found, env, home, timeout, budget_inner, amend=False)
+            if problems:
+                # Check if any problem is a signal crash.
+                is_crash = False
+                if prep_fail is not None and isinstance(prep_fail.get("returncode"), int):
+                    prc = prep_fail["returncode"]
+                    is_crash = prc < 0 or prc in sandbox._AMBIGUOUS_SHELL_EXITS
+                detail = "on the base: " + "\n".join(problems)
+                r = BaseCheckResult(
+                    ok=False, failures=set(), output=detail, exit_code=-1,
+                    environment_failure=detail,
+                )
+                r._crashed = is_crash  # type: ignore[attr-defined]
+                return r, is_crash
+            mark_base_prepared(ctx, found, base_path, found.base)
+
+        # One run: a chain runs as its marker script (`run_chain`), so each step's result
+        # comes from this run and the base's suite never runs a second time.
+        check_result, step_results = run_chain(command, lambda script: sandbox.run_command(
+            script, workdir=base_path, timeout_s=timeout,
             budget=budget_inner, env=env, home=home, exact_env=True,
-        )
+        ), _roots((base_path, "<root>"), (home, "<home>"), (ctx.workdir, "<run>")))
+        # What the suite changed in the base must not reach the next run there.
+        restore_base(ctx, found, base_path, found.base)
         crashed_chk, sig_chk = sandbox.is_signal_crash(check_result)
         if crashed_chk:
             r = BaseCheckResult(
@@ -1500,39 +1973,26 @@ def run_base_check(ctx: Any, command: str, timeout: float) -> BaseCheckResult:
         blocker = excusal_blocker(command, output, failures) if failures else None
         result._base_complete = (blocker is None) if failures else check_result.ok  # type: ignore[attr-defined]
 
-        # A failed chain of two or more steps: run its steps again in one shell, each
-        # recorded, so the comparison can tell which step every failure came from and
-        # how each earlier step ended -- whatever the whole-command blocker says, because
-        # a base that stopped at its first step looks complete to it.
-        if not check_result.ok:
-            unsplit_reason: list[str] = []
-            chain = _chain_steps(command, reason=unsplit_reason)
-            if chain is None and unsplit_reason:
-                target_guard.warn(f"base chain not split: {unsplit_reason[0]}")
-            if chain is not None and len(chain) > 1:
-                step_results = _run_chain_markers(chain, lambda script: sandbox.run_command(
-                    script, workdir=base_path, timeout_s=timeout,
-                    budget=budget_inner, env=env, home=home, exact_env=True,
-                ), _roots((base_path, "<root>"), (home, "<home>"), (ctx.workdir, "<run>")))
-                if step_results is None:
-                    # Recorded, so the comparison charges rather than reading it as a cache
-                    # written before per-step results existed.
-                    result._steps_unreadable = True  # type: ignore[attr-defined]
-                else:
-                    for sr in step_results:
-                        result.failures |= set(sr["failures"])
-                    # Complete when every test runner that ran counts exactly the
-                    # failures it named.
-                    result._base_complete = all(  # type: ignore[attr-defined]
-                        sr["accounted"] for sr in step_results
-                        if sr["ran"] and sr["runner"] is not None)
-                    result._step_results = [  # type: ignore[attr-defined]
-                        {**sr, "output": sr["output"][-5000:]} for sr in step_results]
+        if step_results is not None:
+            # The comparison tells which step every failure came from and how each
+            # earlier step ended from these records: complete when every test runner
+            # that ran counts exactly the failures it named.
+            for sr in step_results:
+                result.failures |= set(sr["failures"])
+            result._base_complete = all(  # type: ignore[attr-defined]
+                sr["accounted"] for sr in step_results
+                if sr["ran"] and sr["runner"] is not None)
+            result._step_results = [  # type: ignore[attr-defined]
+                {**sr, "output": sr["output"][-5000:]} for sr in step_results]
+        elif chain_plan_steps(command) is not None:
+            # Recorded, so the comparison charges rather than reading it as a cache
+            # written before per-step results existed.
+            result._steps_unreadable = True  # type: ignore[attr-defined]
 
         # Guard: an unfinished base (a timeout, whatever it printed before it was
         # stopped, or a non-zero exit with no failures and no per-step results) is
         # never cached -- not as clean, not as failure-free, not as the failures it
-        # named before it stopped.  Applied AFTER the per-step re-run.
+        # named before it stopped.
         if check_result.timed_out:
             result.environment_failure = (
                 f"the base check was stopped at its time limit "
@@ -1668,7 +2128,8 @@ def targeted_base_failures(ctx: Any, command: str, test_ids: list[str], *,
                 if why:
                     return unavailable(why)
                 _write_targeted(known_path, key, learned, prepared=True, signatures=signatures)
-        elif not (same_key and known.get("prepared") and _at(base_path, base_commit)):
+        elif not base_prepared(ctx, found, base_path, base_commit):
+            # One preparation of the base for the run, shared with `run_base_check`.
             try:
                 base_path, base_found, _ = _ensure_base_worktree(ctx)
             except ValueError as exc:
@@ -1677,6 +2138,7 @@ def targeted_base_failures(ctx: Any, command: str, test_ids: list[str], *,
                                               home, prepare_timeout, budget, amend=False)
             if problems:
                 return unavailable("the base's generate or setup failed: " + "\n".join(problems)[:1000])
+            mark_base_prepared(ctx, found, base_path, base_commit)
             _write_targeted(known_path, key, learned, prepared=True, signatures=signatures)
         from refactory_dsh.test_selection import runnable
 
@@ -1689,6 +2151,9 @@ def targeted_base_failures(ctx: Any, command: str, test_ids: list[str], *,
             return unavailable(f"the tests cannot be targeted on the base: {refusal}")
         result = sandbox.run_command(targeted, workdir=base_path, timeout_s=timeout, budget=budget,
                                      env=env, home=home, exact_env=True)
+        if not (reference and reference != found.base):
+            # What these tests changed in the base must not reach the next run there.
+            restore_base(ctx, found, base_path, base_commit)
         if result.timed_out:
             return unavailable(f"the base run of {len(missing)} test(s) was stopped at its "
                                f"{timeout:.0f} s limit")
@@ -2138,14 +2603,49 @@ def _infer_test_runner(check_command: str) -> str | None:
     return None
 
 
+#: What `compute_test_guardedness` learned of each new or changed test file on the base,
+#: by `_guardedness_key`: a round whose file is unchanged reads it instead of running it.
+GUARDEDNESS_CACHE_FILE = Path(".refactory") / "guardedness.json"
+
+
+def _content_hash(path: Path, names: list[str]) -> str:
+    """One hash of the files ``names`` under ``path``: their names and their bytes."""
+    digest = hashlib.sha256()
+    for name in sorted(names):
+        digest.update(name.encode() + b"\0")
+        try:
+            digest.update((path / name).read_bytes())
+        except OSError:
+            digest.update(b"<missing>")
+        digest.update(b"\0")
+    return digest.hexdigest()
+
+
+def _guardedness_key(ctx: Any, base: str, command: str, runner: str, test_file: str,
+                     file_hash: str, helpers_hash: str) -> str:
+    """A test file's result on the base depends on the base, the run's generate and setup,
+    the check command and its runner, the file's own bytes and those of the helpers
+    copied beside it."""
+    return hashlib.sha256(json.dumps({
+        "base": base, "command": command, "setup": str(ctx.facts.get("setup") or "").strip(),
+        "generate": str(ctx.facts.get("generate") or "").strip(), "runner": runner,
+        "file": test_file, "content": file_hash, "helpers": helpers_hash,
+    }, sort_keys=True).encode()).hexdigest()
+
+
 def compute_test_guardedness(
     ctx: Any, command: str, timeout: float,
 ) -> dict | None:
     """Run the attempt's new/changed test files against the base source.
 
     Returns a guardedness record dict; when the tests cannot be run on the base, the
-    record says why under ``unavailable``. None only when the run has no worktree. Computed per attempt (never cached). Creates the base worktree on
-    demand if it does not already exist.
+    record says why under ``unavailable``. None only when the run has no worktree. Creates
+    the base worktree on demand if it does not already exist.
+
+    Each file's result is kept by the base, the run's generate and setup, the runner and
+    the bytes of the file and of the helpers copied beside it, and the check command (`_guardedness_key`), so a
+    later round runs only the files whose content changed. A run that timed out, crashed
+    or could not start is never kept.
     """
     found = worktree.recorded(ctx.workdir)
     if found is None:
@@ -2168,18 +2668,68 @@ def compute_test_guardedness(
                 "unavailable": "the check command runs neither pytest nor vitest, so the new tests "
                                "could not be run on the base"}
 
+    helper_files = _changed_files_in_test_dirs(attempt_path, found.base, new_test_files)
+    helpers_hash = _content_hash(attempt_path, helper_files)
+    keys = {tf: _guardedness_key(ctx, found.base, command, runner, tf,
+                                 _content_hash(attempt_path, [tf]), helpers_hash)
+            for tf in new_test_files}
+    cache_path = ctx.workdir / GUARDEDNESS_CACHE_FILE
+    cache = _read_json(cache_path)
+    known = {tf: cache[keys[tf]] for tf in new_test_files if isinstance(cache.get(keys[tf]), dict)}
+    to_run = [tf for tf in new_test_files if tf not in known]
+
+    fresh: dict[str, dict] = {}
+    if to_run:
+        ran = _guardedness_run(ctx, found, attempt_path, runner, to_run, helper_files, timeout)
+        if isinstance(ran, str):
+            return {"new_test_files": sorted(new_test_files), "unavailable": ran}
+        fresh, keep = ran
+        if keep:
+            cache.update({keys[tf]: entry for tf, entry in fresh.items()})
+            cache_path.parent.mkdir(parents=True, exist_ok=True)
+            cache_path.write_text(json.dumps(cache, indent=2) + "\n")
+
+    guarding = not_guarding = cannot_run = 0
+    results = []
+    for tf in new_test_files:
+        entry = fresh.get(tf) or known[tf]
+        results.append(entry)
+        if entry.get("file_level") == "cannot_run_on_base":
+            cannot_run += 1
+        elif entry.get("tests"):
+            guarding += len(entry["tests"])
+        elif entry.get("guarding"):
+            guarding += 1
+        else:
+            not_guarding += 1
+
+    return {
+        "new_test_files": sorted(new_test_files),
+        "results": results,
+        "summary": {
+            "guarding": guarding,
+            "not_guarding": not_guarding,
+            "cannot_run_on_base": cannot_run,
+            "total_new_tests": guarding + not_guarding + cannot_run,
+        },
+    }
+
+
+def _guardedness_run(ctx: Any, found: worktree.Worktree, attempt_path: Path, runner: str,
+                     new_test_files: list[str], helper_files: list[str], timeout: float
+                     ) -> tuple[dict[str, dict], bool] | str:
+    """Run ``new_test_files`` (with ``helper_files`` beside them) on the base: each file's
+    record, and whether the run may be kept (it finished, on the code); or why it could
+    not run."""
     # Ensure the base worktree exists (on demand, correction 1)
     try:
         base_path, _, _ = _ensure_base_worktree(ctx)
     except ValueError as exc:
-        return {"new_test_files": sorted(new_test_files),
-                "unavailable": f"the base worktree could not be prepared: {exc}"}
+        return f"the base worktree could not be prepared: {exc}"
 
     # Copy the attempt's new/changed test files AND their helpers/fixtures
     # into the base worktree (correction 3)
-    helper_files = _changed_files_in_test_dirs(attempt_path, found.base, new_test_files)
     all_to_copy = new_test_files + helper_files
-
     # Layer 1: determine which destinations exist in the base commit using git ls-tree.
     # This distinguishes pre-existing tracked files (restore from base) from new files
     # (unlink after) and pre-existing ignored files (save and write back bytes).
@@ -2259,11 +2809,11 @@ def compute_test_guardedness(
         for dst in new_copied:
             dst.unlink(missing_ok=True)
 
+    keep = not (test_result.timed_out or sandbox.is_signal_crash(test_result)[0]
+                or test_result.returncode in (126, 127)
+                or test_result.returncode in sandbox._AMBIGUOUS_SHELL_EXITS)
     # Build the guardedness record (correction 4: distinguish import errors)
-    guarding = 0
-    not_guarding = 0
-    cannot_run = 0
-    results = []
+    records: dict[str, dict] = {}
     for tf in new_test_files:
         tests_in_file = sorted(
             f for f in base_failures
@@ -2276,44 +2826,21 @@ def compute_test_guardedness(
         if has_collection_error and not tests_in_file:
             # The test cannot be collected or imported on the base (correction 4):
             # reported as "cannot run on the base", not evidence of guarding.
-            cannot_run += 1
-            results.append({
-                "file": tf, "tests": [], "file_level": "cannot_run_on_base",
-                "guarding": False,
-            })
+            records[tf] = {"file": tf, "tests": [], "file_level": "cannot_run_on_base",
+                           "guarding": False}
         elif tests_in_file:
             # Assertion-level failures: real evidence of guarding
-            guarding += len(tests_in_file)
-            results.append({
-                "file": tf,
-                "tests": [
-                    {"name": t, "on_base": "fail", "guarding": True}
-                    for t in tests_in_file
-                ],
-            })
+            records[tf] = {"file": tf, "tests": [
+                {"name": t, "on_base": "fail", "guarding": True} for t in tests_in_file]}
         elif not test_result.ok and not has_collection_error:
             # The test file failed but we can't parse which tests
             # Fall back to file-level assessment
-            guarding += 1
-            results.append({
-                "file": tf, "tests": [], "file_level": "fail", "guarding": True,
-            })
+            records[tf] = {"file": tf, "tests": [], "file_level": "fail", "guarding": True}
         else:
-            not_guarding += 1
-            results.append({
-                "file": tf, "tests": [], "file_level": "pass", "guarding": False,
-            })
-
-    return {
-        "new_test_files": sorted(new_test_files),
-        "results": results,
-        "summary": {
-            "guarding": guarding,
-            "not_guarding": not_guarding,
-            "cannot_run_on_base": cannot_run,
-            "total_new_tests": guarding + not_guarding + cannot_run,
-        },
-    }
+            records[tf] = {"file": tf, "tests": [], "file_level": "pass", "guarding": False}
+    # A failure that named no test may be the environment's, not the file's: not kept.
+    keep = keep and not any(r.get("file_level") == "fail" for r in records.values())
+    return records, keep
 
 
 # ── site-revert check ────────────────────────────────────────────────────
@@ -3082,28 +3609,6 @@ def compute_co_revert(
 # ── per-step comparison for chain commands ───────────────────────────────
 
 
-def _attempt_marker_run(ctx: Any, timeout: float
-                        ) -> tuple[Callable[[str], Any], list[tuple[str, str]]]:
-    """How the attempt's per-step script runs, and that place's own paths (`_signature`).
-
-    It runs where and as the attempt's check beside the reviews runs: the run's check
-    copy, with the copy's environment and HOME and the same worktree-root and restore
-    handling (`repo_change.run_check` with ``beside_reviews``), so nothing the steps
-    write reaches the run's worktree.
-    """
-    from refactory_dsh import repo_change
-    from refactory_dsh.invocations import CHECK_COPY_HOME
-
-    found = worktree.recorded(ctx.workdir)
-    if found is None:
-        raise ValueError("the run has no worktree")
-    run_id = Path(found.path).name.removeprefix("run-")
-    copy = repo_change._check_copy_path(Path(found.target), run_id)
-    roots = _roots((copy, "<root>"), (Path(found.path), "<root>"),
-                   (Path(ctx.workdir).resolve() / CHECK_COPY_HOME, "<home>"), (ctx.workdir, "<run>"))
-    return (lambda script: repo_change.run_check(ctx, script, timeout, beside_reviews=True)), roots
-
-
 def _same_end(attempt_step: dict, base_step: dict) -> bool:
     """Whether a step ended the same way on both sides: it ran on both, with one exit code, or on neither.
 
@@ -3129,11 +3634,13 @@ def _per_step_comparison(
     changed_files: list[str], brief_text: str, design_text: str,
     *, attempt_signatures: dict[str, str | None] | None = None,
     base_signatures: dict[str, str | None] | None = None,
+    attempt_steps: list[dict] | None = None,
 ) -> tuple[ComparisonResult | None, str]:
     """Classify a failed chain's failures step by step: ``(comparison, why)``.
 
-    The attempt's steps run again in one shell (`_run_chain_markers`), and are compared
-    with the base's, recorded when the base ran (or read from its cache). A failure in
+    ``attempt_steps`` are the attempt's per-step records from its check's own run, which
+    ran as its marker script (`run_chain`); nothing runs again to get them. They are
+    compared with the base's, recorded when the base ran (or read from its cache). A failure in
     step k is excused only when it is inherited by the mode's rule, it failed in step k
     on both sides, every step before k ended the same way on both (`_same_end`), and
     step k's runner counts exactly its named failures on both sides (`_accounted`). A
@@ -3149,11 +3656,7 @@ def _per_step_comparison(
         return None, "the base's per-step results could not be read"
     base_steps = [{"ran": True, **sr} for sr in base_steps]
 
-    try:
-        attempt_steps = _run_chain_markers(steps, *_attempt_marker_run(ctx, timeout))
-    except ValueError as exc:
-        return None, f"the attempt's steps could not be run again: {exc}"
-    if attempt_steps is None:
+    if attempt_steps is None or len(attempt_steps) != len(steps):
         return None, "the attempt's per-step results could not be read"
 
     all_attempt_failures = set(attempt_failures)
@@ -3228,8 +3731,7 @@ def _per_step_comparison(
         # shows only its charged ones' lines and blocks and its summary, never an
         # excused failure's; a step that named none shows its output.
         detail = "\n".join(
-            f"step `{sr['step']}` exited {sr['exit_code']} when the chain's steps were run "
-            f"one by one:\n"
+            f"step `{sr['step']}` exited {sr['exit_code']}:\n"
             + (_charged_lines(sr["output"], set(sr["failures"]) & new_failures)
                if sr["failures"] else sr["output"][-4000:])
             for sr in shown)
@@ -3452,6 +3954,8 @@ def filter_check(
         (result.stdout or "", result.stderr or "")
     ).strip()
     attempt_failures = parse_test_failures(attempt_output)
+    # A chained check ran as its marker script (`run_chain`): its steps' records.
+    attempt_steps = getattr(result, "step_results", None)
 
     # Run or load the base check (cached per run)
     base_result = run_base_check(ctx, command, timeout)
@@ -3583,14 +4087,14 @@ def filter_check(
         # A base cache written before per-step results existed: the whole-command path.
         chain = None
     if chain is not None and len(chain) > 1:
-        # The per-step comparison runs for multi-step chains to detect "earlier
-        # step ending differently" scenarios.  Single-step commands (the d16/c3
-        # cases) never enter this block (len(chain) <= 1), so the 11–26 min
-        # re-run cost identified in the brief is already eliminated.
+        # The per-step comparison, for multi-step chains, detects an earlier step that
+        # ended differently. It reads the records of the attempt's own check run, which
+        # ran as its marker script: nothing runs again here.
         revised, why = _per_step_comparison(
             ctx, chain, base_result, attempt_failures, timeout,
             named_text, changed_files, brief_text, design_text,
             attempt_signatures=attempt_sigs, base_signatures=base_sigs,
+            attempt_steps=attempt_steps,
         )
         if revised is None:
             target_guard.warn(f"no failure of the chained check is excused: {why}")
@@ -3599,7 +4103,8 @@ def filter_check(
             comparison, step_detail = revised, why
             judge_reasons = {**judge_reasons, **(revised.reasons or {})}
     elif comparison.all_excused:
-        blocker = excusal_blocker(command, attempt_output, attempt_failures)
+        blocker = (steps_blocker(attempt_steps) if attempt_steps is not None
+                   else excusal_blocker(command, attempt_output, attempt_failures))
 
     if blocker:
         comparison = ComparisonResult(inherited=set(), new_failures=set(), all_excused=False,

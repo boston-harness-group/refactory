@@ -130,10 +130,9 @@ def test_the_loop_gives_the_request_and_memory_each_structural_childs_effect(
     round_ = (loop.proposals.get(child.id) or {}).get("epoch")
     (entry,) = loop._tried_in_round(round_)[0]
     assert entry["effect"]["broken"]["first_right"] == {"solve": 5}
-    # The tally the memory pass was given is kept with the note it wrote, for the proposer.
-    loop._pending_tally = ["TALLY-LINE"]
+    # The note is kept without a tally: the proposer's ledger has every change.
     loop._keep_memory({"epoch": 2}, {"text": "NOTE"})
-    assert loop._memory["tally"] == ["TALLY-LINE"]
+    assert "tally" not in loop._memory
 
 
 # ── finding 15: each kind tried, against the noise ──────────────────────────
@@ -183,19 +182,6 @@ def test_memory_gets_each_change_s_tries_and_the_noise_they_sit_in(name, fixed, 
     assert "inside the noise" in memory_mod.MEMORY_SYSTEM
     request = memory_mod.MEMORY_SYSTEM + "\n" + text
     assert request.count("weak evidence") == 1, "the memory request repeats the noise rule"
-
-
-def test_the_proposer_sees_the_same_tally_once_beside_the_note():
-    from refactory_dsh.optim.base import ProposalContext
-
-    entry, fixture = _tried("s1_s45_loop.json")
-    tally = memory_mod.change_tally_lines([entry], val_items=17, gated=True)
-    text = ProposalContext(memory={"text": "NOTE-TEXT", "epoch": 2, "tally": tally}).render()
-    note = text.split("## Optimizer memory", 1)[1]
-    assert note.index(memory_mod.TALLY_HEADING) < note.index("NOTE-TEXT")
-    assert text.count(memory_mod.TALLY_HEADING) == 1
-    assert text.count(f"`{entry['id']}` fixed 0 / broken 8") == 1
-    assert text.count(memory_mod.TALLY_NOISE_RULE) == 1
 
 
 # ── what the line may claim, on any graph ──────────────────────────────────

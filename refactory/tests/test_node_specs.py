@@ -211,7 +211,7 @@ def test_long_texts_are_clipped_with_the_bound_knob_named_and_the_cap_holds():
 
     def section(text: str) -> str:
         start = text.index("### Each node in full")
-        return text[start:text.index("\n\n## ", start)]
+        return text[start:text.index("\n### The rules the validator checks", start)]
 
     full = len(section(ProposalContext(node_states=states).render()))
     for cap in range(full - 4000, full + 1, 251):

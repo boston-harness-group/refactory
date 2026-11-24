@@ -143,22 +143,6 @@ def test_the_steps_the_harness_completed_are_named_with_their_counts():
     assert "Completed by the harness" not in analysts.item_text(bare)
 
 
-def test_the_last_edit_s_moved_steps_say_how_they_ran():
-    """"What the last edit changed" heads each moved step's first block with how it runs,
-    once a step, from the child's own graph (a step gone from the child, from the
-    parent's)."""
-    child = _annotated(_record())
-    parent = {**child, "passed": True, "exchanges": [
-        {**e, "response": "earlier " + e["response"]} for e in child["exchanges"]]
-        + [{"node": "explore", "prompt": "look", "response": "looked"}]}
-    pair = {"child": "c", "parent": "p", "edit": [], "parent_records": [parent],
-            "child_records": [child]}
-    text = "\n".join(base._edit_change_lines([pair], settled=frozenset(), room=10 ** 7))
-    assert text.count(NO_TOOLS) == 1, text
-    assert ("Ran as: model reply · tools: the backend's own (run dir) · real tool calls: "
-            "not recorded") in text
-
-
 # -- 3. Every reader of traces is told what a reply is ----------------------------------
 
 

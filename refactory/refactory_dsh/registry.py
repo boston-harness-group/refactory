@@ -279,6 +279,84 @@ def discover(project: Path | None = None) -> dict[str, Package]:
     return found
 
 
+def _contribution_kinds() -> dict[str, tuple[type, Any]]:
+    """Each ``Package`` field that contributes selectable pieces, with the class its
+    entries must be and the library's own table of names (which a package may not
+    reuse)."""
+    from refactory_dsh import optim, strategies
+    from refactory_dsh.optim import Optimizer
+    from refactory_dsh.outerloop import OuterLoop
+
+    return {"strategies": (OuterLoop, strategies.STRATEGIES),
+            "optimizers": (Optimizer, optim.REGISTRY)}
+
+
+def survey(attribute: str, project: Path | None = None
+           ) -> tuple[dict[str, tuple[type, Package]], dict[str, str], dict[str, str]]:
+    """What the usable packages contribute under ``attribute`` (``strategies`` or
+    ``optimizers``): ``(found, refused, refused_names)``.
+
+    ``found`` maps each class-level ``name`` to its class and the package providing
+    it. The packages are the ones a mode may come from (:func:`usable_packages`: a
+    package switched off for the project contributes nothing). A package that lists,
+    under any contributing field, a class of the wrong kind, a name the library
+    already has, or a name another package lists too is never resolved silently: the
+    whole package is left out, as a package that fails to load is (:func:`discover`),
+    logged, and recorded in ``refused`` (package -> why), with each name it lists
+    under ``attribute`` in ``refused_names`` (name -> package), so a run that names
+    one is refused with the reason and a listing can say why the package is missing."""
+    kinds = _contribution_kinds()
+    refused: dict[str, str] = {}
+    packages = usable_packages(project)
+    for package in packages.values():
+        for field_name, (base, reserved) in kinds.items():
+            for cls in getattr(package, field_name):
+                if not (isinstance(cls, type) and issubclass(cls, base)):
+                    refused.setdefault(package.name, (
+                        f"package {package.name!r} lists {cls!r} under {field_name}, which "
+                        f"is not a {base.__name__}"))
+                elif str(cls.name) in reserved:  # type: ignore[attr-defined]
+                    refused.setdefault(package.name, (
+                        f"package {package.name!r} lists {str(cls.name)!r}, a name the "  # type: ignore[attr-defined]
+                        "library already has; rename it"))
+    for field_name in kinds:
+        owners: dict[str, list[str]] = {}
+        for package in packages.values():
+            if package.name not in refused:
+                for cls in getattr(package, field_name):
+                    owners.setdefault(str(cls.name), []).append(package.name)
+        for name, holders in sorted(owners.items()):
+            if len(holders) > 1:
+                for holder in holders:
+                    refused.setdefault(holder, (
+                        f"packages {' and '.join(repr(h) for h in sorted(holders))} both "
+                        f"list {name!r}; one must be renamed"))
+    found: dict[str, tuple[type, Package]] = {}
+    refused_names: dict[str, str] = {}
+    for package in packages.values():
+        for cls in getattr(package, attribute):
+            name = str(getattr(cls, "name", "") or "")
+            if package.name in refused:
+                refused_names.setdefault(name, package.name)
+            else:
+                found[name] = (cls, package)
+    for package_name, reason in sorted(refused.items()):
+        log.warning("package_unavailable", package=package_name, reason=reason)
+    refused_names.pop("", None)
+    return found, refused, refused_names
+
+
+def contributions(attribute: str, project: Path | None = None) -> dict[str, tuple[type, Package]]:
+    """The pieces the usable packages contribute, each with its package
+    (:func:`survey`'s ``found``); a refused package's are left out."""
+    return survey(attribute, project)[0]
+
+
+def contributed(attribute: str, project: Path | None = None) -> dict[str, type]:
+    """:func:`contributions` without the providing packages."""
+    return {name: cls for name, (cls, _package) in contributions(attribute, project).items()}
+
+
 def _state(project: Path) -> dict[str, Any]:
     path = Path(project) / STATE_FILE
     if not path.exists():
@@ -311,6 +389,13 @@ def set_enabled(project: Path, name: str, enabled: bool) -> None:
 def installed_names(project: Path | None = None) -> list[str]:
     """Package directories on disk, enabled or not."""
     return discover_names(project)
+
+
+def usable_packages(project: Path | None = None) -> dict[str, Package]:
+    """The packages a run may take a mode, strategy or optimizer from: the enabled ones
+    of ``project`` (:func:`resolve` refuses a disabled package's mode the same way);
+    without a project, the installed ones, which no project has switched off."""
+    return enabled_packages(Path(project)) if project is not None else discover(None)
 
 
 def enabled_packages(project: Path) -> dict[str, Package]:

@@ -1229,13 +1229,23 @@ def _first_line(cls: Any) -> str:
     return text.split("\n", 1)[0].strip()
 
 
-def level_two() -> dict[str, Any]:
+def _unavailable(project: Path | None) -> list[dict[str, str]]:
+    """The packages whose strategies or optimizers are left out (``registry.survey``),
+    each with why."""
+    from refactory_dsh import registry
+
+    refused = registry.survey("optimizers", project)[1]
+    return [{"package": name, "reason": reason} for name, reason in sorted(refused.items())]
+
+
+def level_two(project: Path | None = None) -> dict[str, Any]:
     """The three level-2 seams by name, each with what it says it is.
 
     The named choice a GUI needs: a person picks an outer loop, an optimizer or an
     evaluator from a catalogue with descriptions rather than typing a name they have
-    to already know. Read from the registries, so a new implementation appears here
-    the moment it registers.
+    to already know. Read from the registries and from ``project``'s usable packages
+    (``Package.strategies``, ``Package.optimizers``), so a new implementation appears
+    here the moment it registers or a package lists it.
     """
     from refactory_dsh import evaluators, optim, strategies
 
@@ -1246,8 +1256,12 @@ def level_two() -> dict[str, Any]:
         ]
 
     return {
-        "outer_loops": entries(strategies.STRATEGIES),
-        "optimizers": entries(optim.REGISTRY),
+        "outer_loops": entries({**strategies.package_strategies(project),
+                                **strategies.STRATEGIES}),
+        "optimizers": entries({**optim.package_optimizers(project), **optim.REGISTRY}),
+        # A package left out for a clash or a wrong class, with why, as the package
+        # listing reports one that fails to load: the rest are listed as usual.
+        "unavailable_packages": _unavailable(project),
         "evaluators": entries(evaluators.REGISTRY),
     }
 
@@ -1628,6 +1642,10 @@ def _parser() -> argparse.ArgumentParser:
                                "starts from its branch and updates it")
     artifact.add_argument("--review-comments", action="store_true",
                           help="with --refine: add the pull request's reviews and comments to the steering")
+    artifact.add_argument("--finish", action="store_true",
+                          help="with --refine: finish the pull request's Open items in one fix round")
+    artifact.add_argument("--items", default="", metavar="ID[,ID...]",
+                          help="with --finish: the Open items to work on")
     artifact.add_argument(
         "--verdict", action="append", default=[], metavar="GATE=VALUE",
         help="answer a gate a person owns, as <gate>=<value> (repeatable)",
@@ -1920,7 +1938,7 @@ def main(argv: list[str] | None = None) -> int:
         elif args.verb == "modes":
             payload = catalogue(project=project)
         elif args.verb == "strategies":
-            payload = level_two()
+            payload = level_two(project)
         elif args.verb == "runs":
             payload = runs(project=project, runs_root=args.runs_root)
         elif args.verb == "profiles":
@@ -2165,7 +2183,10 @@ def main(argv: list[str] | None = None) -> int:
                 forwarded = _resume_argv(args)
             payload = _forward("edit", forwarded)
         elif args.verb == "design":
-            forwarded = ["--name", args.name, "--brief", args.brief, "--attempts", str(args.attempts)]
+            forwarded = ["--name", args.name, "--brief", args.brief]
+            if not args.finish:
+                # A finish sets its own round knobs (`finish.ROUND_KNOBS`), and refuses --attempts.
+                forwarded += ["--attempts", str(args.attempts)]
             if args.workdir:
                 forwarded += ["--workdir", args.workdir]
             if args.resume:
@@ -2173,12 +2194,13 @@ def main(argv: list[str] | None = None) -> int:
             if args.check:
                 forwarded += ["--check", args.check]
             for flag, value in (("--target", args.target), ("--base", args.base), ("--setup", args.setup),
-                                ("--generate", args.generate), ("--refine", args.refine)):
+                                ("--generate", args.generate), ("--refine", args.refine),
+                                ("--items", args.items)):
                 if value:
                     # Absolute, because the run resolves it from its own directory.
                     forwarded += [flag, str(Path(value).expanduser().resolve()) if flag == "--target" else value]
             for flag, on in (("--no-worktree", args.no_worktree), ("--no-pr", args.no_pr),
-                             ("--review-comments", args.review_comments)):
+                             ("--review-comments", args.review_comments), ("--finish", args.finish)):
                 if on:
                     forwarded += [flag]
             for pair in args.verdict:

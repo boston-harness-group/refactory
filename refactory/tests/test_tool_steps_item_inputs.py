@@ -224,21 +224,6 @@ def test_the_request_states_the_tool_environment_only_where_tools_are_offered():
     assert "runs its commands with" not in plain
 
 
-def test_the_analysts_get_the_same_fact():
-    """[request text] The analysts' "changes the optimizer can make" is the same lines."""
-    from types import SimpleNamespace
-
-    from refactory_dsh.optim.analysts import _changes_text
-    from refactory_dsh.optim.memory import state_view
-
-    view = state_view(sb_mode.Solver().state_dict())
-    ctx = SimpleNamespace(catalogue=nn_edits.catalogue("broad"), node_states=view.node_states,
-                          edges=view.edges, knobs=[], new_node_tools=True)
-    assert sb_interpreter.SUMMARY in _changes_text(ctx, "success")
-    ctx.new_node_tools = False
-    assert sb_interpreter.SUMMARY not in _changes_text(ctx, "success")
-
-
 def test_spreadsheetbench_declares_the_interpreter_its_model_code_runs_under():
     """[Task declaration] The same interpreter and check as generated code
     (`interpreter.interpreter`), said from the pins; core code names no dataset."""

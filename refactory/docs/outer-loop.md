@@ -1,5 +1,9 @@
 # Outer-loop recovery
 
+To add an optimization method (a parent picker, a proposer, an outer loop), see
+[Adding an optimization method](methods.md): methods are packages that compose the
+core building blocks.
+
 ## WalkerEvaluator
 
 `WalkerEvaluator` enables `enable_recovery` by default on every `mode.evaluate()`
@@ -107,12 +111,32 @@ val score. `selection` says how it selects:
   Parents come from the pool, the incumbent first, and each strategy chooses among
   them by val (a tie by train): `random` takes the best on val, and a model proposer
   may name any pool member as the parent. The population optimizers and pickers
-  (`archive`, `evolutionary`, `islands`, `map_elites`) are handed every judged
-  candidate a person has not rejected instead, and apply their own rule by val: the
-  archive's own limit (12), tournaments, the best of each island, each niche's
-  champion. So a new structure ranked below the pool keeps its niche or island. The incumbent still changes only on a strictly higher val score (a tie
+  (`archive`, `evolutionary`, `islands`, `map_elites`, `pareto`) are handed every
+  judged candidate a person has not rejected instead, and apply their own rule by val:
+  the archive's own limit (12), tournaments, the best of each island, each niche's
+  champion, the per-item frontier (below). So a new structure ranked below the pool keeps its niche or island. The incumbent still changes only on a strictly higher val score (a tie
   goes to the higher train score, then the earlier candidate), and it is the winner. The
   default for every other strategy and for the population optimizers and pickers.
+
+### The per-item frontier picker (`parent_picker: pareto`)
+
+`pareto` is GEPA's parent selection as a core picker
+(`refactory_dsh/optim/policies.py` `ParetoSelector`, frontier code in
+`refactory_dsh/optim/pareto.py`, which the GEPA strategy imports too). It keeps each
+judged candidate's per-item val scores (`ProposalContext.val_item_scores`, keyed by the
+run's HMAC of the item id, never test), builds the frontier (for each val item, the
+candidates with the best score there, ties included), prunes dominated candidates
+(lowest val mean tested first) and draws a parent with probability proportional to the
+number of val items it is best on. A candidate best on a few items stays a parent even
+when its mean is lower than the incumbent's, or the gate rejected it: two specialists
+that each win different items are both bred from, where `hill_climb` breeds only from
+the higher mean. Draws come from the picker's own seeded generator, so a resumed run
+draws the same parents. It runs with `selection: pool` (its default); without per-item
+val scores (no val items, or a task whose items have no scores) it breeds from the best
+by val. Turn it on with `parent_picker: pareto` in a profile, paired with any proposer
+(`autoresearch` or `random`); `--optimizer pareto` alone pairs it with random edits.
+The request names the picker's choice ("on the per-item Pareto frontier of
+validation") but never how many val items a candidate wins.
 
 Strategies under the gate: `reflective` merges the two best of the pool on val and
 chooses prompt or structure from the val gains of past children over their parents
@@ -205,7 +229,7 @@ rollouts, tokens, wall-clock). The SkillOpt strategy keeps its own gate.
   "Recent results" table lists the pool, though, so a `rejected` row there is one that
   scored well on val. Under `pool` the request adds that a parent may be any candidate
   that scored well on val, or with a population parent picker (`archive`,
-  `evolutionary`, `islands`, `map_elites`) any judged candidate, a rejected one
+  `evolutionary`, `islands`, `map_elites`, `pareto`) any judged candidate, a rejected one
   included. The report, `state.json`
   and the log label pool runs in full: `current`, `in pool` (in the pool now), `left
   pool` (in it after the gating that judged it, pushed out since), `rejected` (never in
@@ -611,19 +635,20 @@ never failed, says nothing. When not every item is shown whole, the table of eve
 `history` column (`(below)` for an item shown in full). It is information only: which
 items are shown, picked or analysed does not change.
 
-- **Order: the pipeline first.** The request leads with what the optimizer may change:
-  after the score line and what the score measures, "The pipeline you may edit" (one
-  line saying the structure and each step's settings are levers of the same standing, or
-  that the run permits settings only; then the nodes, edges and what each node has
-  before it), "Where the pipeline fails, step by step" (below, when the analysts or the
-  readers ran), "The operations you may use" and "How nodes compose". Only then "Each
-  step's settings" (every knob with its exact current value, which a patch quotes: a
-  text with a line break or a `|`, which a table cell cannot show as it is, is listed
-  there by reference and shown whole in a fence after the table), "Each step in full,
-  and the node schema", the author's guidance and "The rules the validator checks",
-  introduced neutrally: a proposal that breaks one comes back with the rule's code and
-  reason, to be fixed in a later answer, at the cost of the answer only. Nothing is
-  dropped by the order; the evidence sections follow as before. All of this is the
+- **Order: the pipeline first, the reference last.** The request leads with what the
+  optimizer may change: after the score line and what the score measures, "The pipeline
+  you may edit" (one line saying the structure and each step's settings are levers of
+  the same standing, or that the run permits settings only; then the pipeline view).
+  Then what this run has tried and how it did, what the analysts found, "Each step's
+  settings" (every knob with its exact current value, which a patch quotes: a text with
+  a line break or a `|`, which a table cell cannot show as it is, is listed there by
+  reference and shown whole in a fence after the table), the author's guidance, and the
+  items. Last, one reference says each thing an edit is written from once: "The
+  operations you may use" (the written-out operations, then the structural operators),
+  "How nodes compose", what each node has before it runs, each node in full with the
+  node schema, and "The rules the validator checks", introduced neutrally: a proposal
+  that breaks one comes back with the rule's code and reason, to be fixed in a later
+  answer, at the cost of the answer only. All of this is the
   shared request (`ProposalContext.render`), so every outer loop that asks the model
   proposer gets it: the default loop (alone, in a portfolio or under a parent picker),
   `best_of_n`, `reflective`, `reflective_sampler`, `adaptive_meta`, `tree_search`,
@@ -723,22 +748,17 @@ items are shown, picked or analysed does not change.
   (`PROPOSAL_ROOM`, the analysts' `ANALYST_ROOM`: Opus 4.6's 200k tokens less Claude
   Code's system prompt and the reply), the system prompt and closing line included.
   A request that would pass it is made again with only the items' texts giving way,
-  whatever their sizes: the items in full and the blocks of "What the last edit
-  changed" share what the rest of the request leaves (`_fair_shares`: either is whole
-  when it needs no more than half, the other then has the remainder; one named in one
-  line asks for nothing, so the other has its room), the shares made again from what
-  each render took (a block names an item "Trajectories" shows whole, and shows it
-  itself once it is cut there), so no more is cut than does not fit. The items in
-  full are taken failure, success, failure, ... in rank order until the next would
-  pass their share, and the rest are named by id under "Some items in full"; each is
+  whatever their sizes: the items in full have what the rest of the request leaves,
+  made again from what each render took, so no more is cut than does not fit. The
+  items in full are taken failure, success, failure, ... in rank order until the next
+  would pass their room, and the rest are named by id under "Some items in full"; each is
   still in the table. The first is no longer kept whatever its size: when it alone
-  passes its share, its longest texts are cut to the longest one length at which it
+  passes the room, its longest texts are cut to the longest one length at which it
   fits (head and tail, "[… N chars omitted]", each cut in `omissions`), its shorter
   texts whole, and the section says so; when it does not fit even with every text cut
   to `SHOWN_TEXT_FLOOR` (200 characters) it is named with the rest. Cutting keeps more
   than naming: every step, what it saw and the opening and close of each text, where
-  a name keeps only the table's row. The last edit's blocks give way the same way
-  (below). The readers' groups and their findings keep their own budgets, and nothing
+  a name keeps only the table's row. The readers' groups and their findings keep their own budgets, and nothing
   else is cut. A proposal the provider still refuses as too long is asked once more at
   half its length, the analysts' retry, which these cuts always make shorter; the trace
   marks it `context_retry`. HoVer's 150 train items (about 12k characters each) once
@@ -860,41 +880,16 @@ optimizer, at no extra compute (train records only):
   once per gate. A reloop its cap refused is marked on the item's record by both
   runtimes (`items.refused_at_cap`, verdicts read whatever their case, as both route:
   the walker's `_visit_gate`, the spine's node runner from the gate's declared reloop
-  verdicts and cap), so it is never read as a rerun. Up to `EDIT_ITEMS_WHOLE` (4) of
-  them show how the edit moved them (`_moved_block`): each side's verdict, the gates'
-  verdicts, the steps with the same reply named, and each changed, new or gone step's
-  reply whole, the parent's beside the child's. They are picked one per child and per
-  kind in turn (broken, fixed, score dropped, score rose). The first broken and the
-  first fixed pick are always shown (`EDIT_FORCED_KINDS`): the child's moved replies
-  whole, the parent's whole unless the block would pass what is left of the room --
-  `EDIT_CHANGE_SHARE` (a quarter) of the call's evidence budget -- when each is cut to
-  fit, head and tail, at least `EDIT_PARENT_FLOOR` characters (a cut that would save
-  fewer than `EDIT_CUT_MIN`, 500, is not made). Such a block can pass the room: the
-  section says so, with its size against what was left, and the run's omissions record
-  it. The blocks shown whole are kept within a ceiling of `EDIT_CEILING_ROOMS` (3)
-  rooms: a forced pick past its share of it (the forced picks still to come sharing it
-  evenly) has its child's moved replies cut head and tail too, never below
-  `EDIT_CHILD_FLOOR` (8,000) characters each, every cut marked in place and recorded,
-  and the section says so. With many moved replies (a step in a map counts each run)
-  the floor can keep the blocks past the ceiling: the section then says by how much and
-  why, and the run's omissions record it (`over ceiling`). Every other pick -- a score drop or rise included -- is
-  shown only when it fits what is left whole; one that does not is skipped for the
-  next, and its line says why (its size against the room left, or that the most shown
-  whole came first). A trace or input "Trajectories" shows whole, or a reply this
-  section already showed (a sibling's same parent), is named by where it is, never
-  repeated; blocks print in the section's order, so a reference points back. It also
-  shows the edit that made the child and the gate's decision on it, and warns that the
-  two were scored in different rounds with different seeds, so some changes may be
-  noise. Without a parent (the seed) or without shared items, it says so. Only when the
-  whole request would pass its room (`ProposalContext.render`) do the blocks get a limit
-  (`edit_change_limit`): their share of what the rest of the request leaves. Then no
-  pick passes it, a forced one included: a forced pick past its share (the forced picks
-  still to come sharing the limit, one that needs less leaving the rest to the others)
-  has every text of its block cut to the longest one length that fits, the section
-  saying so ("every text in it cut to at most N chars ... so that this request fits")
-  and the omissions recording it (`cut to the request's room`); one that does not fit
-  even at `SHOWN_TEXT_FLOOR` is listed in one line, saying why, and recorded (`named
-  only, past the request's room`). When some of
+  verdicts and cap), so it is never read as a rerun. Each changed item is one line
+  (`_moved_line`). For each child's first broken and first fixed item, the replies that
+  moved follow (`_moved_replies`): each step whose reply changed, is new or is gone, the
+  parent's reply and the child's, each at most `EDIT_REPLY_CHARS` (4000) characters, head
+  and tail; a reply "Trajectories" or this section already shows is named by where it
+  is. It also shows the edit that made the child whole (a `set_knob` as the lines it changed),
+  what it built, its prediction checked against the items, and the gate's decision on
+  it, and warns that the two were scored in different rounds with different seeds, so
+  some changes may be noise. Without a parent (the seed) or without shared items, it
+  says so. When some of
   the child's train items failed with an error (the item's run failed, not a wrong
   answer), it counts them by kind and the node that raised them, with the first message
   of each kind (300 characters, `ITEM_ERROR_CHARS`). Both runtimes start a failed node's
@@ -1161,8 +1156,12 @@ paired with a parent picker), on the train records the request carries:
   context retries only for calls paid in that step, so a step remade after a resume,
   whose calls come from the cache, does not count them again. It
   writes at most 4 findings (SkillOpt's analyst edit budget): what goes wrong, where
-  (steps, edges, settings, or the structure), the change that would fix it, the items it
-  covers (an id outside the batch is dropped), its impact and quotes. Optionally, how
+  (steps, edges, settings, or the structure), the items it covers (an id outside the
+  batch is dropped), its impact and quotes. Analysts report and never prescribe: unlike
+  SkillOpt's (whose port in `refactory_packages/skillopt` keeps its own prompts), they
+  are told "Do not propose changes: say what happens, not what to do", their answers have
+  no field for a change or a thing to keep, and they are not shown the operations; the
+  proposer alone chooses the change. Optionally, how
   the steps took part (`steps`), as far as the items show it: `first_wrong` (the step
   where things first went wrong; in a loop or a long multi-turn run, the first step that
   did), `overrode` (later steps whose output replaced good work from an earlier step
@@ -1175,46 +1174,22 @@ paired with a parent picker), on the train records the request carries:
   step ids are kept (backticks and spaces stripped); a missing or malformed `steps` is
   `{}` and never fails the batch.
   Merges carry it through (each part's union).
-- **Success analysts.** The passed items likewise (seed + 1): what made them work, where
-  it comes from, and what a change must preserve.
+- **Success analysts.** The passed items likewise (seed + 1): what made them work and
+  where it comes from.
 - **Merge and rank.** Failure findings merge level by level in batches of
-  `analyst_merge_batch_size` lists (8), then success findings; a final merge with
-  failure priority returns one de-duplicated list ranked by items covered and impact.
+  `analyst_merge_batch_size` lists (8), then success findings; a final merge keeps both
+  sides' findings (a failure and a success finding about the same step are two facts)
+  in one list ordered by items covered, then impact. Merges are told, as the analysts
+  are, to say what happens and not what to do.
   As in SkillOpt, one list is not merged, the final merge runs only when both sides
   found something, and an unreadable merge keeps every input finding (failures first).
-- **Where the pipeline fails, step by step.** Right after the pipeline, the request
-  aggregates every failure finding per step (`analysts.step_map`): for each step, in the
-  pipeline's flow order (`analysts.flow_order`: the edges' topological order with
-  loop-closing edges set aside, not the sorted node list; the search for those edges
-  starts from entry steps, then other steps, then gates, so a loop's gate comes after
-  the step it guards whatever its id), the failed items and findings
-  that name it (`where`), that say things first went wrong there, that it replaced good
-  work from an earlier step with worse, and that it repeated other steps' output without
-  adding to it. An item counts once per cell however many findings cite it; a step id
-  the pipeline lacks is ignored and does not count as attribution; success findings do
-  not count. The caption says the map counts all failure findings, and, when there are
-  more findings than the ranked list shows (16), that the list shows only the top ones.
-  Findings without `steps` still count in the first column, and the section says how
-  many carry no attribution. When a step replaced earlier good work or repeated others'
-  output and the run permits structural operations, one line says such a cause can lie
-  in what the step is told or in what it is given and how the work is split between
-  steps, with examples of both (instructions on what to keep and when to depart from
-  it; independent attempts; a vote or a check; a check that sends a step back; a code
-  step when code nodes are allowed), and to choose by the evidence. With the analysts
-  off, the map comes from the readers' failure patterns (the step each starts in, its
-  items) when readers ran: only its first column (readers give no roles), counting only
-  the patterns that name a step (not `unclear`), its caption pointing at "What the
-  readers found"; with neither, there is no map. Each ranked failure finding
+- Each ranked failure finding
   also shows its attribution (`steps: first went wrong at ...`); success findings show
   none.
-- **The request** shows "What the analysts found, ranked" (up to 16 findings, 30000
-  characters) before the item results. Each finding is shown whole, as SkillOpt shows
-  its analysts' edits: its text, what to change and what to keep, where (a structure
-  note too), every evidence quote, line breaks kept; only when the findings pass the
-  section's room are the longest texts cut to one length (never below 100 characters),
-  each cut marked `… [cut: N chars]`. The analysts read the operations as the proposer
-  does (`base.operation_lines`, the same rows), so a finding names only an operation the
-  proposer is shown. An analyst's reply whose top-level JSON object does not parse is
+- **The request** shows "What the analysts found, ranked" before the item results:
+  every merged finding, whole, as SkillOpt shows its analysts' edits: its text, where
+  (a structure note too), how the steps took part, every item id and every evidence
+  quote, line breaks kept. Its size is reported, never capped. An analyst's reply whose top-level JSON object does not parse is
   said to be invalid JSON, with the parser's message and where (`reply_object`); it is
   not repaired, and no object nested inside it is read as the answer. A fenced block
   counts only when its opening and closing fences each start a line, so a fence quoted
@@ -1364,7 +1339,7 @@ optimizer's model writes ONE memory note (`optim/memory.py`), as SkillOpt's meta
   then the oldest evaluated -- and the cut says how many. So a pass in an epoch that
   kept nothing sees what was tried rather than "no changes" (a round that proposed
   nothing says so). Then the
-  previous note with SkillOpt's "reflect on whether it improved or harmed"; and the
+  previous record, to carry its facts forward; and the
   comparison as SkillOpt formats it: a summary, then regressions (right -> wrong,
   highest priority), persistent failures, improvements -- each item headed by what it
   asks (SkillOpt's `Task <id>: <question>`), with both outcomes,
@@ -1382,14 +1357,13 @@ optimizer's model writes ONE memory note (`optim/memory.py`), as SkillOpt's meta
     pipelines and what changed between them, exactly as the single call shows them (so
     an observation can say where in the pipeline a problem starts), what the score
     measures and the counts over all items, and writes up to 8 observations for the
-    future optimizer: what regressed, improved or still fails, and why, each citing its
-    items with short quotes. Its prompt is the memory prompt's, adapted: address the
-    future optimizer, use the traces' evidence, report what the traces show and leave
-    verdicts on the changes tried to the synthesis (which weighs each against them),
-    judging no kind of change in general, no instructions for the pipeline's steps.
+    record: what regressed, improved or still fails, and where it starts, each citing
+    its items with short quotes. Its prompt is the memory prompt's, adapted: report what
+    the traces show, nothing about what to do next, no claim about what can or cannot
+    work, no instructions for the pipeline's steps.
     Domain-free.
   - **One synthesis call.** The single call's request -- both pipelines, what changed,
-    what was tried, the objective, the previous note with SkillOpt's reflect wording
+    what was tried, the objective, the previous record
     -- with every comparison call's observations in place of the traces. It writes
     the note exactly as the single call does, under the same system prompt with its
     rules (one line says the comparison was read in parts). The comparison calls are
@@ -1406,29 +1380,26 @@ optimizer's model writes ONE memory note (`optim/memory.py`), as SkillOpt's meta
   comparison call (likewise for analyst and merge calls). Any call refused as too long
   is retried once at half the length (a
   comparison call with its traces cut to fit, counted; the synthesis with its pipeline
-  texts clipped, the observations whole). The prompt is SkillOpt's `meta_skill.md` for a graph: address
-  the future optimizer, regression risks, revise or drop what did not help, no
-  instructions for the pipeline's own steps -- with what SkillOpt needs no counterpart
-  of, having one kind of edit: lessons about each change tried (what it was -- the step
-  it changed or added, what a new step or judge was told to do or check, where it sits
-  and sends work back, its limits, the text it changed -- how it moved the items and
-  why) and what to try next given that, in place of SkillOpt's "which kinds of edit
-  help"; a statement about a kind of change in general only when several different
-  designs of that kind were tried and agree, never from one design whatever its effect;
-  a result inside the tally's noise is weak evidence even about that change; advice
-  only on changes with evidence in front of it (this epoch's tries, or what the
-  previous note records), none for or against changes nobody tried. Domain-free; train
-  items only.
-- **What it writes.** `{"reasoning", "memory"}`. SkillOpt sets no length (its real runs
-  wrote 3.4-5.8k characters); the note is asked for and kept within 6000 characters,
-  a longer one cut with the cut said.
-- **Who reads it.** Every analyst call and every merge call (with SkillOpt's
-  `format_meta_skill_context` wording, its "prefer it when the evidence is ambiguous"
-  replaced so an early note cannot become sticky: weigh it as evidence about the changes
-  it names, follow it where the current traces agree or say nothing, let them override
-  it, and never let it rule out a change nobody has tried or a different design of one
-  that failed; `memory.MEMORY_WEIGHT`) and the proposal request ("Optimizer memory"). It replaces the proposer's former `lessons`; the run ledger and the step
-  reviews stay. It never edits the graph.
+  texts clipped, the observations whole). The prompt is not SkillOpt's
+  `meta_skill.md` coach note: the note is the run's record, facts only (`MEMORY_SYSTEM`).
+  It holds each change tried, this epoch and as the previous record holds earlier ones:
+  what it was (the step it changed or added, what a new step or judge was told to do or
+  check, where it sits and sends work back, its limits, the text it changed), whether it
+  was kept, not kept or refused and why, and which train items it fixed and broke; what
+  keeps failing and where the traces show it starts; and at most a few short
+  observations of what the traces show, each naming its items. It forbids next steps,
+  priorities, lessons, meta-lessons, principles and regression-risk advice, and any claim
+  about what can or cannot work, be built or be edited. Domain-free; train items only.
+- **What it writes.** `{"reasoning", "memory"}`, the note kept as written: the prompt
+  forbids advice, and nothing filters the answer. SkillOpt sets no length (its real runs wrote
+  3.4-5.8k characters); the note is kept within 6000 characters, a longer one cut with
+  the cut said.
+- **Who reads it.** Every analyst call and every merge call (where SkillOpt shows its
+  meta skill) and the proposal request ("Optimizer memory"), each told it is a record of
+  facts, not advice, and that the current traces hold where they differ
+  (`memory.MEMORY_WEIGHT`). The proposal shows the note only: every change and its counts
+  are in the request's own ledger ("Every change so far"). It replaces the proposer's
+  former `lessons`; the run ledger and the step reviews stay. It never edits the graph.
 - **When it fails.** Where SkillOpt then has no meta skill, the loop keeps the previous
   note, marked NOT UPDATED in that epoch with why, in every request that shows it; the
   next pass that writes one clears the mark. The call is retried as every optimizer call
@@ -2126,11 +2097,22 @@ the same digest as before, so it still resumes.
 
 **What the optimizer is told.** The request's "How nodes compose" section
 (`optim.base.composition_section`) describes the four kinds: what each reads and writes,
-how a gate gets its verdict, and how loops and forks are formed. It adds at most two short
-examples built from this graph's own ids: an agent-verdict loop around a step, and a code
-op that computes a fact for a later step. Code nodes appear in the section only when the
-run offers them. The section prescribes nothing: the examples are compositions, not a
-menu.
+how a gate gets its verdict, how loops and forks are formed, and what happens when a call
+runs out of output or crashes, as facts (with `structure_guidance` on, one generic
+paragraph on what makes a new step pay off is added); each operator's own example is on
+its line under the operations. Code nodes appear in the section only when the run
+offers them.
+
+**What this graph allows.** The reference also carries facts about the edited graph,
+worked out once per request by the loop (`Loop._graph_facts`, `optim.base.graph_facts`,
+`ProposalContext.graph_facts`): what `"sees": ["task"]` gives a new step, what a new
+branch of each fork can see (`name@maker`, `(+knob k)` for an output that carries text
+knob `k`), and for each step whether removing it, replacing it by one step that sees the
+task, or merging it with the step after it is refused, in the attempt's own words
+(`Run.mechanics` on the edited candidate, without the code dry run). Accepted edits are
+not listed. A fact that cannot be worked out (the attempt raises, the graph or its task
+inputs do not read back) is said in its row, `not worked out (<error>)`, never left
+out, and journaled as `graph_facts_not_worked_out` with each failure.
 
 ### Wiring blocks, repair and checks before scoring
 
@@ -2424,14 +2406,10 @@ and a knob's changed lines against its parent (`memory.edits_text`, one line, at
 sits and what it sends back (`feedback.placement_lines`: `new gate solve_check after
 solve: reloop -> solve, proceed -> ...; sends back at most 1 time`). The tally groups by
 the change itself (`memory.change_tally_lines`, by `feedback.change_label`), the kind
-only a label in its line, as the run ledger does. `MEMORY_SYSTEM` asks for lessons about
-each change tried -- what it was, how it moved the items and why -- and what to try next
-given that; a statement about a kind of change in general only when several different
-designs of that kind were tried and agree, never from one design whatever its effect
-size; a result inside the noise is weak evidence even about the change itself. The
-"which kinds help / which kinds are harmful" bullets are gone, and a previous note that
-judges a kind from one design is to be revised. The proposer's tally line says the same
-(`memory.TALLY_NOISE_RULE`). SkillOpt's own port (`refactory_packages/skillopt`) builds
+only a label in its line, as the run ledger does. `MEMORY_SYSTEM` (since the
+factual record) asks for each change tried -- what it was, whether it was kept and why,
+which items it fixed and broke -- and judges no kind of change at all; a result inside
+the noise is weak evidence even about the change itself. SkillOpt's own port (`refactory_packages/skillopt`) builds
 its own prompts and is unchanged.
 
 **How a structural edit moved its items.** A child's counts ("1 fixed, 8 broken") say
@@ -2450,15 +2428,9 @@ child too), and memory's "What was tried this epoch" under each structural chang
 stopped S1-s45 run the loop broke 8 items; on 5, the solver's first reply was right before
 the judge sent it back.
 
-**The request.** Under "Structural operators", one line and one example per operator,
-with this graph's ids; then compositions built only from them -- several attempts and a
-choice (`parallelize` copies, an `insert` judge after the join, an `insert` `select` op),
-check and send back (`loop`), an independent attempt (`branch` or `parallelize` with
-`sees: ["task"]`), a simulation then an analysis (`insert` code, then an agent), a
-background pass beside an experiment (`parallelize` new), iterative fitting (`loop` with a
-code judge), a tool step before reasoning (only when the run allows tools for new steps),
-and dropping a step -- under "none is the preferred shape -- compose your own", rotated by
-generation. The answer format asks a structural proposal for `addresses` (the failure,
+**The request.** Under "The operations you may use" in the reference, after the
+written-out operations, one line and one example per structural operator, with this
+graph's ids. The answer format asks a structural proposal for `addresses` (the failure,
 citing steps and items by id), `flow_change` (which step sees what) and a checkable
 `prediction`; one missing them is judged anyway and marked (`reasoning_missing` in its
 proposal record). "What the last edit changed" puts each child's prediction beside a
@@ -2691,11 +2663,11 @@ pipeline view (at most 12 lines a candidate, the rest counted).
 
 **Naming inputs.** `"sees"` takes `"task"`, step ids, or single fact or file names there
 before the new step (that input alone); the catalogue says so, a name that is not there is
-refused with the names that are, and each fork's row in the operator table lists what a new
+refused with the names that are, and "What this graph allows" says for each fork what a new
 branch there can name, `(+knob k)` marking an output that carries text knob `k`.
 
 **What `"task"` gives.** `operators.task_inputs` is the one definition the operator line,
-the pipeline view, the step-carries table and the operators' wiring read: the task's own
+the pipeline view, "What this graph allows" and the operators' wiring read: the task's own
 input, once, as the model steps receive it. A name is out when an agent makes it, when an
 op makes it with a text knob's value, or when a node that takes such a name in makes it.
 Of the rest, it is what is there before some model step and made by an op of the mode
@@ -2718,37 +2690,6 @@ no step reads any more (S4's `hypotheses_task` once `hypotheses` is rewired to t
 reaches no step: it is left out of `to` hints, a `to` naming it is refused `E-wiring`, and
 setting it is refused `E-unread`, naming the step it reached before
 (`core_ops.dead_text_knobs`).
-
-**What each step carries, and which operators apply to it.** After "Structural operators"
-the request has one row per step (`operator_fit_section` in `optim/base.py`): what a model
-step's prompt and reads carry, each with its maker, a fact a plain op builds followed back
-through the plain ops that built it to its sources (model steps, what the run was given,
-knobs; at most 4 ops deep, `CARRIES_DEPTH`). An op with several outputs that does not
-declare `knob_outputs` has its knobs marked as the op's
-(`(op O, which reads ..., knob(s) a, b (the op's, for all 2 of its outputs))`),
-and which core operators apply to the step as written with their default arguments and
-which are refused, in the refusal's own words (equal reasons grouped). Each verdict is the
-run's own attempt on the edited candidate (`Run.mechanics`: the catalogue, then
-`Optimizer.attempt` with the run's protected and grading steps, frozen and guarded knobs,
-wiring and validation; everything `Run.attempt` checks but the model-judged integrity
-check), recording nothing and without the code dry run (a sandbox process for each edit
-on each request): an accepted edit that adds or changes code is marked "(not dry-run)",
-and proposing it runs the dry run as any attempt does. A request built outside a run has
-no section. A refusal that
-points to replacing a step names the exact edit (`{"op": "split", "step": ..., "into":
-[one step]}`) only when an attempt would accept it (`checked_hint`), and otherwise says why
-replacing it is refused too. That check skips the code dry run (a sandbox process on every
-request), so an accepted code replacement is marked "(not dry-run)"; proposing it runs
-the dry run as any attempt does. The section fits 7000 characters: refusals are cut to their
-first clause, then rows are left out, last first, and counted among the listed steps.
-The lead also names what `"sees": ["task"]` gives a new step on this pipeline, in the
-words the `rewire` line uses (`operators.TASK_MEANING`, computed by
-`operators.task_inputs`). The `loop` line states the verdict format (`proceed` or
-`reloop`, then why, which reaches the step sent back), what the judge sees by default (what
-the step read and wrote) and the cap (`max_iterations` in the edit, then the knob
-`<gate>__max_iterations`: send-backs, so at most that many runs plus one; default 2, 1 to
-5, after which the run goes on). A fork's row says what a new branch that sees the task
-takes in there.
 
 **Turning it off.** The operators are in the `broad` and `structure` presets; the
 `conservative` and `knob_only` presets are unchanged, and a run that allows only some

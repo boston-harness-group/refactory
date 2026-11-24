@@ -541,8 +541,12 @@ def test_a_self_check_that_says_nothing_goes_on_with_no_fixup(tmp_path, monkeypa
     [record] = _records(run)
     assert record["outcome"] == "inconclusive" and record["ran"] == []
     assert record["cut"] == ["tests/test_slow.py"]
-    # Stopped at the self-check's limit, not at the check's 10 s.
-    assert record["limit_s"] == 3 and record["duration_s"] < 2 * record["limit_s"]
+    # Stopped at the self-check's limit, not at the check's 10 s: its one chunk was given
+    # the 3 s that were left and stopped there (events, not wall time, which load stretches).
+    [timing] = record["timings"]
+    assert record["limit_s"] == 3 and timing["timed_out"] and timing["tests"] == ["tests/test_slow.py"]
+    assert record["notes"] == ["chunk 1 of 1 was stopped at the 3 s limit, so it and the rest "
+                               "did not report"]
     assert (run / CHECK_PREP).exists()
     facts = _facts(run)
     assert not facts.get("self_check_fixup_count") and not facts.get("attempts_used")
@@ -1995,7 +1999,7 @@ def test_a_real_pytest_chunk_records_its_tests_seconds_from_junit_outside_the_wo
     assert timing["durations"][0]["seconds"] >= 0
     [command] = [command for command in sent if "pytest" in command]
     assert command.startswith(record["commands"][0] + " --junitxml=")
-    junit = Path(command.split("--junitxml=", 1)[1])
+    junit = Path(command.split("--junitxml=", 1)[1].split()[0])
     found = worktree.recorded(run)
     assert junit.is_absolute() and not junit.exists()
     assert not junit.resolve().is_relative_to(Path(found.path).resolve())
@@ -2009,7 +2013,9 @@ def test_a_real_pytest_chunk_records_its_tests_seconds_from_junit_outside_the_wo
 
     failfast.targeted_prepass({}, "python -m pytest -q tests && python tools/lint.py", run_fn, 180,
                               root=str(repo), selection=["tests/test_pin.py"], self_check_timeout_s=60)
-    assert several == ["python -m pytest -q tests/test_pin.py && python tools/lint.py"]
+    # No --junitxml; only the pytest step prints a line per test (`failfast._with_test_lines`).
+    assert several == ["python -m pytest -q tests/test_pin.py -o verbosity_test_cases=1 "
+                       "&& python tools/lint.py"]
 
 
 def test_two_consecutive_empty_diff_fixups_with_fixups_1_exhausts(tmp_path, monkeypatch):

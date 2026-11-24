@@ -497,7 +497,7 @@ def test_a_map_agrees_across_the_operator_section_the_legend_and_the_view(tmp_pa
     text, state = _request(tmp_path, "livemath/skill_graph",
                            {"op": "map", "after": "compare", "over": "compare", "max": 3,
                             "text": "Check this note."})
-    section = _section(text, "## Structural operators")
+    section = _section(text, "### The operations you may use")
     line = next(row for row in section.splitlines() if row.startswith("- `map` ("))
     assert core_ops.OPERATORS["map"]["line"] in line
     form = pipeline_view.FORMS["map"]
@@ -516,7 +516,7 @@ def test_a_fallback_agrees_across_the_operator_section_the_legend_and_the_view(t
     text, state = _request(tmp_path, "livemath/skill_graph",
                            {"op": "fallback", "step": "decide", "kind": "agent",
                             "text": "Answer with just the letter."})
-    section = _section(text, "## Structural operators")
+    section = _section(text, "### The operations you may use")
     line = next(row for row in section.splitlines() if row.startswith("- `fallback` ("))
     assert core_ops.OPERATORS["fallback"]["line"] in line
     form = pipeline_view.FORMS["fallback"]

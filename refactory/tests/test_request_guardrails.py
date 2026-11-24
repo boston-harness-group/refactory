@@ -391,9 +391,9 @@ def test_the_operators_lead_is_its_constant_and_makes_no_wiring_claim(requests):
     claim scan above is the net for everything else."""
     assert not WIRING_CLAIM.search(base.STRUCTURAL_LEAD)
     assert not re.search(r"(?i)\bsees\b|reach", base.STRUCTURAL_LEAD.split("line below says")[1])
-    leads = [text.split("## Structural operators\n", 1)[1].split("\n", 1)[0]
-             for text, _records in requests["proposal"] if "## Structural operators" in text]
-    assert leads and all(lead == base.STRUCTURAL_LEAD for lead in leads), leads[:1]
+    leads = [text.split("### The operations you may use\n", 1)[1].split("\n### ", 1)[0]
+             for text, _records in requests["proposal"]]
+    assert leads and all(lead.count(base.STRUCTURAL_LEAD) == 1 for lead in leads), leads[:1]
 
 
 def _view_block(text: str) -> str:
@@ -413,12 +413,6 @@ def test_every_call_that_shows_the_pipeline_shows_the_proposer_s_view_once(kind,
         if kind.startswith("analyst"):
             assert _view_block(text) == _view_block(proposal), kind
         assert "Nodes:" not in text and '"field_bindings"' not in text, kind
-
-
-def _op_rows(text: str, heading: str) -> list[str]:
-    section = text.split(heading, 1)[1].split("\n## ", 1)[0]
-    return [line.split("|")[1].strip() for line in section.splitlines()
-            if line.startswith("| ") and not line.startswith("| op |")]
 
 
 def _settings_once(text: str) -> str:
@@ -452,14 +446,6 @@ def test_no_long_sentence_is_said_twice_even_inside_fences(kind, requests):
     for text, _records in requests[kind]:
         repeats = repeated_sentences(_settings_once(text), fenced=True)
         assert repeats == [], (kind, repeats[:3])
-
-
-@pytest.mark.parametrize("kind", ["analyst_failure", "analyst_success"])
-def test_an_analyst_names_only_operations_the_proposer_is_shown(kind, requests):
-    for (text, _records), (proposal, _r) in zip(requests[kind], requests["proposal"]):
-        analyst = _op_rows(text, "## The changes the optimizer can make")
-        shown = _op_rows(proposal, "## The operations you may use")
-        assert analyst and analyst == shown, (kind, set(analyst) ^ set(shown))
 
 
 @pytest.mark.parametrize("kind", KINDS)

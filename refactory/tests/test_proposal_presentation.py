@@ -293,7 +293,8 @@ def test_the_request_lists_the_facts_each_node_has_and_how_a_file_becomes_one():
     assert "decide_prompt" not in available["compare"]["facts"]
     text = _render(available=available, code_nodes=True)
     # In the reference at the end, with the nodes and edges.
-    reference = text[text.index(base.REFERENCE_HEADING):].split("\n## ", 1)[0]
+    available_at = "### What each node has before it runs"
+    reference = text[text.index(available_at):].split("\n### ", 1)[0]
     rows = {line.split("|")[1].strip(): line for line in reference.splitlines()
             if line.startswith("| ") and not line.startswith("| node(s)")}
 
@@ -310,7 +311,7 @@ def test_the_request_lists_the_facts_each_node_has_and_how_a_file_becomes_one():
     assert "compare_notes.txt@compare" in seen
     assert "a file's name is not a fact" in reference and "snippet:run" in reference
     plain = _render(available=available, code_nodes=False)
-    plain = plain[plain.index(base.REFERENCE_HEADING):].split("\n## ", 1)[0]
+    plain = plain[plain.index(available_at):].split("\n### ", 1)[0]
     assert "a file's name is not a fact" in plain and "snippet:run" not in plain
     assert "facts available" not in _render()
 
@@ -438,7 +439,8 @@ def test_past_structural_edits_keep_every_steps_wiring_in_every_section():
     # The reasoning and its full rejected edits point to the edit section, which shows
     # them at the full edits' budget, rather than saying the wiring again.
     assert 'under "What the last edit changed" above' in reasoning
-    assert 'Whole under "What the last edit changed" above' in full and '"id"' not in full
+    assert 'Its edits are whole under "What the last edit changed" above' in full
+    assert '"id"' not in full
     assert len(tried) < 6000, "the history stays bounded"
 
 

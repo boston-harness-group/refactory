@@ -701,20 +701,6 @@ def test_a_state_this_version_saved_is_never_upgraded():
 # ── C. the request ────────────────────────────────────────────────────────
 
 
-def test_the_operator_table_offers_no_tools_when_the_run_has_none():
-    """[request text, the same tools answer as the operator lines] SpreadsheetBench's table:
-    with no tool step, no refusal says 'tools'; with one, its refusals are as before."""
-    from test_operator_fit import _section
-
-    mode = sb_mode.Solver()
-    state, protected = mode.state_dict(), tuple(mode.edit_protected())
-    on = "\n".join(_section(state, protected=protected, limit=10 ** 6, tools=True))
-    off = "\n".join(_section(state, protected=protected, limit=10 ** 6, tools=False))
-    assert "'tools'" not in off
-    assert "give it a code step, or 'tools'" in on
-    assert off == core_ops.refusal_without_tools(on)
-
-
 def test_a_run_that_offers_no_tool_step_offers_no_tools_anywhere():
     """[request text] With no tool step (no seal, or ``new_step_tools`` off) no operator
     line or field offers 'tools'; with one, insert's and map's do."""
@@ -767,41 +753,6 @@ def test_the_pipeline_view_shows_the_item_files_and_who_reads_them():
     out = _sb_attempt([{**INSPECT, "to": "solve"}])
     assert "item/input.xlsx seen by finalize, inspect, prepare, run_turn" in \
         pv.render(out.state, protected).splitlines()[0]
-
-
-def _table_rows(state: dict, protected: tuple) -> dict[str, list[str]]:
-    from test_operator_fit import _rows, _section
-
-    return _rows(_section(state, protected=protected, limit=10 ** 6))
-
-
-#: The most a step's "carries" cell may hold in a loop.
-CARRIES_CAP = 600
-
-
-def test_the_operator_table_stays_short_in_a_loop_and_agrees_with_an_attempt():
-    """[request text, checked by attempts] In SpreadsheetBench's turn loop each producer is
-    followed once and what feeds a step from the loop's previous round is said so; the
-    rows' verdicts are an attempt's, and B's 'to' shows inserts before solve applying."""
-    from test_operator_fit import _check_rows_are_true
-
-    mode = sb_mode.Solver()
-    state, protected = mode.state_dict(), tuple(mode.edit_protected())
-    rows = _check_rows_are_true(state, protected)
-    carries = rows["solve"][0]
-    assert len(carries) <= CARRIES_CAP, carries
-    assert "op run_turn, from the loop's previous round" in carries
-    assert carries.count("op prepare, which reads") == 1
-    assert "+ to solve: insert" in rows["frame"][1], rows["frame"]
-    assert "rewire (sees task alone)" in rows["solve"][2]
-
-
-@pytest.mark.parametrize("seed", ["fuzz_gate_loop", "fuzz_nested_fork", "fuzz_data_pass"])
-def test_every_carries_cell_is_bounded_in_other_shapes(seed):
-    """[request text] Loops, nested forks and data passes keep each cell short."""
-    applier = sf.Applier(sf.seeds()[seed])
-    rows = _table_rows(applier.seed_state, applier.protected)
-    assert rows and all(len(cells[0]) <= CARRIES_CAP for cells in rows.values()), rows
 
 
 # ── E. new_step_tools ─────────────────────────────────────────────────────

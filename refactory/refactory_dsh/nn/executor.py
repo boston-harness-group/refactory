@@ -2254,9 +2254,13 @@ class Executor:
         from refactory_dsh.agent_delivery import _path, fill_feedback, previous_output, with_feedback
 
         # ASK-4a / gap 15: Refuse a node whose declared reads are missing,
-        # matching the spine's worker_node.py:82-84.
+        # matching the spine's worker_node.py:82-84; a sealed Claude Code step runs
+        # without a read only such steps may leave out (`workspace.optional_reads`).
+        from refactory_dsh.workspace import optional_reads, present_reads
+
+        _optional_reads = optional_reads(self.graph, node.id)
         for name in node.reads:
-            if not _path(self.ctx.workdir, name).exists():
+            if name not in _optional_reads and not _path(self.ctx.workdir, name).exists():
                 raise ValueError(f'required worker input is missing: {name}')
 
         client = self.ctx.model
@@ -2331,7 +2335,8 @@ class Executor:
             return workspaces.dispatched(
                 self.ctx.workdir, node.id, node.workspace, knobs=self.ctx.knobs, facts=self.ctx.facts,
                 route=route, budget=self.ctx.budget, fresh=retrying and not kept,
-                tools=node.tools if is_sealed(node) else (), reads=node.reads,
+                tools=node.tools if is_sealed(node) else (),
+                reads=present_reads(self.ctx.workdir, node.reads, _optional_reads, node.id),
                 runtime_root=Path(model_context["runtime_root"]) if (model_context or {}).get("runtime_root")
                 else None)
 

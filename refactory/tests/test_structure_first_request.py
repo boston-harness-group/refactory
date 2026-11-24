@@ -93,18 +93,23 @@ def _section(text: str, heading: str) -> str:
     return text.split(f"## {heading}\n", 1)[1].split("\n## ", 1)[0]
 
 
-# ── (a) the pipeline first, the settings after the operations ─────────────────
+# ── (a) the pipeline first, the reference last ────────────────────────────────
 
 
-def test_the_request_leads_with_the_graph_and_shows_the_settings_after_the_operations():
+def test_the_request_leads_with_the_graph_and_ends_with_one_reference():
     text = _ctx3(analysis={"findings": FINDINGS, "batches": []}, parsimony=0.0).render()
     heads = _headings(text)
     order = ["What the score measures", "The pipeline you may edit",
-             "What the analysts found, ranked", "Where the pipeline fails, step by step",
-             "The operations you may use", "How nodes compose", "Each step's settings",
-             "Each step in full, and the node schema", "The rules the validator checks",
-             "Answer"]
+             "What the analysts found, ranked", "Each step's settings",
+             base.REFERENCE_HEADING[3:], "Answer"]
     assert [h for h in heads if h in order] == order
+    reference = text.split(base.REFERENCE_HEADING, 1)[1].split("\n## Answer", 1)[0]
+    subsections = [line[4:] for line in reference.splitlines() if line.startswith("### ")]
+    assert [h for h in subsections if h in (
+        "The operations you may use", "How nodes compose", "Each node in full",
+        "Node schemas", "The rules the validator checks")] == [
+        "The operations you may use", "How nodes compose", "Each node in full",
+        "Node schemas", "The rules the validator checks"]
     assert "Parameters you may move" not in heads
     # Reorganised, not dropped: every knob's exact text is in the settings table.
     settings = _section(text, "Each step's settings")
@@ -238,7 +243,7 @@ def test_every_call_that_weighs_a_change_says_the_same_compute_policy(tmp_path):
         said = ProposalContext(parsimony=parsimony, score_is_item_mean=True,
                                selection="validation").render()
         assert said.count(policy) == 1
-    assert "not a reason to avoid adding or changing" in analysts.system("success")
+    assert "Do not propose changes" in analysts.system("success")
     assert "Compute policy" not in analysts.system("success")
 
 
@@ -295,60 +300,6 @@ def test_step_attribution_is_parsed_and_malformed_parts_are_ignored():
     assert "Leave out what the items cannot show" in analysts.FAILURE_SYSTEM
 
 
-def test_the_step_map_counts_items_once_per_step_and_role():
-    rows = {r["step"]: r for r in analysts.step_map(FINDINGS, NODES)}
-    assert list(rows) == ["draft", "review", "finalize"], "the pipeline's order"
-    assert rows["draft"]["named"] == {"items": 3, "findings": 2}
-    assert rows["draft"]["first_wrong"] == {"items": 2, "findings": 1}
-    assert rows["review"]["first_wrong"] == {"items": 2, "findings": 1}
-    assert rows["review"]["repeated"] == {"items": 2, "findings": 1}
-    assert rows["finalize"]["overrode"] == {"items": 2, "findings": 1}
-    # Success findings are not failures: S-KEEP's `finalize` is not counted.
-    assert "first_wrong" not in rows["finalize"]
-    # A step the pipeline does not have is ignored; odd entries never raise.
-    odd = [{"source": "failure", "items": "i1", "where": "finalize",
-            "steps": {"first_wrong": "ghost"}}, "junk", None,
-           {"items": [["i"]], "where": {"nodes": [1, "draft"]}, "steps": []}]
-    assert [r["step"] for r in analysts.step_map(odd, NODES)] == ["draft"]
-
-
-def test_the_step_map_takes_any_graph_shape():
-    """A gate, a step that repeats its own earlier attempt in a loop, parallel branches
-    that echo each other, a code op: every node id can fill a role."""
-    found = [{"source": "failure", "items": ["i1", "i2"],
-              "where": {"nodes": ["attempt", "attempt_check"]},
-              "steps": {"first_wrong": "attempt_check", "repeated": ["attempt"]}},
-             {"source": "failure", "items": ["i3"], "where": {"nodes": ["branch_b"]},
-              "steps": {"repeated": ["branch_a", "branch_b"], "overrode": ["tally"]}}]
-    rows = {r["step"]: r for r in analysts.step_map(found, LOOPED, LOOPED_EDGES)}
-    assert list(rows) == ["attempt", "attempt_check", "branch_a", "branch_b", "tally"]
-    assert rows["attempt_check"]["first_wrong"] == {"items": 2, "findings": 1}
-    assert rows["attempt"]["repeated"]["items"] == 2
-    assert rows["tally"]["overrode"]["items"] == 1
-    # Without the graph (nodes unknown), every id the findings give is kept, sorted.
-    assert [r["step"] for r in analysts.step_map(found)] == sorted(rows)
-
-
-def test_the_step_map_follows_the_flow_not_the_listed_order():
-    """A mode lists its nodes sorted by id; the map follows the edges, loops included."""
-    assert analysts.flow_order(LOOPED, LOOPED_EDGES) == [
-        "begin", "attempt", "attempt_check", "fork_1", "branch_a", "branch_b", "join_1", "tally"]
-    found = [{"source": "failure", "items": ["i1"],
-              "where": {"nodes": ["tally", "begin", "attempt_check"]}}]
-    assert [r["step"] for r in analysts.step_map(found, LOOPED, LOOPED_EDGES)] == [
-        "begin", "attempt_check", "tally"]
-    # In the request too: the edges order the rows, not the node list.
-    text = ProposalContext(nodes=list(reversed(NODES)), edges=EDGES, catalogue=edits.catalogue(),
-                           analysis={"findings": FINDINGS, "batches": []}).render()
-    rows = [line.split(" | ")[0][2:] for line in _section(
-        text, "Where the pipeline fails, step by step").splitlines()
-        if line.startswith("| ") and not line.startswith(("| step", "|---"))]
-    assert rows == ["draft", "review", "finalize"]
-    # Malformed edges or nodes are skipped, never raise.
-    assert analysts.flow_order([{"id": "a"}, "x", {"id": "b"}],
-                               [None, {"source": "b", "target": "a"}, {"source": "z"}]) == ["b", "a"]
-
-
 def _kinds(*ids: str, gates: tuple[str, ...] = (), forks: tuple[str, ...] = (),
            joins: tuple[str, ...] = ()) -> list[dict[str, str]]:
     kind = {**{g: "gate" for g in gates}, **{f: "fork" for f in forks}, **{j: "join" for j in joins}}
@@ -359,134 +310,11 @@ def _wires(*pairs: str) -> list[dict[str, str]]:
     return [dict(zip(("source", "target"), pair.split(">"))) for pair in pairs]
 
 
-@pytest.mark.parametrize("nodes,edges,flow", [
-    # A gate whose id sorts before the step it guards, with no entry step.
-    (_kinds("solve", "check", "z_end", gates=("check",)),
-     _wires("solve>check", "check>solve", "check>z_end"), ["solve", "check", "z_end"]),
-    # ... and with an entry step.
-    (_kinds("prep", "solve", "check", "z_end", gates=("check",)),
-     _wires("prep>solve", "solve>check", "check>solve", "check>z_end"),
-     ["prep", "solve", "check", "z_end"]),
-    (_kinds("x_start", "m_work", "b_gate", "z_end", gates=("b_gate",)),
-     _wires("x_start>m_work", "m_work>b_gate", "b_gate>m_work", "b_gate>z_end"),
-     ["x_start", "m_work", "b_gate", "z_end"]),
-    # A fork inside a loop: the gate after the join sends the work back to the fork's step.
-    (_kinds("a_entry", "work", "fork", "left", "right", "join", "a_gate", "out",
-            gates=("a_gate",), forks=("fork",), joins=("join",)),
-     _wires("a_entry>work", "work>fork", "fork>left", "fork>right", "left>join",
-            "right>join", "join>a_gate", "a_gate>work", "a_gate>out"),
-     ["a_entry", "work", "fork", "left", "right", "join", "a_gate", "out"]),
-])
-def test_a_loops_gate_comes_after_the_steps_it_guards_whatever_its_id(nodes, edges, flow):
-    assert analysts.flow_order(nodes, edges) == flow
-
-
-def test_an_item_cited_by_two_findings_for_the_same_step_and_role_counts_once():
-    found = [{"source": "failure", "items": ["i1", "i2"], "where": {"nodes": ["review"]},
-              "steps": {"first_wrong": "review"}},
-             {"source": "failure", "items": ["i2", "i3"], "where": {"nodes": ["review"]},
-              "steps": {"first_wrong": " `review` "}}]
-    row = analysts.step_map(found, NODES)[0]
-    assert row["step"] == "review"
-    assert row["first_wrong"] == {"items": 3, "findings": 2}
-    assert row["named"] == {"items": 3, "findings": 2}
-
-
 CAUSE = ("the cause can lie in what the step is told (its instructions) or in what it is "
          "given and how the work is split between steps. For example: instructions on what "
          "to keep from earlier steps and when to depart from it; independent attempts that do "
          "not see each other's output; a vote or a check across attempts; a check that sends "
          "a step back with a reason; a deterministic code step. Choose by the evidence.")
-
-
-def test_the_request_shows_the_step_map_and_the_cause_line_only_when_steps_interact():
-    text = _ctx3(analysis={"findings": FINDINGS, "batches": []}, code_nodes=True).render()
-    section = _section(text, "Where the pipeline fails, step by step")
-    assert "| finalize | 2 (1) | - | 2 (1) | - |" in section
-    assert "| review | - | 2 (1) | - | 2 (1) |" in section
-    assert "(1 of 3 failure finding(s) say only where they start" in section
-    assert "Counted over all 3 failure finding(s)." in section
-    # Both causes stay equal; structures are examples beside an instruction fix.
-    assert CAUSE in " ".join(section.split())
-    assert "remedy" not in section and "not more instructions" not in section
-    assert ("steps: first went wrong at: `review`; replaced good work from an earlier step "
-            "with worse: `finalize`") in text
-    # Old findings (no attribution) still map by where they start, with no cause line.
-    old = [{k: v for k, v in f.items() if k != "steps"} for f in FINDINGS]
-    plain = _section(_ctx3(analysis={"findings": old, "batches": []}).render(),
-                     "Where the pipeline fails, step by step")
-    assert "| draft | 3 (2) | - | - | - |" in plain and "the cause can lie" not in plain
-    # A settings-only run is not handed structural examples.
-    knob_only = _ctx3(analysis={"findings": FINDINGS, "batches": []},
-                      catalogue=edits.catalogue("knob_only")).render()
-    assert "the cause can lie" not in _section(knob_only, "Where the pipeline fails, step by step")
-    # No analysis, or no failure finding that names a step: no section.
-    assert "Where the pipeline fails" not in _ctx3().render()
-    assert "Where the pipeline fails" not in _ctx3(
-        analysis={"findings": [FINDINGS[3]], "batches": []}).render()
-
-
-def test_only_first_wrong_gives_no_cause_line():
-    found = [{"source": "failure", "items": ["i1"], "where": {"nodes": ["draft"]},
-              "steps": {"first_wrong": "draft"}}]
-    section = _section(_ctx3(analysis={"findings": found, "batches": []}).render(),
-                       "Where the pipeline fails, step by step")
-    assert "| draft | 1 (1) | 1 (1) | - | - |" in section
-    assert "the cause can lie" not in section
-
-
-def test_unknown_ids_do_not_count_as_attributed_and_success_lines_show_no_roles():
-    found = [{"source": "failure", "items": ["i1"], "where": {"nodes": ["draft"]},
-              "steps": {"first_wrong": "ghost", "overrode": ["phantom"]}},
-             {"source": "failure", "items": ["i2"], "where": {"nodes": ["draft"]},
-              "steps": {"first_wrong": "draft"}}]
-    section = _section(_ctx3(analysis={"findings": found, "batches": []}).render(),
-                       "Where the pipeline fails, step by step")
-    assert "(1 of 2 failure finding(s) say only where they start" in section
-    line = analysts.finding_line(1, {"source": "success", "finding": "S", "items": ["i5"],
-                                     "steps": {"first_wrong": "finalize"}})
-    assert "first went wrong" not in line and "steps:" not in line
-
-
-def test_the_caption_says_when_the_map_counts_more_than_the_list_shows():
-    many = [{"source": "failure", "finding": f"F{n}", "items": [f"i{n}"],
-             "where": {"nodes": ["draft"]}} for n in range(analysts.SHOWN_FINDINGS + 2)]
-    section = _section(_ctx3(analysis={"findings": many, "batches": []}).render(),
-                       "Where the pipeline fails, step by step")
-    assert (f"Counted over all {len(many)} failure finding(s); the list below shows the top "
-            f"{analysts.SHOWN_FINDINGS} findings of either kind.") in section
-
-
-def test_without_analysts_the_map_comes_from_the_readers_patterns():
-    readers = [{"failure_patterns": [
-                    {"pattern": "p1", "step": "review", "items": ["i1", "i2"]},
-                    {"pattern": "p2", "step": "unclear", "items": ["i3"]},
-                    {"pattern": "p3", "step": "`draft`", "items": ["i4"]}],
-                "success_patterns": [{"pattern": "s", "step": "finalize", "items": ["i5"]}]},
-               {"failure_patterns": [{"pattern": "p4", "step": "review", "items": ["i2", "i6"]},
-                                     "junk", {"step": None}]}]
-    text = _ctx3(reader_findings=readers).render()
-    section = _section(text, "Where the pipeline fails, step by step")
-    assert ("From the readers' failure patterns for this candidate (in full under \"What the "
-            "readers found\")") in section
-    # Readers give no roles: only the first column, no attribution line, and the patterns
-    # that name no step ("unclear", none) are not counted.
-    assert "| step | named in failure findings |\n" in section
-    assert "| review | 3 (2) |\n" in section and "| draft | 1 (1) |\n" in section
-    assert "first went wrong" not in section and "say only where they start" not in section
-    assert "Counted over all 3 failure pattern(s)." in section
-    assert "finalize" not in section and "the cause can lie" not in section
-    assert (text.index("## The pipeline you may edit")
-            < text.index("## Where the pipeline fails, step by step")
-            < text.index("## The operations you may use"))
-    # "unclear" names no step, with or without a known graph.
-    assert [f["where"]["nodes"] for f in analysts.reader_failures(readers)] == [
-        ["review"], [], ["draft"], ["review"], []]
-    # With an analysis the analysts' findings are used, not the readers'.
-    both = _section(_ctx3(reader_findings=readers,
-                          analysis={"findings": FINDINGS, "batches": []}).render(),
-                    "Where the pipeline fails, step by step")
-    assert "From the analysts' failure findings" in both
 
 
 def test_a_text_setting_with_line_breaks_or_a_bar_is_shown_exactly():
@@ -519,8 +347,10 @@ def test_the_attribution_survives_the_analyst_stage_into_the_request():
     assert all(f["steps"] == {"first_wrong": "final", "overrode": ["final"]}
                for f in optimizer.last_analysis["findings"] if f["source"] == "failure")
     request = client.proposal()
-    section = _section(request, "Where the pipeline fails, step by step")
-    assert re.search(r"\| final \| 3 \(\d\) \| 3 \(\d\) \| 3 \(\d\) \| - \|", section), section
+    section = _section(request, "What the analysts found, ranked")
+    assert ("steps: first went wrong at: `final`; replaced good work from an earlier step "
+            "with worse: `final`") in section
+    assert "-- change:" not in section and "-- keep:" not in section
 
 
 # ── domain-free ────────────────────────────────────────────────────────────────
@@ -530,8 +360,7 @@ def test_the_new_wording_names_no_task_or_dataset():
     text = _ctx3(analysis={"findings": FINDINGS, "batches": []}, parsimony=0.0,
                  score_is_item_mean=True, structure_guidance=True,
                  traces=[{"structural": {"structural_candidates": 0}}]).render().lower()
-    new = " ".join([_section(text, "where the pipeline fails, step by step"),
-                    _section(text, "the pipeline you may edit"),
+    new = " ".join([_section(text, "the pipeline you may edit"),
                     _section(text, "what the score measures"),
                     base.structural_text({"structural_candidates": 0}),
                     feedback.STRUCTURE_GUIDANCE, analysts.FAILURE_SYSTEM,
@@ -549,8 +378,8 @@ def test_the_new_wording_names_no_task_or_dataset():
 ])
 def test_every_model_proposer_strategy_gets_the_graph_first_request(
         tmp_path, monkeypatch, name, overrides):
-    """The order, the kind-neutral rules, the structural evidence and the step map live in
-    the shared request (`ProposalContext.render`), so every registered strategy that asks
+    """The order, the kind-neutral rules, the structural evidence and the analysts' reports
+    live in the shared request (`ProposalContext.render`), so every registered strategy that asks
     the model proposer gets them, end to end on the search-combo toy. (The SkillOpt package
     strategy writes its own text-only requests and is not among them.)"""
     from test_analysts import ANALYST_SYSTEMS, MERGE_SYSTEMS
@@ -576,8 +405,9 @@ def test_every_model_proposer_strategy_gets_the_graph_first_request(
     assert loop.optimizer.proposal_failures == []
     assert model.requests, name
     order = ["## The pipeline you may edit", "## Evidence from the traces",
-             "## The operations you may use", "## Each step's settings",
-             "## The rules the validator checks", "## Answer"]
+             "## Each step's settings", base.REFERENCE_HEADING,
+             "### The operations you may use", "### The rules the validator checks",
+             "## Answer"]
     for request in model.requests:
         text = request.text
         assert all(heading in text for heading in order), name
@@ -589,12 +419,14 @@ def test_every_model_proposer_strategy_gets_the_graph_first_request(
     evidence = [_section(r.text, "Evidence from the traces") for r in model.requests]
     assert any("| structural changes |" in e for e in evidence), name
     assert all("structural_yield" not in e for e in evidence), name
-    mapped = [r.text for r in model.requests if "## Item results" in r.text]
-    assert mapped and all("## Where the pipeline fails, step by step" in t for t in mapped), name
-    for text in mapped:
+    analysed = [r.text for r in model.requests if "## What the analysts found" in r.text]
+    assert analysed, name
+    for text in analysed:
+        # The fake analyst's "change" is dropped: findings report, never prescribe.
+        assert "-- change:" not in text and "Where the pipeline fails" not in text, name
         assert (text.index("## The pipeline you may edit")
-                < text.index("## Where the pipeline fails, step by step")
-                < text.index("## The operations you may use")), name
+                < text.index("## What the analysts found")
+                < text.index(base.REFERENCE_HEADING)), name
 
 
 def test_before_the_first_gradient_the_structure_row_is_counted_from_the_history():

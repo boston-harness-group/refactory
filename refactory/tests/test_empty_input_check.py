@@ -1,0 +1,890 @@
+"""The empty-input check: a created mode that invents input when it has none is refused.
+
+A created mode that found no input files generated a stand-in table, reported on it and
+exited 0. After the canonical smoke passes, create mode now runs the mode once more with
+its inputs pointed somewhere empty (`refactory_dsh.empty_input`), and a mode that then
+finishes with results goes back to the builder.
+
+The fixture modes are real packages run in the sandbox: one that fabricates a stand-in
+when its input folder has no CSV files, one that stops with an error naming what is
+missing, and the same pair reading a data node's source.
+"""
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+import pytest
+
+from refactory_dsh import create as create_module
+from refactory_dsh import create_ops, empty_input, lowering, registry
+from refactory_dsh.create import CreateConfig
+from refactory_dsh.paths import project_for_nodes
+from tests_support import FakeModel, create_script, good_files, render
+
+NAME = "plate_pkg"
+
+_INIT = '''\
+"""Summarise a folder of plate CSVs."""
+from refactory_dsh.nn import Package
+
+from .mode import Plate
+
+PACKAGE = Package(name="{name}", description="summarise plate CSVs", modes=(Plate,),
+                  ops=("refactory_packages.{name}.ops",))
+'''
+
+_MODE = '''\
+"""The plate summary mode."""
+from refactory_dsh import nn
+
+OPS = "refactory_packages.{name}.ops"
+
+
+class Plate(nn.Mode):
+    name = "plate"
+    description = "summarise every CSV in the input folder"
+
+    @classmethod
+    def declare(cls):
+        return {{"input_dir": nn.Knob("", "str", description="folder of plate CSVs")}}
+
+    def build(self):
+        graph = nn.Graph()
+        graph.add(nn.Node("summarise", "op", call=OPS + ":summarise", knobs=("input_dir",),
+                          writes=("summary.json",), produces=("rows",)))
+        return graph
+
+    def score(self, run):
+        return float(run.facts["rows"])
+'''
+
+_READ = '''\
+from pathlib import Path
+
+
+def _tables(ctx):
+    folder = Path(str(ctx.knob("input_dir", "") or "."))
+    return sorted(folder.glob("*.csv")) if folder.is_dir() else []
+
+
+def _rows(paths):
+    return sum(max(0, len(p.read_text().splitlines()) - 1) for p in paths)
+'''
+
+FABRICATES = _READ + '''
+
+def summarise(ctx):
+    tables = _tables(ctx)
+    if not tables:
+        stand_in = ctx.workdir / "work" / "synthetic_plate.csv"
+        stand_in.parent.mkdir(parents=True, exist_ok=True)
+        stand_in.write_text("well,value\\nA1,0.5\\nA2,0.5\\n")
+        tables = [stand_in]
+    rows = _rows(tables)
+    ctx.write_json("summary.json", {"tables": [t.name for t in tables], "rows": rows})
+    return {"rows": rows}
+'''
+
+REFUSES = _READ + '''
+
+def summarise(ctx):
+    tables = _tables(ctx)
+    if not tables:
+        raise ValueError(f"no input: input_dir {ctx.knob('input_dir', '')!r} holds no CSV files")
+    rows = _rows(tables)
+    ctx.write_json("summary.json", {"tables": [t.name for t in tables], "rows": rows})
+    return {"rows": rows}
+'''
+
+
+#: Says there was no input in a status report instead of raising, and exits 0. Not
+#: accepted: a report on empty input is output, whatever it says.
+REPORTS_NONE = _READ + '''
+
+def summarise(ctx):
+    tables = _tables(ctx)
+    if not tables:
+        ctx.write_json("summary.json", {"status": "no input",
+                                        "reason": "input_dir holds no CSV files",
+                                        "tables": [], "rows": 0})
+        return {"rows": 0}
+    rows = _rows(tables)
+    ctx.write_json("summary.json", {"tables": [t.name for t in tables], "rows": rows})
+    return {"rows": rows}
+'''
+
+
+def plate_files(name: str, ops: str, *, knobs: str = "", writes: str = "summary.json"
+                ) -> dict[str, str]:
+    """The plate package; ``knobs`` adds declarations, ``writes`` renames its result."""
+    mode = _MODE.format(name=name).replace(
+        'description="folder of plate CSVs")', 'description="folder of plate CSVs")' + knobs)
+    if knobs:
+        mode = mode.replace('knobs=("input_dir",)', 'knobs=("input_dir", "config", "reference")')
+    return {"__init__.py": _INIT.format(name=name),
+            "mode.py": mode.replace("summary.json", writes),
+            "ops.py": ops.replace("summary.json", writes)}
+
+
+#: A plate mode with a configuration file beside its input, which it must read.
+_CONFIG_KNOBS = (',\n                "config": nn.Knob("", "str", description="settings file"),'
+                 '\n                "reference": nn.Knob("", "str", description="unused")')
+CONFIG_FABRICATES = FABRICATES.replace('''def summarise(ctx):
+    tables = _tables(ctx)''', '''def summarise(ctx):
+    import json
+    json.loads(Path(str(ctx.knob("config", ""))).read_text())["threshold"]
+    tables = _tables(ctx)''')
+
+
+#: Counts the words of a text knob into an output folder and a declared report.
+_TEXT_MODE = '''\
+"""Count the words of a text."""
+from refactory_dsh import nn
+
+OPS = "refactory_packages.{name}.ops"
+
+
+class Words(nn.Mode):
+    name = "words"
+    description = "count the words of a text"
+
+    @classmethod
+    def declare(cls):
+        return {{"text": nn.Knob("hello there", "str", description="the text"),
+                 "out_dir": nn.Knob("", "str", description="where the counts go")}}
+
+    def build(self):
+        graph = nn.Graph()
+        graph.add(nn.Node("count", "op", call=OPS + ":count", knobs=("text", "out_dir"),
+                          writes=("report.json",), produces=("words",)))
+        return graph
+
+    def score(self, run):
+        return float(run.facts["words"])
+'''
+
+_TEXT_OPS = '''\
+import json
+from pathlib import Path
+
+
+def count(ctx):
+    text = str(ctx.knob("text", ""))
+    if not text.strip():
+        raise ValueError("no input: the text is empty")
+    words = len(text.split())
+    out = Path(str(ctx.knob("out_dir", "") or ctx.workdir))
+    out.mkdir(parents=True, exist_ok=True)
+    (out / "counts.json").write_text(json.dumps({"words": words}))
+    ctx.write_json("report.json", {"words": words})
+    return {"words": words}
+'''
+
+
+def text_files(name: str) -> dict[str, str]:
+    init = _INIT.replace("from .mode import Plate", "from .mode import Words").replace(
+        "modes=(Plate,)", "modes=(Words,)")
+    return {"__init__.py": init.format(name=name), "mode.py": _TEXT_MODE.format(name=name),
+            "ops.py": _TEXT_OPS}
+
+
+#: The same two behaviours, with the input arriving through a data node's source.
+_DATA_MODE = '''\
+"""Count the items of a source."""
+from refactory_dsh import nn
+
+OPS = "refactory_packages.{name}.ops"
+
+
+class Items(nn.Mode):
+    name = "items"
+    description = "count the items a source lists"
+
+    @classmethod
+    def declare(cls):
+        return {{}}
+
+    def build(self):
+        graph = nn.Graph()
+        graph.add(nn.Node("data", "data", subgraph_entry="seen", subgraph_exit="seen",
+                          source_path="items", source_format="directory",
+                          writes=("current_item.json",), produces=("item_scores",)))
+        graph.add(nn.Node("seen", "op", call=OPS + ":seen", reads=("current_item.json",),
+                          writes=("seen.json",), produces=("count",)))
+        graph.add(nn.Node("finish", "op", call=OPS + ":finish", writes=("report.json",),
+                          produces=("total",)))
+        graph.connect("data", "finish")
+        return graph
+
+    def score(self, run):
+        return float(run.facts.get("total") or 0)
+'''
+
+_DATA_OPS = '''\
+def seen(ctx):
+    seen = ctx.read_json("seen.json", {{"ids": []}}) or {{"ids": []}}
+    seen["ids"].append(str((ctx.read_json("current_item.json", {{}}) or {{}}).get("id")))
+    ctx.write_json("seen.json", seen)
+    return {{"count": len(seen["ids"])}}
+
+
+def finish(ctx):
+    ids = (ctx.read_json("seen.json", {{"ids": []}}) or {{"ids": []}})["ids"]
+{empty}
+    ctx.write_json("report.json", {{"total": len(ids)}})
+    return {{"total": len(ids)}}
+'''
+
+
+def data_files(name: str, *, refuses: bool) -> dict[str, str]:
+    empty = ('    if not ids:\n        raise ValueError("no input: the data source listed no items")'
+             if refuses else '    if not ids:\n        ids = ["sampled-1", "sampled-2"]')
+    init = _INIT.replace("from .mode import Plate", "from .mode import Items").replace(
+        "modes=(Plate,)", "modes=(Items,)")
+    return {"__init__.py": init.format(name=name), "mode.py": _DATA_MODE.format(name=name),
+            "ops.py": _DATA_OPS.format(empty=empty)}
+
+
+class Ctx:
+    """The parts of a run context the smoke gate's steps use, in a run directory."""
+
+    def __init__(self, workdir: Path, facts: dict):
+        self.workdir, self.facts, self.knobs = workdir, dict(facts), {}
+        self.model = self.budget = None
+
+    def knob(self, name: str, default=None):
+        return self.knobs.get(name, default)
+
+    def read_json(self, name: str, default=None):
+        path = self.workdir / name
+        return json.loads(path.read_text()) if path.exists() else default
+
+    def write_json(self, name: str, payload) -> None:
+        (self.workdir / name).write_text(json.dumps(payload, default=str))
+
+
+@pytest.fixture
+def project(tmp_path, monkeypatch) -> Path:
+    project = tmp_path / "project"
+    project.mkdir()
+    monkeypatch.setenv("REFACTORY_PROJECT", str(project))
+    monkeypatch.chdir(project)
+    return project
+
+
+@pytest.fixture
+def plates(tmp_path) -> Path:
+    """The person's real input: a folder holding one plate CSV."""
+    folder = tmp_path / "plates"
+    folder.mkdir()
+    (folder / "p1.csv").write_text("well,value\nA1,0.1\nA2,0.2\nA3,0.3\n")
+    return folder
+
+
+def _install(project: Path, name: str, files: dict[str, str]) -> None:
+    root = registry.workspace_root(project) / name
+    for relative, content in files.items():
+        (root / relative).parent.mkdir(parents=True, exist_ok=True)
+        (root / relative).write_text(content)
+    registry.install_workspace(project)
+
+
+def _run(project: Path, tmp_path: Path, identifier: str, samples: dict[str, str],
+         declared: tuple[str, ...] = ("input_dir",)) -> dict:
+    return empty_input.run(identifier, tmp_path / "empty-run", project=project,
+                           samples=samples, declared=declared, model=False, timeout_s=120)
+
+
+def test_a_mode_that_fabricates_input_is_a_finding(tmp_path, project, plates):
+    _install(project, NAME, plate_files(NAME, FABRICATES))
+    receipt = _run(project, tmp_path, f"{NAME}/plate", {"input_dir": str(plates)})
+    assert receipt["exit_ok"] is True
+    assert receipt["status"] == "finding", receipt
+    assert receipt["produced"] == ["summary.json"]
+    assert "must not fabricate" in receipt["reason"]
+    # The real input was replaced by an empty folder, never read.
+    emptied = Path(receipt["knobs"]["input_dir"])
+    assert emptied.is_dir() and not any(emptied.iterdir())
+
+
+def test_a_mode_that_stops_on_empty_input_passes(tmp_path, project, plates):
+    _install(project, NAME, plate_files(NAME, REFUSES))
+    receipt = _run(project, tmp_path, f"{NAME}/plate", {"input_dir": str(plates)})
+    assert receipt["status"] == "pass", receipt
+    assert receipt["exit_ok"] is False
+    assert "holds no CSV files" in receipt["error"]
+    assert receipt["produced"] == []
+
+
+@pytest.mark.parametrize("refuses, status", [(False, "finding"), (True, "pass")])
+def test_a_data_node_source_is_emptied_too(tmp_path, project, refuses, status):
+    _install(project, "items_pkg", data_files("items_pkg", refuses=refuses))
+    receipt = _run(project, tmp_path, "items_pkg/items", {})
+    assert receipt["sources"]["data"]["source_format"] == "directory"
+    assert receipt["status"] == status, receipt
+
+
+def test_a_declared_input_knob_is_emptied_without_a_sample(tmp_path, project):
+    """No sample: the declared knob's default (empty here) becomes the empty string."""
+    _install(project, NAME, plate_files(NAME, FABRICATES))
+    receipt = empty_input.run(f"{NAME}/plate", tmp_path / "empty-run", project=project,
+                              samples={}, declared=("input_dir",), model=False, timeout_s=120)
+    assert receipt["status"] == "finding", receipt
+
+
+def test_a_mode_with_no_input_is_not_applicable(tmp_path, project):
+    _install(project, "counter_pkg", good_files("counter_pkg"))
+    receipt = _run(project, tmp_path, "counter_pkg/counter", {})
+    assert receipt["status"] == "not_applicable"
+    assert "not applicable" in empty_input.warning(receipt)
+
+
+# ── only declared input is emptied (H1, M2) ───────────────────────────────
+
+
+def test_an_output_folder_sample_is_never_treated_as_input(tmp_path, project):
+    """The words mode writes into an `out_dir` sample. That folder is not input: with no
+    declared input the check is not applicable, and with its text declared the empty text
+    makes the mode stop, which passes. Neither is a finding."""
+    _install(project, "words_pkg", text_files("words_pkg"))
+    out_dir = tmp_path / "out"
+    out_dir.mkdir()
+    samples = {"text": "three short words", "out_dir": str(out_dir)}
+    undeclared = _run(project, tmp_path / "a", "words_pkg/words", samples, declared=())
+    assert undeclared["status"] == "not_applicable", undeclared
+    declared = _run(project, tmp_path / "b", "words_pkg/words", samples, declared=("text",))
+    assert declared["status"] == "pass", declared
+    assert declared["knobs"] == {"text": ""}, "only the declared input is emptied"
+    assert "the text is empty" in declared["error"]
+
+
+def test_a_fabricating_mode_with_a_configuration_sample_is_still_caught(tmp_path, project,
+                                                                         plates):
+    """The configuration file is not input. Emptying it would make the mode crash on its
+    settings and pass; kept, the mode reaches its empty input and fabricates."""
+    _install(project, NAME, plate_files(NAME, CONFIG_FABRICATES, knobs=_CONFIG_KNOBS))
+    config = tmp_path / "settings.json"
+    config.write_text(json.dumps({"threshold": 0.2}))
+    receipt = _run(project, tmp_path, f"{NAME}/plate",
+                   {"input_dir": str(plates), "config": str(config)})
+    assert receipt["status"] == "finding", receipt
+    assert "config" not in receipt["knobs"]
+
+
+def test_an_undeclared_knob_defaulting_to_real_data_is_not_run(tmp_path, project, plates):
+    """A knob the run does not declare as input, whose default names existing data under
+    the project, would still be read with the declared input emptied. The check does not
+    run the mode on it: it is inconclusive and names the knob."""
+    (project / "data" / "plates").mkdir(parents=True)
+    (project / "data" / "plates" / "p1.csv").write_text("well,value\nA1,0.1\n")
+    knobs = _CONFIG_KNOBS.replace('"reference": nn.Knob("", ', '"reference": nn.Knob("data/plates", ')
+    _install(project, NAME, plate_files(NAME, FABRICATES, knobs=knobs))
+    receipt = _run(project, tmp_path, f"{NAME}/plate", {"input_dir": str(plates)})
+    assert receipt["status"] == "inconclusive", receipt
+    assert receipt["undeclared"] == ["reference (default data/plates)"]
+    assert "exit_ok" not in receipt, "the mode must not be run on its real data"
+    assert not (tmp_path / "empty-run" / "summary.json").exists()
+    assert "inconclusive" in empty_input.warning(receipt)
+
+
+def test_a_scratch_default_does_not_stop_the_check(tmp_path, project, plates):
+    """An undeclared `scratch` knob defaulting to /tmp is a scratch location, not input:
+    the check still runs, and the fabricating mode is a finding."""
+    knobs = _CONFIG_KNOBS.replace('"reference": nn.Knob("", ', '"reference": nn.Knob("/tmp", ')
+    ops = FABRICATES.replace('stand_in = ctx.workdir / "work" / "synthetic_plate.csv"',
+                             'stand_in = ctx.workdir / "scratch" / "synthetic_plate.csv"')
+    _install(project, NAME, plate_files(NAME, ops, knobs=knobs))
+    receipt = _run(project, tmp_path, f"{NAME}/plate", {"input_dir": str(plates)})
+    assert receipt["undeclared"] == []
+    assert receipt["status"] == "finding", receipt
+
+
+def test_which_undeclared_defaults_look_like_input(tmp_path, monkeypatch):
+    """Scratch locations, the run folder and declared writes never make the check
+    inconclusive; data under the project does. A relative default is the project's,
+    never the current directory's."""
+    import tempfile
+
+    project, run = tmp_path / "proj", tmp_path / "proj" / "runs" / "r1"
+    (project / "data").mkdir(parents=True)
+    (run / "cache").mkdir(parents=True)
+    # A folder that exists only under the current directory, which is inside the
+    # project: read against the cwd it would look like project data.
+    elsewhere = project / "sub"
+    (elsewhere / "only_here").mkdir(parents=True)
+    monkeypatch.chdir(elsewhere)
+    (project / "tool.sh").write_text("#!/bin/sh\n")
+    (project / "tool.sh").chmod(0o755)
+    values = {"input_dir": "", "system_temp": tempfile.gettempdir(), "tmp": "/tmp",
+              "run_cache": str(run / "cache"), "written": "data", "cwd_only": "only_here",
+              "project_data": "data", "project_root": ".", "env": "/usr/bin/env",
+              "root": "/", "executable": "tool.sh", "usr": "/usr", "home": str(Path.home())}
+    described = {"knobs": sorted(values), "values": values, "data_nodes": [],
+                 "writes": []}
+    planned = empty_input.plan(described, {}, ("input_dir",), empty_root=run / "e",
+                               project=project, run_root=run)
+    assert planned["undeclared"] == ["project_data (default data)", "written (default data)"]
+    described["writes"] = ["data"]
+    planned = empty_input.plan(described, {}, ("input_dir",), empty_root=run / "e",
+                               project=project, run_root=run)
+    assert planned["undeclared"] == []
+
+
+def test_data_under_the_home_folder_looks_like_input(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    (home / "plates").mkdir(parents=True)
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+    (home / "tmp" / "scratch").mkdir(parents=True)
+    monkeypatch.setattr(empty_input, "_temp_roots", lambda: (home / "tmp",))
+    project = tmp_path / "proj"
+    project.mkdir()
+    looks = lambda p: empty_input._looks_like_input(p, project=project,  # noqa: E731
+                                                     run_root=project / "run")
+    assert looks(home / "plates")
+    assert not looks(home), "the home folder as a whole is not input"
+    assert not looks(home / "tmp" / "scratch"), "a temp folder under home is scratch"
+
+
+@pytest.mark.parametrize("default", ["/usr/bin/env", "/"])
+def test_a_system_default_never_skips_the_check(tmp_path, project, plates, default):
+    """An undeclared knob defaulting to a system path is not input: the check runs and
+    the fabricating mode is a finding."""
+    knobs = _CONFIG_KNOBS.replace('"reference": nn.Knob("", ', f'"reference": nn.Knob({default!r}, ')
+    _install(project, NAME, plate_files(NAME, FABRICATES, knobs=knobs))
+    receipt = _run(project, tmp_path, f"{NAME}/plate", {"input_dir": str(plates)})
+    assert receipt["undeclared"] == []
+    assert receipt["status"] == "finding", receipt
+
+
+def test_a_declared_input_that_the_graph_writes_is_left_alone(tmp_path):
+    described = {"knobs": ["input_dir", "report"], "values": {"report": "report.json"},
+                 "data_nodes": [], "writes": ["report.json"]}
+    planned = empty_input.plan(described, {}, ("report",), empty_root=tmp_path / "e",
+                               project=tmp_path)
+    assert planned["knobs"] == {}
+    assert "names a file the graph writes" in planned["kept"][0]
+
+
+# ── the one rule: on empty input, only a non-zero exit passes (M1) ────────
+
+
+#: Results a mode wrote on empty input while saying, in words, that all was well or that
+#: there was nothing: each is output on a zero exit, so each is a finding.
+FABRICATED_REPORTS = {
+    "nested-status": {"status": "done", "wells": [
+        {"status": "high", "reason": "above threshold"},
+        {"status": "low", "reason": "below threshold"}]},
+    "numbers-and-flags": {"status": "summarised plate with mean value 0.42", "passed": True,
+                          "control_ok": True},
+    "short-verdict": {"status": "plate passes QC", "message": "all wells within range"},
+    "done-flag": {"status": "done", "passed": True},
+    "no-input-report": {"status": "no input", "reason": "input_dir holds no CSV files",
+                        "tables": [], "rows": 0},
+}
+
+#: A 73-character verdict with no digit, written as Markdown.
+SHORT_SUMMARY = "Plate passes QC: every well is within range and the controls look healthy"
+
+
+def _writes_on_empty(write: str) -> str:
+    """The plate ops with ``write`` (a statement) as what they do on empty input."""
+    ops = REPORTS_NONE.replace('''ctx.write_json("summary.json", {"status": "no input",
+                                        "reason": "input_dir holds no CSV files",
+                                        "tables": [], "rows": 0})''', write)
+    assert ops != REPORTS_NONE
+    return ops
+
+
+@pytest.mark.parametrize("report", list(FABRICATED_REPORTS.values()),
+                         ids=list(FABRICATED_REPORTS))
+def test_any_report_on_empty_input_is_a_finding(tmp_path, project, plates, report):
+    """A verdict, a status or a "no input" report written on a zero exit is a finding,
+    whatever it says. The last case changes what passed before, on purpose."""
+    _install(project, NAME, plate_files(NAME, _writes_on_empty(
+        f'ctx.write_json("summary.json", {report!r})')))
+    receipt = _run(project, tmp_path, f"{NAME}/plate", {"input_dir": str(plates)})
+    assert receipt["exit_ok"] is True
+    assert receipt["status"] == "finding", receipt
+    assert receipt["produced"] == ["summary.json"]
+
+
+def test_a_short_markdown_verdict_is_a_finding(tmp_path, project, plates):
+    assert len(SHORT_SUMMARY) == 73 and not any(ch.isdigit() for ch in SHORT_SUMMARY)
+    _install(project, NAME, plate_files(NAME, _writes_on_empty(
+        f'ctx.write_text("summary.md", {SHORT_SUMMARY!r})'), writes="summary.md"))
+    receipt = _run(project, tmp_path, f"{NAME}/plate", {"input_dir": str(plates)})
+    assert receipt["status"] == "finding", receipt
+
+
+@pytest.mark.parametrize("write, writes", [
+    ('ctx.write_text("summary.json", "")', "summary.json"),
+    ('ctx.write_text("summary.csv", "well,value\\n")', "summary.csv"),
+], ids=["zero-bytes", "csv-header"])
+def test_a_mode_that_writes_only_empty_files_is_a_finding(tmp_path, project, plates, write,
+                                                          writes):
+    _install(project, NAME, plate_files(NAME, _writes_on_empty(write), writes=writes))
+    receipt = _run(project, tmp_path, f"{NAME}/plate", {"input_dir": str(plates)})
+    assert receipt["exit_ok"] is True
+    assert receipt["status"] == "finding", receipt
+    assert receipt["produced"] == [writes]
+
+
+def test_a_mode_that_exits_0_writing_nothing_is_a_finding(tmp_path, project, plates):
+    _install(project, NAME, plate_files(NAME, _writes_on_empty("pass")))
+    receipt = _run(project, tmp_path, f"{NAME}/plate", {"input_dir": str(plates)})
+    assert receipt["exit_ok"] is True and receipt["produced"] == []
+    assert receipt["status"] == "finding", receipt
+    assert "exited 0" in receipt["reason"]
+
+
+#: Fabricates its result into facts only: the score reads ``run.facts["rows"]``, and no
+#: declared file is written when the input is empty.
+FACTS_ONLY = _READ + '''
+
+def summarise(ctx):
+    tables = _tables(ctx)
+    if not tables:
+        return {"rows": 96}
+    rows = _rows(tables)
+    ctx.write_json("summary.json", {"tables": [t.name for t in tables], "rows": rows})
+    return {"rows": rows}
+'''
+
+
+def test_a_result_reported_only_through_facts_and_score_is_a_finding(tmp_path, project,
+                                                                      plates):
+    _install(project, NAME, plate_files(NAME, FACTS_ONLY))
+    receipt = _run(project, tmp_path, f"{NAME}/plate", {"input_dir": str(plates)})
+    assert receipt["exit_ok"] is True and receipt["produced"] == []
+    assert receipt["status"] == "finding", receipt
+
+
+@pytest.mark.parametrize("kwargs, status", [
+    ({"ok": True, "timed_out": False, "error": "", "produced": ["out.json"]}, "finding"),
+    ({"ok": True, "timed_out": False, "error": ""}, "finding"),
+    ({"ok": False, "timed_out": False, "error": "ValueError: no input"}, "pass"),
+    ({"ok": False, "timed_out": True, "error": "", "produced": ["out.json"]}, "inconclusive"),
+    ({"ok": False, "timed_out": False, "error": "model completion failed"}, "inconclusive"),
+])
+def test_the_verdict(kwargs, status):
+    assert empty_input.verdict(**kwargs)[0] == status
+
+
+# ── an unjudged check is inconclusive and said; the budget is shared (M3, L4) ──
+
+
+def test_a_describe_that_fails_is_inconclusive_not_a_failure(tmp_path, project, monkeypatch):
+    _install(project, NAME, plate_files(NAME, FABRICATES))
+
+    def stuck(*_args, **_kwargs):
+        raise ValueError("the mode could not be described: timed out after 120s")
+
+    monkeypatch.setattr(empty_input, "describe", stuck)
+    receipt = _run(project, tmp_path, f"{NAME}/plate", {})
+    assert receipt["status"] == "inconclusive"
+    assert "could not be described" in receipt["reason"]
+
+
+def test_describe_and_the_run_share_one_smoke_wall_clock(tmp_path, monkeypatch):
+    """Describing gets at most what one smoke's backstop allows, and the run's backstop is
+    what is left, so the empty-input check fits one of the three runs the lowered smoke
+    gate's envelope covers (`sandbox.smoke_wall_s`). The inactivity limit is the smoke's."""
+    from refactory_dsh import sandbox
+
+    seen: dict = {}
+    described = {"knobs": ["input_dir"], "values": {"input_dir": ""}, "data_nodes": [],
+                 "writes": []}
+
+    def describe(_identifier, _project, *, timeout_s):
+        seen["describe"] = timeout_s
+        return described
+
+    def smoke(*_args, timeout_s, backstop_s, smoke_items, holdout=None, parts_manifest=None,
+              **_rest):
+        seen["run"] = (timeout_s, backstop_s, smoke_items,
+                       {"holdout": holdout, "parts_manifest": parts_manifest})
+        return sandbox.SandboxResult(ok=False, timed_out=True)
+
+    backstop = int(sandbox.smoke_backstop_s(100))
+    clock = iter([1000.0, 1050.0])
+    monkeypatch.setattr(empty_input, "describe", describe)
+    monkeypatch.setattr(sandbox, "smoke", smoke)
+    monkeypatch.setattr(empty_input.time, "monotonic", lambda: next(clock))
+    split = {"holdout": 0.25, "parts_manifest": None}
+    empty_input.run("p/m", tmp_path / "run", project=tmp_path, samples={},
+                    declared=("input_dir",), model=False, timeout_s=100, smoke_items=3,
+                    split=split)
+    assert seen == {"describe": min(empty_input.DESCRIBE_TIMEOUT_S, backstop),
+                    "run": (100, backstop - 50, 3, split)}
+
+    # A short smoke's backstop is below the describe's own limit, and caps it.
+    seen.clear()
+    clock = iter([1000.0, 1000.0])
+    small = int(sandbox.smoke_backstop_s(10))
+    assert small < empty_input.DESCRIBE_TIMEOUT_S
+    empty_input.run("p/m", tmp_path / "run3", project=tmp_path, samples={},
+                    declared=("input_dir",), model=False, timeout_s=10)
+    assert seen["describe"] == small
+
+    seen.clear()
+    clock = iter([1000.0, 1000.0 + backstop])
+    receipt = empty_input.run("p/m", tmp_path / "run2", project=tmp_path, samples={},
+                              declared=("input_dir",), model=False, timeout_s=100)
+    assert "run" not in seen, "no wall clock was left for the run"
+    assert receipt["status"] == "inconclusive"
+
+
+#: A Task-bound mode with a declared input it never reads: on emptied input it still
+#: runs its Task's items and exits 0. The Task lists 40 ids, highest first.
+_TASK_FILES = {
+    "__init__.py": (
+        "from refactory_dsh.nn import Package\n"
+        "from .mode import Bound\n\n"
+        "PACKAGE = Package(name='bound_pkg', modes=(Bound,), ops=('refactory_packages.bound_pkg.ops',))\n"
+    ),
+    "task.py": (
+        "from refactory_dsh.task import Task, TaskInstance, VerifyResult\n\n"
+        "class Many(Task):\n"
+        "    name = 'many'\n"
+        "    def instances(self, **kw):\n"
+        "        return [TaskInstance(id=f'item_{i:03d}', metadata={}) for i in reversed(range(40))]\n"
+        "    def setup(self, instance, workspace, **kw):\n"
+        "        pass\n"
+        "    def verify(self, instance, workspace, **kw):\n"
+        "        return VerifyResult(passed=True, score=1.0)\n"
+    ),
+    "ops.py": (
+        "def work(ctx):\n"
+        "    item = ctx.read_json('current_item.json', {}) or {}\n"
+        "    ctx.write_json('seen.json', {'id': item.get('id')})\n"
+        "    return {}\n\n"
+        "def finish(ctx):\n"
+        "    ctx.write_json('best.json', {'best': 1.0})\n"
+        "    return {'best': 1.0}\n"
+    ),
+    "mode.py": (
+        "from refactory_dsh import nn\n"
+        "OPS = 'refactory_packages.bound_pkg.ops'\n"
+        "TASK = 'refactory_packages.bound_pkg.task:Many'\n\n"
+        "class Bound(nn.Mode):\n"
+        "    name = 'bound'\n"
+        "    @classmethod\n"
+        "    def declare(cls):\n"
+        "        return {'input_dir': nn.Knob('', 'str', description='unused input')}\n"
+        "    def build(self):\n"
+        "        g = nn.Graph()\n"
+        "        g.add(nn.Node('data', 'data', subgraph_entry='work', subgraph_exit='work',"
+        " task_ref=TASK, writes=('current_item.json',), produces=('item_scores',)))\n"
+        "        g.add(nn.Node('work', 'op', call=OPS + ':work', reads=('current_item.json',),"
+        " writes=('seen.json',)))\n"
+        "        g.add(nn.Node('finish', 'op', call=OPS + ':finish', knobs=('input_dir',),"
+        " writes=('best.json',), produces=('best',)))\n"
+        "        g.connect('data', 'finish')\n"
+        "        return g\n"
+        "    def score(self, result):\n"
+        "        return 1.0\n"
+    ),
+}
+
+
+def test_the_empty_input_run_uses_the_smokes_sample_never_val_or_test(tmp_path, project):
+    """The canonical smoke's split reaches the empty-input run: a Task-bound node runs
+    only train ids of the parts manifest, never its val or test ids."""
+    _install(project, "bound_pkg", _TASK_FILES)
+    manifest = tmp_path / "parts.json"
+    manifest.write_text(json.dumps({
+        "train": [f"item_{i:03d}" for i in range(20, 40)],
+        "val": [f"item_{i:03d}" for i in range(0, 10)],
+        "test": [f"item_{i:03d}" for i in range(10, 20)],
+    }))
+    receipt = empty_input.run("bound_pkg/bound", tmp_path / "empty-run", project=project,
+                              samples={}, declared=("input_dir",), model=False, timeout_s=120,
+                              smoke_items=3, split={"holdout": 0.0, "parts_manifest": manifest})
+    assert receipt["status"] == "finding", receipt
+    ran = sorted(json.loads(p.read_text())["id"]
+                 for p in (tmp_path / "empty-run").glob("passes/data/*/seen.json"))
+    assert ran == ["item_020", "item_021", "item_022"], ran
+
+
+# ── wired into create mode's smoke gate ───────────────────────────────────
+
+
+def test_create_sends_a_fabricating_mode_back_to_the_builder(tmp_path, project, plates):
+    """The full create graph on the walker: the first package fabricates, the smoke gate's
+    empty-input run finds it and reloops to emit with the reason, the second package
+    stops on empty input and is accepted."""
+    model = FakeModel(create_script(NAME, [render(plate_files(NAME, FABRICATES)),
+                                           render(plate_files(NAME, REFUSES))]))
+    result = create_module.create(
+        CreateConfig(verdicts={"gate_strategy": "proceed"}, single_shot=True, name=NAME,
+                     brief="summarise plate CSVs", attempts=3, workdir=tmp_path / "run",
+                     requires_input="input_dir", samples=[f"input_dir={plates}"]),
+        client=model,
+    )
+    emit_prompts = [prompt for prompt in model.prompts if "Write the package" in prompt]
+    assert len(emit_prompts) == 2, "the fabricating package must be sent back once"
+    assert "empty-input check" in emit_prompts[-1]
+    assert "must not fabricate" in emit_prompts[-1]
+    created = json.loads((tmp_path / "run" / "create.json").read_text())
+    assert created["empty_input_check"]["status"] == "pass"
+    assert not any("empty-input" in w for w in created.get("warnings", []))
+    assert result.smoke_score == 3.0
+    assert "def summarise" in (registry.workspace_root(project_for_nodes()) / NAME
+                               / "ops.py").read_text()
+
+
+def test_a_create_with_no_declared_input_warns_on_the_walker(tmp_path, project, plates):
+    """No `--input`: the check is not applicable. The walker journals it as a run warning
+    and the run's report lists it, so a person sees the check did not judge the mode."""
+    from refactory_dsh import live
+
+    model = FakeModel(create_script(NAME, [render(plate_files(NAME, REFUSES))]))
+    create_module.create(
+        CreateConfig(verdicts={"gate_strategy": "proceed"}, single_shot=True, name=NAME,
+                     brief="summarise plate CSVs", attempts=3, workdir=tmp_path / "run",
+                     samples=[f"input_dir={plates}"]),
+        client=model,
+    )
+    created = json.loads((tmp_path / "run" / "create.json").read_text())
+    assert created["empty_input_check"]["status"] == "not_applicable"
+    assert any("empty-input check was not applicable" in w for w in created["warnings"])
+    records, _ = live.events(tmp_path / "run")
+    assert any(r.get("kind") == "run_warning" and "empty-input check" in r.get("summary", "")
+               for r in records)
+
+
+@pytest.mark.parametrize("ops, writes, declared, verdict, status", [
+    (FABRICATES, "summary.json", ["input_dir"], "reloop", "finding"),
+    # The finding names the file the mode wrote. Words in it that read as an outage
+    # ("credentials") must not turn a repairable finding into an unrepairable stop.
+    (FABRICATES, "credentials.json", ["input_dir"], "reloop", "finding"),
+    (REFUSES, "summary.json", ["input_dir"], "proceed", "pass"),
+    (FABRICATES, "summary.json", [], "proceed", "not_applicable"),
+], ids=["fabricates", "finding-names-credentials", "refuses", "nothing-declared"])
+def test_the_smoke_gate_runs_the_check_as_the_spine_invokes_it(tmp_path, project, plates, ops,
+                                                                writes, declared, verdict,
+                                                                status):
+    """The spine runs the smoke gate as `python -m refactory_dsh.run ...:gate_smoke` in the
+    run directory, with the lowered declarations and the knobs in the environment. An
+    unjudged check proceeds with a run warning."""
+    import os
+    import subprocess
+    import sys
+
+    from refactory_dsh.create import CreateMode
+    from refactory_dsh.lowering import DECLARATIONS, KNOBS_ENV
+    from refactory_dsh.run import FACTS, NODE_ENV
+
+    _install(project, NAME, plate_files(NAME, ops, writes=writes))
+    run = tmp_path / "run"
+    run.mkdir()
+    node = CreateMode().build().nodes["smoke"]
+    # What `prepare` leaves for the later steps.
+    (run / "brief.json").write_text(json.dumps({"name": NAME, "brief": "summarise plates",
+                                                "requires_input": declared}))
+    (run / FACTS).write_text(json.dumps({
+        "name": NAME, "package_path": str(registry.workspace_root(project) / NAME)}))
+    (run / DECLARATIONS).parent.mkdir(parents=True, exist_ok=True)
+    (run / DECLARATIONS).write_text(json.dumps({"smoke": {
+        "reads": [], "writes": list(node.writes), "produces": list(node.produces)}}))
+    env = {**os.environ, "REFACTORY_PROJECT": str(project), "REFACTORY_WORKDIR": str(run),
+           KNOBS_ENV: json.dumps({"sample_knobs": json.dumps([f"input_dir={plates}"]),
+                                  "smoke_timeout_s": 120, "attempts": 3}),
+           NODE_ENV: json.dumps({"id": "smoke", "type": "GateNode", "reads": [],
+                                 "writes": list(node.writes)})}
+    done = subprocess.run(
+        [sys.executable, "-m", "refactory_dsh.run", "refactory_dsh.create_ops:gate_smoke"],
+        cwd=str(run), env=env, capture_output=True, text=True, timeout=600, check=False)
+    assert done.returncode == 0, done.stderr
+    assert done.stdout.strip().splitlines()[-1] == verdict, done.stdout
+    assert json.loads((run / empty_input.RECEIPT).read_text())["status"] == status
+    if verdict == "reloop":
+        assert "empty-input check" in done.stdout
+        evidence = json.loads((run / "authoring-evidence.json").read_text())
+        assert evidence["validation"]["status"] == "code_failure"
+        assert evidence["validation"]["empty_input"]["status"] == "finding"
+    warned = "run warning: the empty-input check was not applicable" in done.stderr
+    assert warned is (status == "not_applicable"), done.stderr
+
+
+def test_a_finding_unmarks_a_package_that_had_passed(tmp_path, project, plates):
+    """`check_empty_input` on its own: a package recorded as passed is pending again once
+    the check finds it fabricating, whoever called it."""
+
+    _install(project, NAME, plate_files(NAME, FABRICATES))
+    package = registry.workspace_root(project) / NAME
+    registry.record_smoke(package, registry.SMOKE_PASSED)
+    ctx = Ctx(tmp_path / "run", {"name": NAME, "package_path": str(package)})
+    ctx.workdir.mkdir()
+    ctx.write_json("smoke.json", {"mode": f"{NAME}/plate"})
+    ctx.write_json("brief.json", {"requires_input": ["input_dir"]})
+    ctx.knobs.update({"sample_knobs": json.dumps([f"input_dir={plates}"]),
+                      "smoke_timeout_s": 120})
+    with pytest.raises(empty_input.Finding) as raised:
+        create_ops.check_empty_input(ctx)
+    assert raised.value.receipt["status"] == "finding"
+    assert registry.recorded_smoke(package) == registry.SMOKE_PENDING
+
+
+def test_the_report_carries_an_unjudged_check_as_a_warning(tmp_path, project, monkeypatch):
+    from refactory_dsh import authoring_evidence
+
+    _install(project, NAME, plate_files(NAME, FABRICATES))
+    package = registry.workspace_root(project) / NAME
+    (package / "README.md").write_text("# plates\n")
+    ctx = Ctx(tmp_path / "run", {"name": NAME, "package_path": str(package)})
+    ctx.workdir.mkdir()
+    monkeypatch.setattr(authoring_evidence, "require_completion", lambda _ctx: None)
+    ctx.write_json(empty_input.RECEIPT, {"mode": f"{NAME}/plate", "status": "inconclusive",
+                                         "reason": "the empty-input run was stopped"})
+    created = json.loads(create_ops.write_result(ctx)["created"])
+    assert created["warnings"] == [
+        f"the empty-input check was inconclusive for {NAME}/plate: the empty-input run "
+        "was stopped"]
+    ctx.write_json(empty_input.RECEIPT, {"mode": f"{NAME}/plate", "status": "pass"})
+    assert "warnings" not in json.loads(create_ops.write_result(ctx)["created"])
+
+
+@pytest.mark.parametrize("mode", ["create", "edit", "create_fast", "edit_fast"])
+def test_every_create_graph_lowers_the_check_into_its_smoke_gate(mode):
+    """Both runtimes run the smoke gate's own op; the lowered gate (the spine's) declares
+    the receipt and has room for the third sandboxed run."""
+    from refactory_dsh.create import CreateMode
+    from refactory_dsh.edit import EditMode
+    from refactory_dsh.fast import CreateFastMode, EditFastMode
+
+    cls = {"create": CreateMode, "edit": EditMode, "create_fast": CreateFastMode,
+           "edit_fast": EditFastMode}[mode]
+    state = cls().state_dict()
+    workflow = lowering.to_workflow(state, name=f"default_pack-{mode}")
+    smoke = workflow.nodes["smoke"]
+    assert empty_input.RECEIPT in smoke.writes
+    assert smoke.evaluator_command.endswith("refactory_dsh.create_ops:gate_smoke")
+    budget = int(state["knobs"]["smoke_timeout_s"]["value"])
+    assert smoke.command_timeout_s >= 3 * budget
+
+
+def test_the_smoke_gates_check_passes_the_smokes_split_on(tmp_path, project):
+    """`check_empty_input` draws the split the canonical smoke used (`_smoke_split`: the
+    `parts_manifest`, `holdout` and `smoke_items` knobs) and runs only its train ids."""
+    _install(project, "bound_pkg", _TASK_FILES)
+    manifest = tmp_path / "parts.json"
+    manifest.write_text(json.dumps({
+        "train": [f"item_{i:03d}" for i in range(20, 40)],
+        "val": [f"item_{i:03d}" for i in range(0, 10)],
+        "test": [f"item_{i:03d}" for i in range(10, 20)],
+    }))
+    package = registry.workspace_root(project) / "bound_pkg"
+    ctx = Ctx(tmp_path / "run", {"name": "bound_pkg", "package_path": str(package)})
+    ctx.workdir.mkdir()
+    ctx.write_json("smoke.json", {"mode": "bound_pkg/bound"})
+    ctx.write_json("brief.json", {"requires_input": ["input_dir"]})
+    ctx.knobs.update({"parts_manifest": str(manifest), "smoke_items": 2,
+                      "smoke_timeout_s": 120})
+    with pytest.raises(empty_input.Finding):
+        create_ops.check_empty_input(ctx)
+    ran = sorted(json.loads(p.read_text())["id"]
+                 for p in ctx.workdir.glob("smoke-empty-input/*/passes/data/*/seen.json"))
+    assert ran == ["item_020", "item_021"], ran

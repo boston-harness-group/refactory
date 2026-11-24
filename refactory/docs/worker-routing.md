@@ -69,8 +69,21 @@ removed when the session starts, and a write that fails fails the step): `subtyp
 `num_turns`, `max_turns`, `turn_limit_reached`, and `tool_calls` (each call's tool, its input
 as the model wrote it and its output, each cut to 2,000 characters, and whether it was an
 error). A step collects it by declaring the write `.refactory-session.json`
-(`workspace.SEALED_SESSION`), taken from beside the workspace only, never a file of that name
-inside it; it goes with the dispatch, and nothing else reads it.
+(`workspace.SEALED_SESSION`), or that name in a folder of its own (`plan/.refactory-session.json`,
+so several sealed steps of one pass keep theirs, `workspace.is_session_log`), taken from
+beside the workspace only, never a file of that name inside it; it goes with the dispatch,
+and nothing else reads it.
+
+A sealed Claude Code step's writes after its reply are files it may leave out, and what one
+may leave out its reader may not find: a read that only sealed Claude Code steps write, each
+as such a file, is optional for a sealed Claude Code step (`workspace.optional_reads`). Absent,
+it is not copied into the workspace and the step runs without it, on both runtimes (the
+lowering declares them, `optional_reads`, and the worker skips them as the walker does);
+each one skipped is recorded beside the pass's files, per step (`workspace.absent_reads`),
+for the mode to report.
+Every other read is required, as before: a missing one fails the step
+(`required worker input is missing`). `spreadsheetbench_v2/steps` relies on it: a step
+stopped at its turn cap before writing its notes leaves the next to run without them.
 
 `claude_code` alone also accepts `claude_executable`, the absolute path of the Claude
 Code it runs instead of the one bundled with the pinned Agent SDK (Claude Code

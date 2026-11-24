@@ -209,12 +209,21 @@ Each of these happened, and the shape of the code is the response.
 | a new mode | a package under `refactory_packages/` |
 | a new validator rule | `nn/validate.py` `RULES` + the check, then the anti-drift test |
 | a new edit operation | `nn/edits.py`: a primitive, or a macro that expands to primitives |
-| a new optimizer | subclass `optim.Optimizer`, implement `propose`, register it |
-| a new outer loop | subclass `outerloop.OuterLoop`, override the steps |
-| a new strategy | `strategies.py`; a port of an SRF mode |
+| a new parent picker | subclass `optim.ParentSelector`, write `select`, list it in a package's `Package.optimizers` ([Adding an optimization method](methods.md)) |
+| a new proposer | subclass `optim.Optimizer`, write `propose`, list it in a package's `Package.optimizers` ([Adding an optimization method](methods.md)); a proposer in the library itself goes in `optim.REGISTRY` through `optim.register` |
+| a new outer loop | subclass `outerloop.OuterLoop`, override the steps, list it in a package's `Package.strategies` |
+| a new optimization method | a package that composes the core blocks (pickers, proposers, `ValidationGate`, `FinalEvaluation`, the strategy trace), not a new block of code in `strategies.py`: see [Adding an optimization method](methods.md) |
 | a new artifact | declare a `Port` on the mode **and** write it from a node |
 | a new way to read a run | `observe.py` (readers) or `history.py` (finished runs) |
 | the loop's own steps | `loop.py` — and expect `loop_mode/loop` to need matching changes |
+
+## Review checklist for a new method
+
+- A new optimization method reuses the core pickers, proposers, validation gate,
+  final evaluation and strategy trace ([Adding an optimization method](methods.md)).
+- Any helper it duplicated from core, or that other methods could use, is moved to
+  core (one copy) and imported by the method.
+- A faithful port pins its behaviour with a fixed-seed identical-trace test.
 
 ## Documentation
 

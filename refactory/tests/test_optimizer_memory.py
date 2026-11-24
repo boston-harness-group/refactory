@@ -107,8 +107,8 @@ def test_the_request_lists_regressions_first_with_both_traces_and_stable_ones_wi
     stable = text[text.index("### Stable successes"):]
     assert "#### Task d: d" in stable and "D-NOW" not in text and "D-BEFORE" not in text
     assert "PIPE-START" in text and "PIPE-NOW" in text and "EDITS" in text
-    assert "EARLIER-NOTE" in text and "Reflect on whether it improved or harmed" in text
-    assert '"memory": "<compact optimizer-side guidance' in text
+    assert "EARLIER-NOTE" in text and "keep its facts that still hold" in text
+    assert '"memory": "<the record: facts only, no advice' in text
     first, _ = _built(entries)
     assert "(No previous optimizer memory -- this is the first update.)" in first
 
@@ -122,14 +122,15 @@ def test_an_unchanged_candidate_is_compared_with_its_own_earlier_rollout():
     assert "Item a (Second rollout) — answered wrong" in text
 
 
-def test_the_coach_is_told_not_to_rule_on_kinds_of_change_never_tried():
+def test_the_record_keeper_gives_no_advice_and_rules_on_no_kind_of_change():
     # Round 2 (2026-11-14): with no structural change tried, notes said "do not add new
-    # steps -- the pipeline is sound" and proposers cited them; SkillOpt, one edit kind,
-    # never meets this. The rule is symmetric: no advice either way on an untried kind.
+    # steps -- the pipeline is sound" and proposers cited them; a 2026-11-23 SB note said
+    # "invest in the skill knob rather than judge loops". The note is now facts only.
     flat = " ".join(memory.MEMORY_SYSTEM.split())
-    assert ("Advise only on changes with evidence in front of you: this epoch's tries, or "
-            "what the previous memory records of earlier ones. Do not advise for or against "
-            "changes nobody tried, and do not list them.") in flat
+    assert ("Write nothing about what to do next: no recommendations, next steps, "
+            "priorities, lessons, meta-lessons, principles or regression risks") in flat
+    assert ("Make no claim about what can or cannot work, be built or be edited, and do not "
+            "judge a kind of change in general.") in flat
 
 
 def test_the_traces_share_the_room_each_cut_said_and_the_system_prompt_counted():
@@ -359,10 +360,10 @@ def test_a_pass_too_long_for_one_call_is_split_into_comparisons_and_a_synthesis(
     assert read[:2] == ["r0", "r1"] and read[-2:] == ["s0", "s1"], "regressions first"
     for number in range(1, len(compares) + 1):
         assert f"OBS-PART-{number}" in synthesis
-    assert "EARLIER-NOTE" in synthesis and "Reflect on whether it improved or harmed" in synthesis
+    assert "EARLIER-NOTE" in synthesis and "keep its facts that still hold" in synthesis
     assert "- TRIED-ENTRY" in synthesis and "OBJECTIVE-TEXT" in synthesis
     assert "PIPE-START" in synthesis and "PIPE-NOW" in synthesis
-    assert '"memory": "<compact optimizer-side guidance' in synthesis
+    assert '"memory": "<the record: facts only, no advice' in synthesis
     assert made["note"]["text"] == "SPLIT-NOTE" and made["error"] is None
     assert made["parts"] == len(compares) and made["clipped_items"] == 0
     assert made["calls"] == len(compares) + 1
@@ -543,9 +544,9 @@ def test_the_synthesis_keeps_the_memory_rules_and_the_comparison_prompt_is_domai
     flat = " ".join(memory.SYNTHESIS_SYSTEM.split())
     assert memory.SYNTHESIS_SYSTEM != memory.MEMORY_SYSTEM
     assert "read in parts by comparison calls" in flat
-    assert ("Do not advise for or against changes nobody tried, and do not list them.") in flat
-    assert "Never from one design, however large its effect." in flat
-    assert "Address the FUTURE OPTIMIZER directly" in memory.COMPARE_SYSTEM
+    assert "Write nothing about what to do next" in flat
+    assert "the observations) or the previous record" in flat
+    assert "Write nothing about what to do next" in memory.COMPARE_SYSTEM
     assert ("Report what these traces show; leave verdicts on the changes tried to the call "
             "that weighs each of them against these observations, and judge no kind of "
             "change in general.") in " ".join(memory.COMPARE_SYSTEM.split())
@@ -1392,8 +1393,8 @@ def test_s1_s45_the_memory_reads_the_rejected_loop_its_judge_and_its_traces():
     # Asked about this change, never verdicts on kinds of change.
     system = " ".join(memory.MEMORY_SYSTEM.split())
     assert "Which kinds of changes" not in system and "tend to help" not in system
-    assert "For each change tried: what it was" in system
-    assert "Never from one design, however large its effect." in system
+    assert "Each change tried, this epoch and as the previous record holds earlier ones" in system
+    assert "do not judge a kind of change in general" in system
     assert f"- {_tried('s1_s45_loop.json')[0]['change']} (loop/gate): 1 try" in text
     assert "- loop/gate:" not in text
 

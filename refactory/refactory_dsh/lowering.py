@@ -115,6 +115,14 @@ def node_declarations(state: dict[str, Any]) -> dict[str, dict[str, Any]]:
         }
         if node_id in optional_ids:
             entry["optional"] = True
+        if node.kind == "agent":
+            from refactory_dsh.workspace import optional_reads
+
+            optional = optional_reads(graph, node_id)
+            if optional:
+                # The reads it runs without when absent (`workspace.optional_reads`),
+                # which the worker skips as the walker does (`worker_node.execute`).
+                entry["optional_reads"] = list(optional)
         if node.kind == "agent" and node.writes:
             # The output an agent's answer is captured into when it wrote none, and the
             # fact it produces is read from: its first declared write, as the walker takes
@@ -654,7 +662,9 @@ def command_timeout_s(node: Any, state: dict[str, Any]) -> int | None:
             return _delivery_envelope_s(state)
     elif node.kind == "gate" and getattr(node, "gate_kind", "fn") == "fn":
         if _is_smoke_node(node):
-            return _smoke_envelope_s(state, 2)
+            # The new mode's smoke, the empty-input run (`empty_input`) and the
+            # revision source's smoke.
+            return _smoke_envelope_s(state, 3)
         if _is_check_node(node):
             return _check_envelope_s(state)
     return None
