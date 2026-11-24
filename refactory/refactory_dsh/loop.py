@@ -457,9 +457,10 @@ class LoopConfig:
     #: CLI or directly from Python.
     strategy_options: dict[str, Any] = dataclasses.field(default_factory=dict)
     #: A parent policy (``archive``, ``evolutionary``, ``islands``, ``hill_climb``,
-    #: ``map_elites``) that picks the candidate each step edits, while ``optimizer``
-    #: writes the edits (``optim.compose.PickedParent``). Empty (the default): the
-    #: optimizer alone, as before.
+    #: ``map_elites``, ``pareto``, or one a package contributes) that picks the
+    #: candidate each step edits, while ``optimizer`` writes the edits
+    #: (``optim.compose.PickedParent``). Empty (the default): the optimizer alone, as
+    #: before.
     parent_picker: str = ""
     #: ``prompt+pipeline``: each proposal round asks the model proposer for one
     #: candidate per edit level -- its best prompt/knob-level change and its best

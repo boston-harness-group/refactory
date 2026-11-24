@@ -25,9 +25,10 @@ from refactory_dsh.loop import LoopConfig, opaque_item_key
 
 from refactory_packages.gepa import merge as merge_mod
 from refactory_packages.gepa.loop import GepaLoop, discover_components
-from refactory_packages.gepa.pareto import (
-    ProgramPool, find_dominator_programs, remove_dominated_programs, select_from_pareto_front,
+from refactory_dsh.optim.pareto import (
+    find_dominator_programs, remove_dominated_programs, select_from_pareto_front,
 )
+from refactory_packages.gepa.pareto import ProgramPool
 from refactory_packages.gepa.reflection import (
     DEFAULT_PROMPT_TEMPLATE, INSTRUCTION_PLACEHOLDER, check_template, extract_instruction,
     feedback_text, reflection_prompt, reflective_dataset,
@@ -633,3 +634,109 @@ def test_options_are_checked():
         GepaLoop().configure(model=None, pareto_size=3)
     with pytest.raises(ValueError):
         GepaLoop().configure(model=None, reflection_prompt_template="no placeholders")
+
+
+# ── fidelity: the frontier code's home does not change GEPA's draws ────────
+
+FIDELITY_FIXTURE = Path(__file__).parent / "fixtures" / "gepa_fixed_seed_trace.json"
+
+
+def _merge_policy(prompt: str, key: tuple | None) -> str:
+    return "```\nALPHA\n```" if key[2] == 0 else "```\nBETA\n```"
+
+
+def _hashed_policy(prompt: str, key: tuple | None) -> str:
+    """Many distinct specialists (ties on the frontier) chosen by the prompt's digest."""
+    import hashlib
+
+    texts = ("Always answer ALPHA.", "Always answer BETA.", "Answer ALPHA now.",
+             "BETA, please.", "Say ALPHA.", "Say BETA.", "ALPHA BETA", "Write ALPHA here.")
+    digest = hashlib.sha256(f"{prompt}{key}".encode()).digest()
+    return f"```\n{texts[digest[0] % len(texts)]}\n```"
+
+
+#: Fixed-seed runs whose decision traces were recorded before the frontier functions
+#: moved from ``refactory_packages/gepa/pareto.py`` to ``refactory_dsh/optim/pareto.py``:
+#: the frontier draw, the minibatch sampler and merge share one generator, so any
+#: change in how that generator is used shows here.
+FIDELITY_SCENARIOS: dict[str, dict[str, Any]] = {
+    "one_knob": dict(max_rollouts=120),
+    "two_knobs_merge": dict(mode=TwoKnobs, policy=_merge_policy,
+                            options={"use_merge": True}, max_rollouts=150),
+    "one_knob_hashed": dict(policy=_hashed_policy, max_rollouts=300, seed=3),
+    "two_knobs_hashed_merge": dict(mode=TwoKnobs, policy=_hashed_policy,
+                                   options={"use_merge": True}, max_rollouts=300, seed=11),
+    "two_knobs_feedback_merge_train": dict(
+        mode=TwoKnobs, options={"use_merge": True, "pareto_set": "train", "pareto_size": 4},
+        max_rollouts=160, seed=5),
+}
+
+
+def _fidelity_trace(tmp_path: Path, scenario: str) -> dict[str, Any]:
+    spec = dict(FIDELITY_SCENARIOS[scenario])
+    mode = spec.pop("mode", OneKnob)
+    strategy, report, _client, loop = _run(tmp_path, mode, **spec)
+    # Val keys are an HMAC under a per-run random secret: compared as the item ids.
+    raw = {opaque_item_key(i, loop.item_key_secret): i for i in gepa_ops.VAL_IDS}
+
+    def plain(value: Any) -> Any:
+        if isinstance(value, dict):
+            return {raw.get(k, k): plain(v) for k, v in value.items()}
+        if isinstance(value, list):
+            return [plain(v) for v in value]
+        return raw.get(value, value) if isinstance(value, str) else value
+
+    events = [plain({k: v for k, v in e.items() if k != "timestamp"}) for e in _trace(tmp_path)]
+    version, internal, gauss = strategy.rng.getstate()
+    return {
+        "events": events,
+        "pool": plain(strategy.pool.state_dict()),
+        "rng_state_tail": list(internal[-4:]),
+        "best": report["best"]["id"],
+    }
+
+
+@pytest.mark.parametrize("scenario", sorted(FIDELITY_SCENARIOS))
+def test_fixed_seed_gepa_trace_is_unchanged(tmp_path, scenario):
+    recorded = json.loads(FIDELITY_FIXTURE.read_text())[scenario]
+    got = json.loads(json.dumps(_fidelity_trace(tmp_path, scenario)))
+    assert got["pool"] == recorded["pool"]
+    assert got["events"] == recorded["events"]
+    assert got["rng_state_tail"] == recorded["rng_state_tail"]
+    assert got["best"] == recorded["best"]
+
+
+def _random_pools() -> list[ProgramPool]:
+    """Thirty seeded pools with ties and partial item coverage, for the frontier
+    functions' recorded outputs (``frontier_functions`` in the fidelity fixture)."""
+    gen = random.Random(2024)
+    pools = []
+    for _ in range(30):
+        pool = ProgramPool()
+        items = [f"k{i}" for i in range(gen.randint(3, 8))]
+        for p in range(gen.randint(2, 9)):
+            scored = [k for k in items if gen.random() < 0.9] or items[:1]
+            pool.add(f"c{p}", [None if p == 0 else gen.randrange(p)],
+                     {k: gen.choice((0.0, 0.5, 1.0)) for k in scored}, p)
+        pools.append(pool)
+    return pools
+
+
+def _frontier_outputs() -> list[dict[str, Any]]:
+    out = []
+    for n, pool in enumerate(_random_pools()):
+        aggs = pool.aggregates()
+        rng = random.Random(n)
+        out.append({
+            "draws": [select_from_pareto_front(pool.front_programs, aggs, rng) for _ in range(25)],
+            "dominators": sorted(find_dominator_programs(pool.front_programs, aggs)),
+            "dominator_order": find_dominator_programs(pool.front_programs, aggs),
+            "pruned": {k: sorted(v) for k, v in
+                       remove_dominated_programs(pool.front_programs, aggs).items()},
+        })
+    return out
+
+
+def test_frontier_functions_give_the_recorded_draws():
+    recorded = json.loads(FIDELITY_FIXTURE.read_text())["frontier_functions"]
+    assert json.loads(json.dumps(_frontier_outputs())) == recorded

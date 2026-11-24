@@ -542,9 +542,11 @@ SETTING_HELP = {
     "claude_executable": "claude_code workers only: the Claude Code executable they run, an "
                          "absolute path (default: the one bundled with the Agent SDK)",
     "parent_picker": "pair a parent picker (archive, evolutionary, islands, hill_climb, "
-                     "map_elites, or one a package contributes) with --optimizer: the "
-                     "picker chooses the candidate each step edits, the optimizer writes "
-                     "the edits (default: none)",
+                     "map_elites, pareto, or one a package contributes) with --optimizer: "
+                     "the picker chooses the candidate each step edits, the optimizer "
+                     "writes the edits; pareto keeps GEPA's per-item frontier of val "
+                     "(with selection pool, its default) and draws parents weighted by "
+                     "the val items each is best on (default: none)",
     "selection": "with val items (the validation gate): checkpoint applies every change "
                  "whose graph is not broken, scores each applied one on val once and picks "
                  "the best of them; pool keeps the --pool-size best candidates on validation "
@@ -630,7 +632,7 @@ CLI_SETTINGS: dict[str, str] = {
     "batch_size": "candidates proposed per epoch (default: 4)",
     "max_evaluations": "a hard ceiling on evaluated candidates (default: 64)",
     "optimizer": "how candidates are proposed: random, hill_climb, evolutionary, archive, "
-                 "islands, map_elites, autoresearch or one a package contributes "
+                 "islands, map_elites, pareto, autoresearch or one a package contributes "
                  "(default: autoresearch)",
     "edit_preset": "which edits are allowed: broad, structure, conservative or knob_only "
                    "(default: broad)",

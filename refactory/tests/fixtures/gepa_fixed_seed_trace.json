@@ -1,0 +1,6981 @@
+{
+ "frontier_functions": [
+  {
+   "dominator_order": [
+    0,
+    1
+   ],
+   "dominators": [
+    0,
+    1
+   ],
+   "draws": [
+    0,
+    1,
+    0,
+    1,
+    1,
+    1,
+    0,
+    1,
+    1,
+    0,
+    0,
+    1,
+    1,
+    1,
+    0,
+    1,
+    0,
+    1,
+    1,
+    1,
+    0,
+    1,
+    0,
+    0,
+    1
+   ],
+   "pruned": {
+    "k0": [
+     1
+    ],
+    "k1": [
+     0,
+     1
+    ],
+    "k2": [
+     0
+    ],
+    "k3": [
+     1
+    ],
+    "k4": [
+     1
+    ],
+    "k5": [
+     0
+    ]
+   }
+  },
+  {
+   "dominator_order": [
+    0,
+    2,
+    5,
+    7
+   ],
+   "dominators": [
+    0,
+    2,
+    5,
+    7
+   ],
+   "draws": [
+    2,
+    5,
+    2,
+    7,
+    2,
+    5,
+    5,
+    5,
+    0,
+    7,
+    2,
+    5,
+    2,
+    0,
+    0,
+    5,
+    2,
+    5,
+    7,
+    7,
+    5,
+    2,
+    0,
+    2,
+    2
+   ],
+   "pruned": {
+    "k0": [
+     2
+    ],
+    "k1": [
+     7
+    ],
+    "k2": [
+     0
+    ],
+    "k3": [
+     0,
+     2,
+     5
+    ],
+    "k4": [
+     7
+    ],
+    "k5": [
+     2,
+     5
+    ],
+    "k6": [
+     5
+    ]
+   }
+  },
+  {
+   "dominator_order": [
+    1,
+    2,
+    3
+   ],
+   "dominators": [
+    1,
+    2,
+    3
+   ],
+   "draws": [
+    3,
+    3,
+    1,
+    1,
+    1,
+    1,
+    3,
+    1,
+    3,
+    3,
+    3,
+    3,
+    1,
+    1,
+    2,
+    1,
+    2,
+    1,
+    2,
+    3,
+    1,
+    2,
+    3,
+    2,
+    3
+   ],
+   "pruned": {
+    "k0": [
+     1
+    ],
+    "k1": [
+     1
+    ],
+    "k2": [
+     2
+    ],
+    "k3": [
+     2
+    ],
+    "k4": [
+     1
+    ],
+    "k5": [
+     3
+    ],
+    "k6": [
+     3
+    ]
+   }
+  },
+  {
+   "dominator_order": [
+    0,
+    4
+   ],
+   "dominators": [
+    0,
+    4
+   ],
+   "draws": [
+    0,
+    0,
+    4,
+    4,
+    0,
+    0,
+    4,
+    4,
+    0,
+    0,
+    4,
+    4,
+    4,
+    0,
+    0,
+    0,
+    4,
+    0,
+    0,
+    0,
+    0,
+    4,
+    0,
+    4,
+    4
+   ],
+   "pruned": {
+    "k0": [
+     0
+    ],
+    "k1": [
+     4
+    ],
+    "k2": [
+     4
+    ],
+    "k3": [
+     0
+    ]
+   }
+  },
+  {
+   "dominator_order": [
+    0,
+    1
+   ],
+   "dominators": [
+    0,
+    1
+   ],
+   "draws": [
+    0,
+    0,
+    0,
+    1,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    1,
+    0,
+    0,
+    0,
+    1,
+    1,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    1
+   ],
+   "pruned": {
+    "k0": [
+     0
+    ],
+    "k1": [
+     1
+    ],
+    "k2": [
+     0
+    ]
+   }
+  },
+  {
+   "dominator_order": [
+    0,
+    1
+   ],
+   "dominators": [
+    0,
+    1
+   ],
+   "draws": [
+    0,
+    1,
+    0,
+    1,
+    0,
+    0,
+    0,
+    0,
+    1,
+    1,
+    1,
+    0,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    0,
+    1,
+    0,
+    1,
+    1,
+    0
+   ],
+   "pruned": {
+    "k0": [
+     1
+    ],
+    "k1": [
+     1
+    ],
+    "k2": [
+     0,
+     1
+    ],
+    "k3": [
+     0
+    ],
+    "k4": [
+     1
+    ]
+   }
+  },
+  {
+   "dominator_order": [
+    0,
+    1,
+    2
+   ],
+   "dominators": [
+    0,
+    1,
+    2
+   ],
+   "draws": [
+    1,
+    0,
+    2,
+    2,
+    0,
+    0,
+    0,
+    1,
+    2,
+    2,
+    2,
+    0,
+    2,
+    2,
+    0,
+    2,
+    1,
+    1,
+    0,
+    0,
+    1,
+    1,
+    2,
+    1,
+    0
+   ],
+   "pruned": {
+    "k0": [
+     0
+    ],
+    "k1": [
+     0,
+     2
+    ],
+    "k2": [
+     1
+    ],
+    "k3": [
+     2
+    ]
+   }
+  },
+  {
+   "dominator_order": [
+    0,
+    1,
+    2
+   ],
+   "dominators": [
+    0,
+    1,
+    2
+   ],
+   "draws": [
+    1,
+    0,
+    1,
+    0,
+    0,
+    2,
+    0,
+    1,
+    2,
+    0,
+    2,
+    0,
+    0,
+    0,
+    1,
+    1,
+    0,
+    0,
+    0,
+    2,
+    1,
+    0,
+    2,
+    0,
+    0
+   ],
+   "pruned": {
+    "k0": [
+     2
+    ],
+    "k1": [
+     0,
+     1
+    ],
+    "k2": [
+     0,
+     1,
+     2
+    ],
+    "k3": [
+     1
+    ],
+    "k4": [
+     0
+    ],
+    "k5": [
+     0
+    ],
+    "k6": [
+     2
+    ]
+   }
+  },
+  {
+   "dominator_order": [
+    3,
+    4
+   ],
+   "dominators": [
+    3,
+    4
+   ],
+   "draws": [
+    3,
+    4,
+    4,
+    3,
+    3,
+    3,
+    3,
+    3,
+    3,
+    3,
+    4,
+    3,
+    4,
+    4,
+    4,
+    4,
+    4,
+    3,
+    4,
+    3,
+    4,
+    3,
+    3,
+    3,
+    4
+   ],
+   "pruned": {
+    "k0": [
+     3,
+     4
+    ],
+    "k1": [
+     3
+    ],
+    "k2": [
+     3
+    ],
+    "k3": [
+     4
+    ],
+    "k4": [
+     3
+    ],
+    "k5": [
+     3
+    ],
+    "k6": [
+     4
+    ]
+   }
+  },
+  {
+   "dominator_order": [
+    0,
+    2
+   ],
+   "dominators": [
+    0,
+    2
+   ],
+   "draws": [
+    2,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    2,
+    2,
+    0,
+    0,
+    2,
+    0,
+    2,
+    0,
+    2,
+    2,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    2,
+    0
+   ],
+   "pruned": {
+    "k0": [
+     2
+    ],
+    "k1": [
+     0
+    ],
+    "k2": [
+     0,
+     2
+    ],
+    "k3": [
+     0
+    ],
+    "k4": [
+     2
+    ],
+    "k5": [
+     0
+    ],
+    "k6": [
+     0
+    ],
+    "k7": [
+     0
+    ]
+   }
+  },
+  {
+   "dominator_order": [
+    3,
+    4,
+    5
+   ],
+   "dominators": [
+    3,
+    4,
+    5
+   ],
+   "draws": [
+    4,
+    5,
+    3,
+    3,
+    4,
+    5,
+    5,
+    3,
+    3,
+    3,
+    5,
+    5,
+    4,
+    3,
+    3,
+    5,
+    5,
+    3,
+    5,
+    3,
+    5,
+    4,
+    3,
+    3,
+    3
+   ],
+   "pruned": {
+    "k0": [
+     5
+    ],
+    "k1": [
+     3
+    ],
+    "k2": [
+     4
+    ],
+    "k3": [
+     3
+    ],
+    "k4": [
+     5
+    ]
+   }
+  },
+  {
+   "dominator_order": [
+    0,
+    2
+   ],
+   "dominators": [
+    0,
+    2
+   ],
+   "draws": [
+    2,
+    2,
+    2,
+    2,
+    2,
+    2,
+    0,
+    0,
+    2,
+    2,
+    2,
+    0,
+    0,
+    2,
+    2,
+    0,
+    0,
+    2,
+    0,
+    2,
+    2,
+    2,
+    2,
+    0,
+    2
+   ],
+   "pruned": {
+    "k0": [
+     0,
+     2
+    ],
+    "k1": [
+     2
+    ],
+    "k2": [
+     2
+    ],
+    "k3": [
+     0
+    ]
+   }
+  },
+  {
+   "dominator_order": [
+    8,
+    6
+   ],
+   "dominators": [
+    6,
+    8
+   ],
+   "draws": [
+    6,
+    8,
+    8,
+    8,
+    6,
+    8,
+    8,
+    6,
+    8,
+    6,
+    8,
+    8,
+    8,
+    6,
+    8,
+    8,
+    8,
+    8,
+    8,
+    8,
+    8,
+    8,
+    6,
+    8,
+    8
+   ],
+   "pruned": {
+    "k0": [
+     6
+    ],
+    "k1": [
+     8
+    ],
+    "k2": [
+     8
+    ],
+    "k3": [
+     8
+    ],
+    "k4": [
+     6
+    ],
+    "k5": [
+     8
+    ],
+    "k6": [
+     8
+    ],
+    "k7": [
+     8
+    ]
+   }
+  },
+  {
+   "dominator_order": [
+    8,
+    1,
+    5
+   ],
+   "dominators": [
+    1,
+    5,
+    8
+   ],
+   "draws": [
+    8,
+    8,
+    5,
+    5,
+    5,
+    5,
+    5,
+    5,
+    5,
+    1,
+    5,
+    8,
+    5,
+    8,
+    5,
+    1,
+    5,
+    8,
+    5,
+    5,
+    8,
+    8,
+    8,
+    5,
+    8
+   ],
+   "pruned": {
+    "k0": [
+     8
+    ],
+    "k1": [
+     5
+    ],
+    "k2": [
+     8
+    ],
+    "k3": [
+     5
+    ],
+    "k4": [
+     1
+    ]
+   }
+  },
+  {
+   "dominator_order": [
+    2,
+    3
+   ],
+   "dominators": [
+    2,
+    3
+   ],
+   "draws": [
+    3,
+    3,
+    2,
+    2,
+    2,
+    3,
+    2,
+    2,
+    2,
+    2,
+    2,
+    3,
+    2,
+    3,
+    2,
+    2,
+    2,
+    2,
+    3,
+    3,
+    2,
+    3,
+    3,
+    3,
+    3
+   ],
+   "pruned": {
+    "k0": [
+     3
+    ],
+    "k1": [
+     2
+    ],
+    "k2": [
+     2,
+     3
+    ]
+   }
+  },
+  {
+   "dominator_order": [
+    3,
+    4,
+    7,
+    8
+   ],
+   "dominators": [
+    3,
+    4,
+    7,
+    8
+   ],
+   "draws": [
+    7,
+    8,
+    3,
+    4,
+    8,
+    8,
+    7,
+    8,
+    8,
+    4,
+    8,
+    4,
+    7,
+    7,
+    8,
+    7,
+    3,
+    4,
+    7,
+    7,
+    7,
+    7,
+    7,
+    7,
+    7
+   ],
+   "pruned": {
+    "k0": [
+     7,
+     8
+    ],
+    "k1": [
+     3
+    ],
+    "k2": [
+     7
+    ],
+    "k3": [
+     4
+    ],
+    "k4": [
+     3,
+     4,
+     7,
+     8
+    ],
+    "k5": [
+     8
+    ],
+    "k6": [
+     3,
+     7
+    ]
+   }
+  },
+  {
+   "dominator_order": [
+    1,
+    2
+   ],
+   "dominators": [
+    1,
+    2
+   ],
+   "draws": [
+    2,
+    2,
+    2,
+    2,
+    2,
+    2,
+    2,
+    2,
+    2,
+    1,
+    1,
+    2,
+    2,
+    1,
+    2,
+    2,
+    2,
+    2,
+    2,
+    1,
+    2,
+    1,
+    1,
+    2,
+    2
+   ],
+   "pruned": {
+    "k0": [
+     1
+    ],
+    "k1": [
+     2
+    ],
+    "k2": [
+     2
+    ]
+   }
+  },
+  {
+   "dominator_order": [
+    0,
+    1,
+    3
+   ],
+   "dominators": [
+    0,
+    1,
+    3
+   ],
+   "draws": [
+    3,
+    1,
+    1,
+    1,
+    1,
+    0,
+    3,
+    1,
+    0,
+    0,
+    1,
+    1,
+    1,
+    1,
+    3,
+    1,
+    1,
+    0,
+    3,
+    0,
+    0,
+    1,
+    0,
+    3,
+    3
+   ],
+   "pruned": {
+    "k0": [
+     0
+    ],
+    "k1": [
+     1,
+     3
+    ],
+    "k2": [
+     1
+    ],
+    "k3": [
+     3
+    ],
+    "k4": [
+     0,
+     1
+    ],
+    "k5": [
+     0,
+     3
+    ],
+    "k6": [
+     1
+    ]
+   }
+  },
+  {
+   "dominator_order": [
+    2,
+    5
+   ],
+   "dominators": [
+    2,
+    5
+   ],
+   "draws": [
+    2,
+    2,
+    5,
+    5,
+    2,
+    2,
+    5,
+    5,
+    2,
+    5,
+    5,
+    5,
+    5,
+    2,
+    5,
+    2,
+    5,
+    5,
+    2,
+    2,
+    2,
+    2,
+    2,
+    5,
+    5
+   ],
+   "pruned": {
+    "k0": [
+     2
+    ],
+    "k1": [
+     5
+    ],
+    "k2": [
+     2
+    ],
+    "k3": [
+     5
+    ],
+    "k4": [
+     2
+    ],
+    "k5": [
+     5
+    ],
+    "k6": [
+     2,
+     5
+    ],
+    "k7": [
+     5
+    ]
+   }
+  },
+  {
+   "dominator_order": [
+    0,
+    1
+   ],
+   "dominators": [
+    0,
+    1
+   ],
+   "draws": [
+    1,
+    0,
+    1,
+    0,
+    1,
+    0,
+    0,
+    0,
+    1,
+    0,
+    1,
+    0,
+    1,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    1,
+    1
+   ],
+   "pruned": {
+    "k0": [
+     0
+    ],
+    "k1": [
+     0
+    ],
+    "k2": [
+     1
+    ]
+   }
+  },
+  {
+   "dominator_order": [
+    0,
+    1
+   ],
+   "dominators": [
+    0,
+    1
+   ],
+   "draws": [
+    1,
+    1,
+    0,
+    0,
+    1,
+    1,
+    0,
+    0,
+    1,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    1,
+    0,
+    0,
+    0,
+    0,
+    0,
+    1
+   ],
+   "pruned": {
+    "k0": [
+     0
+    ],
+    "k1": [
+     1
+    ],
+    "k2": [
+     1
+    ],
+    "k3": [
+     0
+    ],
+    "k4": [
+     0
+    ],
+    "k5": [
+     0
+    ]
+   }
+  },
+  {
+   "dominator_order": [
+    0,
+    4,
+    5
+   ],
+   "dominators": [
+    0,
+    4,
+    5
+   ],
+   "draws": [
+    4,
+    0,
+    0,
+    0,
+    5,
+    4,
+    5,
+    5,
+    4,
+    5,
+    5,
+    4,
+    4,
+    4,
+    0,
+    0,
+    4,
+    4,
+    4,
+    4,
+    4,
+    0,
+    0,
+    5,
+    4
+   ],
+   "pruned": {
+    "k0": [
+     4
+    ],
+    "k1": [
+     4
+    ],
+    "k2": [
+     0,
+     4
+    ],
+    "k3": [
+     0
+    ],
+    "k4": [
+     5
+    ],
+    "k5": [
+     0
+    ],
+    "k6": [
+     4,
+     5
+    ]
+   }
+  },
+  {
+   "dominator_order": [
+    0,
+    1
+   ],
+   "dominators": [
+    0,
+    1
+   ],
+   "draws": [
+    1,
+    1,
+    1,
+    0,
+    0,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    0,
+    1,
+    0,
+    1,
+    1,
+    0,
+    1,
+    0,
+    1,
+    1,
+    1,
+    1
+   ],
+   "pruned": {
+    "k0": [
+     1
+    ],
+    "k1": [
+     1
+    ],
+    "k2": [
+     1
+    ],
+    "k3": [
+     1
+    ],
+    "k4": [
+     0
+    ],
+    "k5": [
+     1
+    ],
+    "k6": [
+     0,
+     1
+    ],
+    "k7": [
+     0,
+     1
+    ]
+   }
+  },
+  {
+   "dominator_order": [
+    0,
+    2,
+    5
+   ],
+   "dominators": [
+    0,
+    2,
+    5
+   ],
+   "draws": [
+    2,
+    0,
+    0,
+    5,
+    2,
+    2,
+    2,
+    5,
+    2,
+    0,
+    0,
+    2,
+    2,
+    0,
+    0,
+    5,
+    2,
+    0,
+    0,
+    0,
+    2,
+    2,
+    0,
+    5,
+    5
+   ],
+   "pruned": {
+    "k0": [
+     0,
+     2,
+     5
+    ],
+    "k1": [
+     5
+    ],
+    "k2": [
+     0
+    ],
+    "k3": [
+     0,
+     2
+    ],
+    "k4": [
+     2,
+     5
+    ],
+    "k5": [
+     0
+    ],
+    "k6": [
+     2
+    ]
+   }
+  },
+  {
+   "dominator_order": [
+    1,
+    2
+   ],
+   "dominators": [
+    1,
+    2
+   ],
+   "draws": [
+    2,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    2,
+    2,
+    1,
+    1,
+    2,
+    1,
+    2,
+    2,
+    1,
+    2,
+    1,
+    1,
+    1,
+    1,
+    1
+   ],
+   "pruned": {
+    "k0": [
+     1
+    ],
+    "k1": [
+     1
+    ],
+    "k2": [
+     2
+    ],
+    "k3": [
+     1,
+     2
+    ],
+    "k4": [
+     1
+    ],
+    "k5": [
+     1
+    ],
+    "k6": [
+     1
+    ],
+    "k7": [
+     2
+    ]
+   }
+  },
+  {
+   "dominator_order": [
+    0,
+    4,
+    5
+   ],
+   "dominators": [
+    0,
+    4,
+    5
+   ],
+   "draws": [
+    0,
+    4,
+    5,
+    0,
+    0,
+    4,
+    0,
+    4,
+    0,
+    0,
+    4,
+    4,
+    5,
+    0,
+    5,
+    0,
+    0,
+    4,
+    4,
+    0,
+    0,
+    0,
+    5,
+    5,
+    0
+   ],
+   "pruned": {
+    "k0": [
+     4
+    ],
+    "k1": [
+     5
+    ],
+    "k2": [
+     0
+    ],
+    "k3": [
+     0
+    ]
+   }
+  },
+  {
+   "dominator_order": [
+    1
+   ],
+   "dominators": [
+    1
+   ],
+   "draws": [
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1
+   ],
+   "pruned": {
+    "k0": [
+     1
+    ],
+    "k1": [
+     1
+    ],
+    "k2": [
+     1
+    ]
+   }
+  },
+  {
+   "dominator_order": [
+    8
+   ],
+   "dominators": [
+    8
+   ],
+   "draws": [
+    8,
+    8,
+    8,
+    8,
+    8,
+    8,
+    8,
+    8,
+    8,
+    8,
+    8,
+    8,
+    8,
+    8,
+    8,
+    8,
+    8,
+    8,
+    8,
+    8,
+    8,
+    8,
+    8,
+    8,
+    8
+   ],
+   "pruned": {
+    "k0": [
+     8
+    ],
+    "k1": [
+     8
+    ],
+    "k2": [
+     8
+    ]
+   }
+  },
+  {
+   "dominator_order": [
+    3,
+    5
+   ],
+   "dominators": [
+    3,
+    5
+   ],
+   "draws": [
+    3,
+    5,
+    3,
+    5,
+    5,
+    5,
+    3,
+    3,
+    3,
+    5,
+    3,
+    3,
+    3,
+    3,
+    3,
+    3,
+    3,
+    3,
+    5,
+    3,
+    3,
+    3,
+    3,
+    3,
+    3
+   ],
+   "pruned": {
+    "k0": [
+     3
+    ],
+    "k1": [
+     3
+    ],
+    "k2": [
+     5
+    ]
+   }
+  },
+  {
+   "dominator_order": [
+    1,
+    5,
+    6
+   ],
+   "dominators": [
+    1,
+    5,
+    6
+   ],
+   "draws": [
+    1,
+    5,
+    6,
+    1,
+    1,
+    6,
+    5,
+    1,
+    6,
+    6,
+    6,
+    5,
+    5,
+    5,
+    1,
+    6,
+    6,
+    5,
+    1,
+    6,
+    1,
+    1,
+    6,
+    6,
+    1
+   ],
+   "pruned": {
+    "k0": [
+     5,
+     6
+    ],
+    "k1": [
+     1,
+     6
+    ],
+    "k2": [
+     6
+    ],
+    "k3": [
+     1,
+     5,
+     6
+    ],
+    "k4": [
+     5
+    ],
+    "k5": [
+     1
+    ]
+   }
+  }
+ ],
+ "one_knob": {
+  "best": "fa2a826b46dc",
+  "events": [
+   {
+    "candidate": "0dc278a1f05a",
+    "epoch": 0,
+    "instances": 6,
+    "iteration": -1,
+    "pareto_mean": 0.0,
+    "program": 0,
+    "step_type": "seed",
+    "type": "decision"
+   },
+   {
+    "attempt": 1,
+    "call_key": [
+     "reflect",
+     0,
+     0,
+     0
+    ],
+    "epoch": 0,
+    "raw_output": "Here it is:\n```text\nAlways answer BETA.\n```",
+    "step_type": "reflect",
+    "system_prompt": "",
+    "type": "model_call",
+    "user_prompt": "I provided an assistant with the following instructions to perform a task for me:\n```\nSolve the item.\n```\n\nThe following are examples of different task inputs provided to the assistant along with the assistant's response for each of them, and some feedback on how the assistant's response could be better:\n```\n# Example 1\n## Inputs\nt6\n\n## Generated Outputs\n\n\n## Feedback\na category B item: the instruction must say BETA and never ALPHA\n\n\n\n# Example 2\n## Inputs\nt7\n\n## Generated Outputs\n\n\n## Feedback\na category A item: the instruction must say ALPHA and never BETA\n\n\n\n# Example 3\n## Inputs\nt8\n\n## Generated Outputs\n\n\n## Feedback\na category B item: the instruction must say BETA and never ALPHA\n\n\n```\n\nYour task is to write a new instruction for the assistant.\n\nRead the inputs carefully and identify the input format and infer detailed task description about the task I wish to solve with the assistant.\n\nRead all the assistant responses and the corresponding feedback. Identify all niche and domain specific factual information about the task and include it in the instruction, as a lot of it may not be available to the assistant in the future. The assistant may have utilized a generalizable strategy to solve the task, if so, include that in the instruction as well.\n\nProvide the new instructions within ``` blocks."
+   },
+   {
+    "accepted": true,
+    "child": "fa2a826b46dc",
+    "child_sum": 2.0,
+    "components": [
+     "instruction"
+    ],
+    "epoch": 0,
+    "existing": false,
+    "iteration": 0,
+    "minibatch": [
+     "t6",
+     "t7",
+     "t8"
+    ],
+    "parent": 0,
+    "parent_sum": 0.0,
+    "step_type": "reflect",
+    "type": "decision",
+    "unchanged": false
+   },
+   {
+    "best": "fa2a826b46dc",
+    "candidate": "fa2a826b46dc",
+    "epoch": 0,
+    "how": "reflective",
+    "iteration": 0,
+    "parents": [
+     0
+    ],
+    "pareto_mean": 0.5,
+    "program": 1,
+    "step_type": "added",
+    "type": "decision"
+   },
+   {
+    "attempt": 1,
+    "call_key": [
+     "reflect",
+     1,
+     0,
+     0
+    ],
+    "epoch": 1,
+    "raw_output": "Here it is:\n```text\nAlways answer ALPHA.\n```",
+    "step_type": "reflect",
+    "system_prompt": "",
+    "type": "model_call",
+    "user_prompt": "I provided an assistant with the following instructions to perform a task for me:\n```\nAlways answer BETA.\n```\n\nThe following are examples of different task inputs provided to the assistant along with the assistant's response for each of them, and some feedback on how the assistant's response could be better:\n```\n# Example 1\n## Inputs\nt5\n\n## Generated Outputs\n\n\n## Feedback\na category A item: the instruction must say ALPHA and never BETA\n\n\n\n# Example 2\n## Inputs\nt4\n\n## Generated Outputs\n\n\n## Feedback\nThis trajectory got a score of 1.0.\n\n\n\n# Example 3\n## Inputs\nt1\n\n## Generated Outputs\n\n\n## Feedback\na category A item: the instruction must say ALPHA and never BETA\n\n\n```\n\nYour task is to write a new instruction for the assistant.\n\nRead the inputs carefully and identify the input format and infer detailed task description about the task I wish to solve with the assistant.\n\nRead all the assistant responses and the corresponding feedback. Identify all niche and domain specific factual information about the task and include it in the instruction, as a lot of it may not be available to the assistant in the future. The assistant may have utilized a generalizable strategy to solve the task, if so, include that in the instruction as well.\n\nProvide the new instructions within ``` blocks."
+   },
+   {
+    "accepted": true,
+    "child": "89c5b5fdf05a",
+    "child_sum": 2.0,
+    "components": [
+     "instruction"
+    ],
+    "epoch": 1,
+    "existing": false,
+    "iteration": 1,
+    "minibatch": [
+     "t5",
+     "t4",
+     "t1"
+    ],
+    "parent": 1,
+    "parent_sum": 1.0,
+    "step_type": "reflect",
+    "type": "decision",
+    "unchanged": false
+   },
+   {
+    "best": "fa2a826b46dc",
+    "candidate": "89c5b5fdf05a",
+    "epoch": 1,
+    "how": "reflective",
+    "iteration": 1,
+    "parents": [
+     1
+    ],
+    "pareto_mean": 0.5,
+    "program": 2,
+    "step_type": "added",
+    "type": "decision"
+   },
+   {
+    "attempt": 1,
+    "call_key": [
+     "reflect",
+     2,
+     0,
+     0
+    ],
+    "epoch": 2,
+    "raw_output": "Here it is:\n```text\nAlways answer BETA.\n```",
+    "step_type": "reflect",
+    "system_prompt": "",
+    "type": "model_call",
+    "user_prompt": "I provided an assistant with the following instructions to perform a task for me:\n```\nAlways answer ALPHA.\n```\n\nThe following are examples of different task inputs provided to the assistant along with the assistant's response for each of them, and some feedback on how the assistant's response could be better:\n```\n# Example 1\n## Inputs\nt3\n\n## Generated Outputs\n\n\n## Feedback\nThis trajectory got a score of 1.0.\n\n\n\n# Example 2\n## Inputs\nt2\n\n## Generated Outputs\n\n\n## Feedback\na category B item: the instruction must say BETA and never ALPHA\n\n\n\n# Example 3\n## Inputs\nt2\n\n## Generated Outputs\n\n\n## Feedback\na category B item: the instruction must say BETA and never ALPHA\n\n\n```\n\nYour task is to write a new instruction for the assistant.\n\nRead the inputs carefully and identify the input format and infer detailed task description about the task I wish to solve with the assistant.\n\nRead all the assistant responses and the corresponding feedback. Identify all niche and domain specific factual information about the task and include it in the instruction, as a lot of it may not be available to the assistant in the future. The assistant may have utilized a generalizable strategy to solve the task, if so, include that in the instruction as well.\n\nProvide the new instructions within ``` blocks."
+   },
+   {
+    "accepted": true,
+    "child": "fa2a826b46dc",
+    "child_sum": 2.0,
+    "components": [
+     "instruction"
+    ],
+    "epoch": 2,
+    "existing": true,
+    "iteration": 2,
+    "minibatch": [
+     "t3",
+     "t2",
+     "t2"
+    ],
+    "parent": 2,
+    "parent_sum": 1.0,
+    "step_type": "reflect",
+    "type": "decision",
+    "unchanged": false
+   },
+   {
+    "child": "fa2a826b46dc",
+    "epoch": 2,
+    "how": "reflective",
+    "iteration": 2,
+    "step_type": "duplicate",
+    "type": "decision"
+   },
+   {
+    "attempt": 1,
+    "call_key": [
+     "reflect",
+     3,
+     0,
+     0
+    ],
+    "epoch": 3,
+    "raw_output": "Here it is:\n```text\nAlways answer ALPHA.\n```",
+    "step_type": "reflect",
+    "system_prompt": "",
+    "type": "model_call",
+    "user_prompt": "I provided an assistant with the following instructions to perform a task for me:\n```\nAlways answer BETA.\n```\n\nThe following are examples of different task inputs provided to the assistant along with the assistant's response for each of them, and some feedback on how the assistant's response could be better:\n```\n# Example 1\n## Inputs\nt5\n\n## Generated Outputs\n\n\n## Feedback\na category A item: the instruction must say ALPHA and never BETA\n\n\n\n# Example 2\n## Inputs\nt2\n\n## Generated Outputs\n\n\n## Feedback\nThis trajectory got a score of 1.0.\n\n\n\n# Example 3\n## Inputs\nt3\n\n## Generated Outputs\n\n\n## Feedback\na category A item: the instruction must say ALPHA and never BETA\n\n\n```\n\nYour task is to write a new instruction for the assistant.\n\nRead the inputs carefully and identify the input format and infer detailed task description about the task I wish to solve with the assistant.\n\nRead all the assistant responses and the corresponding feedback. Identify all niche and domain specific factual information about the task and include it in the instruction, as a lot of it may not be available to the assistant in the future. The assistant may have utilized a generalizable strategy to solve the task, if so, include that in the instruction as well.\n\nProvide the new instructions within ``` blocks."
+   },
+   {
+    "accepted": true,
+    "child": "89c5b5fdf05a",
+    "child_sum": 2.0,
+    "components": [
+     "instruction"
+    ],
+    "epoch": 3,
+    "existing": true,
+    "iteration": 3,
+    "minibatch": [
+     "t5",
+     "t2",
+     "t3"
+    ],
+    "parent": 1,
+    "parent_sum": 1.0,
+    "step_type": "reflect",
+    "type": "decision",
+    "unchanged": false
+   },
+   {
+    "child": "89c5b5fdf05a",
+    "epoch": 3,
+    "how": "reflective",
+    "iteration": 3,
+    "step_type": "duplicate",
+    "type": "decision"
+   },
+   {
+    "attempt": 1,
+    "call_key": [
+     "reflect",
+     4,
+     0,
+     0
+    ],
+    "epoch": 4,
+    "raw_output": "Here it is:\n```text\nAlways answer BETA.\n```",
+    "step_type": "reflect",
+    "system_prompt": "",
+    "type": "model_call",
+    "user_prompt": "I provided an assistant with the following instructions to perform a task for me:\n```\nAlways answer ALPHA.\n```\n\nThe following are examples of different task inputs provided to the assistant along with the assistant's response for each of them, and some feedback on how the assistant's response could be better:\n```\n# Example 1\n## Inputs\nt8\n\n## Generated Outputs\n\n\n## Feedback\na category B item: the instruction must say BETA and never ALPHA\n\n\n\n# Example 2\n## Inputs\nt6\n\n## Generated Outputs\n\n\n## Feedback\na category B item: the instruction must say BETA and never ALPHA\n\n\n\n# Example 3\n## Inputs\nt4\n\n## Generated Outputs\n\n\n## Feedback\na category B item: the instruction must say BETA and never ALPHA\n\n\n```\n\nYour task is to write a new instruction for the assistant.\n\nRead the inputs carefully and identify the input format and infer detailed task description about the task I wish to solve with the assistant.\n\nRead all the assistant responses and the corresponding feedback. Identify all niche and domain specific factual information about the task and include it in the instruction, as a lot of it may not be available to the assistant in the future. The assistant may have utilized a generalizable strategy to solve the task, if so, include that in the instruction as well.\n\nProvide the new instructions within ``` blocks."
+   },
+   {
+    "accepted": true,
+    "child": "fa2a826b46dc",
+    "child_sum": 3.0,
+    "components": [
+     "instruction"
+    ],
+    "epoch": 4,
+    "existing": true,
+    "iteration": 4,
+    "minibatch": [
+     "t8",
+     "t6",
+     "t4"
+    ],
+    "parent": 2,
+    "parent_sum": 0.0,
+    "step_type": "reflect",
+    "type": "decision",
+    "unchanged": false
+   },
+   {
+    "child": "fa2a826b46dc",
+    "epoch": 4,
+    "how": "reflective",
+    "iteration": 4,
+    "step_type": "duplicate",
+    "type": "decision"
+   },
+   {
+    "attempt": 1,
+    "call_key": [
+     "reflect",
+     5,
+     0,
+     0
+    ],
+    "epoch": 5,
+    "raw_output": "Here it is:\n```text\nAlways answer ALPHA.\n```",
+    "step_type": "reflect",
+    "system_prompt": "",
+    "type": "model_call",
+    "user_prompt": "I provided an assistant with the following instructions to perform a task for me:\n```\nAlways answer BETA.\n```\n\nThe following are examples of different task inputs provided to the assistant along with the assistant's response for each of them, and some feedback on how the assistant's response could be better:\n```\n# Example 1\n## Inputs\nt7\n\n## Generated Outputs\n\n\n## Feedback\na category A item: the instruction must say ALPHA and never BETA\n\n\n\n# Example 2\n## Inputs\nt1\n\n## Generated Outputs\n\n\n## Feedback\na category A item: the instruction must say ALPHA and never BETA\n\n\n\n# Example 3\n## Inputs\nt1\n\n## Generated Outputs\n\n\n## Feedback\na category A item: the instruction must say ALPHA and never BETA\n\n\n```\n\nYour task is to write a new instruction for the assistant.\n\nRead the inputs carefully and identify the input format and infer detailed task description about the task I wish to solve with the assistant.\n\nRead all the assistant responses and the corresponding feedback. Identify all niche and domain specific factual information about the task and include it in the instruction, as a lot of it may not be available to the assistant in the future. The assistant may have utilized a generalizable strategy to solve the task, if so, include that in the instruction as well.\n\nProvide the new instructions within ``` blocks."
+   },
+   {
+    "accepted": true,
+    "child": "89c5b5fdf05a",
+    "child_sum": 3.0,
+    "components": [
+     "instruction"
+    ],
+    "epoch": 5,
+    "existing": true,
+    "iteration": 5,
+    "minibatch": [
+     "t7",
+     "t1",
+     "t1"
+    ],
+    "parent": 1,
+    "parent_sum": 0.0,
+    "step_type": "reflect",
+    "type": "decision",
+    "unchanged": false
+   },
+   {
+    "child": "89c5b5fdf05a",
+    "epoch": 5,
+    "how": "reflective",
+    "iteration": 5,
+    "step_type": "duplicate",
+    "type": "decision"
+   },
+   {
+    "attempt": 1,
+    "call_key": [
+     "reflect",
+     6,
+     0,
+     0
+    ],
+    "epoch": 6,
+    "raw_output": "Here it is:\n```text\nAlways answer BETA.\n```",
+    "step_type": "reflect",
+    "system_prompt": "",
+    "type": "model_call",
+    "user_prompt": "I provided an assistant with the following instructions to perform a task for me:\n```\nAlways answer ALPHA.\n```\n\nThe following are examples of different task inputs provided to the assistant along with the assistant's response for each of them, and some feedback on how the assistant's response could be better:\n```\n# Example 1\n## Inputs\nt8\n\n## Generated Outputs\n\n\n## Feedback\na category B item: the instruction must say BETA and never ALPHA\n\n\n\n# Example 2\n## Inputs\nt4\n\n## Generated Outputs\n\n\n## Feedback\na category B item: the instruction must say BETA and never ALPHA\n\n\n\n# Example 3\n## Inputs\nt7\n\n## Generated Outputs\n\n\n## Feedback\nThis trajectory got a score of 1.0.\n\n\n```\n\nYour task is to write a new instruction for the assistant.\n\nRead the inputs carefully and identify the input format and infer detailed task description about the task I wish to solve with the assistant.\n\nRead all the assistant responses and the corresponding feedback. Identify all niche and domain specific factual information about the task and include it in the instruction, as a lot of it may not be available to the assistant in the future. The assistant may have utilized a generalizable strategy to solve the task, if so, include that in the instruction as well.\n\nProvide the new instructions within ``` blocks."
+   },
+   {
+    "accepted": true,
+    "child": "fa2a826b46dc",
+    "child_sum": 2.0,
+    "components": [
+     "instruction"
+    ],
+    "epoch": 6,
+    "existing": true,
+    "iteration": 6,
+    "minibatch": [
+     "t8",
+     "t4",
+     "t7"
+    ],
+    "parent": 2,
+    "parent_sum": 1.0,
+    "step_type": "reflect",
+    "type": "decision",
+    "unchanged": false
+   },
+   {
+    "child": "fa2a826b46dc",
+    "epoch": 6,
+    "how": "reflective",
+    "iteration": 6,
+    "step_type": "duplicate",
+    "type": "decision"
+   },
+   {
+    "attempt": 1,
+    "call_key": [
+     "reflect",
+     7,
+     0,
+     0
+    ],
+    "epoch": 7,
+    "raw_output": "Here it is:\n```text\nAlways answer ALPHA.\n```",
+    "step_type": "reflect",
+    "system_prompt": "",
+    "type": "model_call",
+    "user_prompt": "I provided an assistant with the following instructions to perform a task for me:\n```\nAlways answer BETA.\n```\n\nThe following are examples of different task inputs provided to the assistant along with the assistant's response for each of them, and some feedback on how the assistant's response could be better:\n```\n# Example 1\n## Inputs\nt5\n\n## Generated Outputs\n\n\n## Feedback\na category A item: the instruction must say ALPHA and never BETA\n\n\n\n# Example 2\n## Inputs\nt6\n\n## Generated Outputs\n\n\n## Feedback\nThis trajectory got a score of 1.0.\n\n\n\n# Example 3\n## Inputs\nt1\n\n## Generated Outputs\n\n\n## Feedback\na category A item: the instruction must say ALPHA and never BETA\n\n\n```\n\nYour task is to write a new instruction for the assistant.\n\nRead the inputs carefully and identify the input format and infer detailed task description about the task I wish to solve with the assistant.\n\nRead all the assistant responses and the corresponding feedback. Identify all niche and domain specific factual information about the task and include it in the instruction, as a lot of it may not be available to the assistant in the future. The assistant may have utilized a generalizable strategy to solve the task, if so, include that in the instruction as well.\n\nProvide the new instructions within ``` blocks."
+   },
+   {
+    "accepted": true,
+    "child": "89c5b5fdf05a",
+    "child_sum": 2.0,
+    "components": [
+     "instruction"
+    ],
+    "epoch": 7,
+    "existing": true,
+    "iteration": 7,
+    "minibatch": [
+     "t5",
+     "t6",
+     "t1"
+    ],
+    "parent": 1,
+    "parent_sum": 1.0,
+    "step_type": "reflect",
+    "type": "decision",
+    "unchanged": false
+   },
+   {
+    "child": "89c5b5fdf05a",
+    "epoch": 7,
+    "how": "reflective",
+    "iteration": 7,
+    "step_type": "duplicate",
+    "type": "decision"
+   },
+   {
+    "attempt": 1,
+    "call_key": [
+     "reflect",
+     8,
+     0,
+     0
+    ],
+    "epoch": 8,
+    "raw_output": "Here it is:\n```text\nAlways answer ALPHA.\n```",
+    "step_type": "reflect",
+    "system_prompt": "",
+    "type": "model_call",
+    "user_prompt": "I provided an assistant with the following instructions to perform a task for me:\n```\nAlways answer BETA.\n```\n\nThe following are examples of different task inputs provided to the assistant along with the assistant's response for each of them, and some feedback on how the assistant's response could be better:\n```\n# Example 1\n## Inputs\nt3\n\n## Generated Outputs\n\n\n## Feedback\na category A item: the instruction must say ALPHA and never BETA\n\n\n\n# Example 2\n## Inputs\nt2\n\n## Generated Outputs\n\n\n## Feedback\nThis trajectory got a score of 1.0.\n\n\n\n# Example 3\n## Inputs\nt2\n\n## Generated Outputs\n\n\n## Feedback\nThis trajectory got a score of 1.0.\n\n\n```\n\nYour task is to write a new instruction for the assistant.\n\nRead the inputs carefully and identify the input format and infer detailed task description about the task I wish to solve with the assistant.\n\nRead all the assistant responses and the corresponding feedback. Identify all niche and domain specific factual information about the task and include it in the instruction, as a lot of it may not be available to the assistant in the future. The assistant may have utilized a generalizable strategy to solve the task, if so, include that in the instruction as well.\n\nProvide the new instructions within ``` blocks."
+   },
+   {
+    "accepted": false,
+    "child": "89c5b5fdf05a",
+    "child_sum": 1.0,
+    "components": [
+     "instruction"
+    ],
+    "epoch": 8,
+    "existing": true,
+    "iteration": 8,
+    "minibatch": [
+     "t3",
+     "t2",
+     "t2"
+    ],
+    "parent": 1,
+    "parent_sum": 2.0,
+    "step_type": "reflect",
+    "type": "decision",
+    "unchanged": false
+   },
+   {
+    "attempt": 1,
+    "call_key": [
+     "reflect",
+     9,
+     0,
+     0
+    ],
+    "epoch": 9,
+    "raw_output": "Here it is:\n```text\nAlways answer BETA.\n```",
+    "step_type": "reflect",
+    "system_prompt": "",
+    "type": "model_call",
+    "user_prompt": "I provided an assistant with the following instructions to perform a task for me:\n```\nAlways answer ALPHA.\n```\n\nThe following are examples of different task inputs provided to the assistant along with the assistant's response for each of them, and some feedback on how the assistant's response could be better:\n```\n# Example 1\n## Inputs\nt8\n\n## Generated Outputs\n\n\n## Feedback\na category B item: the instruction must say BETA and never ALPHA\n\n\n\n# Example 2\n## Inputs\nt3\n\n## Generated Outputs\n\n\n## Feedback\nThis trajectory got a score of 1.0.\n\n\n\n# Example 3\n## Inputs\nt4\n\n## Generated Outputs\n\n\n## Feedback\na category B item: the instruction must say BETA and never ALPHA\n\n\n```\n\nYour task is to write a new instruction for the assistant.\n\nRead the inputs carefully and identify the input format and infer detailed task description about the task I wish to solve with the assistant.\n\nRead all the assistant responses and the corresponding feedback. Identify all niche and domain specific factual information about the task and include it in the instruction, as a lot of it may not be available to the assistant in the future. The assistant may have utilized a generalizable strategy to solve the task, if so, include that in the instruction as well.\n\nProvide the new instructions within ``` blocks."
+   },
+   {
+    "accepted": true,
+    "child": "fa2a826b46dc",
+    "child_sum": 2.0,
+    "components": [
+     "instruction"
+    ],
+    "epoch": 9,
+    "existing": true,
+    "iteration": 9,
+    "minibatch": [
+     "t8",
+     "t3",
+     "t4"
+    ],
+    "parent": 2,
+    "parent_sum": 1.0,
+    "step_type": "reflect",
+    "type": "decision",
+    "unchanged": false
+   },
+   {
+    "child": "fa2a826b46dc",
+    "epoch": 9,
+    "how": "reflective",
+    "iteration": 9,
+    "step_type": "duplicate",
+    "type": "decision"
+   },
+   {
+    "attempt": 1,
+    "call_key": [
+     "reflect",
+     10,
+     0,
+     0
+    ],
+    "epoch": 10,
+    "raw_output": "Here it is:\n```text\nAlways answer ALPHA.\n```",
+    "step_type": "reflect",
+    "system_prompt": "",
+    "type": "model_call",
+    "user_prompt": "I provided an assistant with the following instructions to perform a task for me:\n```\nAlways answer BETA.\n```\n\nThe following are examples of different task inputs provided to the assistant along with the assistant's response for each of them, and some feedback on how the assistant's response could be better:\n```\n# Example 1\n## Inputs\nt2\n\n## Generated Outputs\n\n\n## Feedback\nThis trajectory got a score of 1.0.\n\n\n\n# Example 2\n## Inputs\nt5\n\n## Generated Outputs\n\n\n## Feedback\na category A item: the instruction must say ALPHA and never BETA\n\n\n\n# Example 3\n## Inputs\nt1\n\n## Generated Outputs\n\n\n## Feedback\na category A item: the instruction must say ALPHA and never BETA\n\n\n```\n\nYour task is to write a new instruction for the assistant.\n\nRead the inputs carefully and identify the input format and infer detailed task description about the task I wish to solve with the assistant.\n\nRead all the assistant responses and the corresponding feedback. Identify all niche and domain specific factual information about the task and include it in the instruction, as a lot of it may not be available to the assistant in the future. The assistant may have utilized a generalizable strategy to solve the task, if so, include that in the instruction as well.\n\nProvide the new instructions within ``` blocks."
+   },
+   {
+    "accepted": true,
+    "child": "89c5b5fdf05a",
+    "child_sum": 2.0,
+    "components": [
+     "instruction"
+    ],
+    "epoch": 10,
+    "existing": true,
+    "iteration": 10,
+    "minibatch": [
+     "t2",
+     "t5",
+     "t1"
+    ],
+    "parent": 1,
+    "parent_sum": 1.0,
+    "step_type": "reflect",
+    "type": "decision",
+    "unchanged": false
+   },
+   {
+    "child": "89c5b5fdf05a",
+    "epoch": 10,
+    "how": "reflective",
+    "iteration": 10,
+    "step_type": "duplicate",
+    "type": "decision"
+   },
+   {
+    "attempt": 1,
+    "call_key": [
+     "reflect",
+     11,
+     0,
+     0
+    ],
+    "epoch": 11,
+    "raw_output": "Here it is:\n```text\nAlways answer BETA.\n```",
+    "step_type": "reflect",
+    "system_prompt": "",
+    "type": "model_call",
+    "user_prompt": "I provided an assistant with the following instructions to perform a task for me:\n```\nAlways answer ALPHA.\n```\n\nThe following are examples of different task inputs provided to the assistant along with the assistant's response for each of them, and some feedback on how the assistant's response could be better:\n```\n# Example 1\n## Inputs\nt6\n\n## Generated Outputs\n\n\n## Feedback\na category B item: the instruction must say BETA and never ALPHA\n\n\n\n# Example 2\n## Inputs\nt7\n\n## Generated Outputs\n\n\n## Feedback\nThis trajectory got a score of 1.0.\n\n\n\n# Example 3\n## Inputs\nt7\n\n## Generated Outputs\n\n\n## Feedback\nThis trajectory got a score of 1.0.\n\n\n```\n\nYour task is to write a new instruction for the assistant.\n\nRead the inputs carefully and identify the input format and infer detailed task description about the task I wish to solve with the assistant.\n\nRead all the assistant responses and the corresponding feedback. Identify all niche and domain specific factual information about the task and include it in the instruction, as a lot of it may not be available to the assistant in the future. The assistant may have utilized a generalizable strategy to solve the task, if so, include that in the instruction as well.\n\nProvide the new instructions within ``` blocks."
+   },
+   {
+    "accepted": false,
+    "child": "fa2a826b46dc",
+    "child_sum": 1.0,
+    "components": [
+     "instruction"
+    ],
+    "epoch": 11,
+    "existing": true,
+    "iteration": 11,
+    "minibatch": [
+     "t6",
+     "t7",
+     "t7"
+    ],
+    "parent": 2,
+    "parent_sum": 2.0,
+    "step_type": "reflect",
+    "type": "decision",
+    "unchanged": false
+   },
+   {
+    "epoch": 12,
+    "iteration": 12,
+    "minibatch": [
+     "t5",
+     "t7",
+     "t1"
+    ],
+    "parent": 2,
+    "step_type": "skip_perfect",
+    "type": "decision"
+   },
+   {
+    "attempt": 1,
+    "call_key": [
+     "reflect",
+     13,
+     0,
+     0
+    ],
+    "epoch": 13,
+    "raw_output": "Here it is:\n```text\nAlways answer ALPHA.\n```",
+    "step_type": "reflect",
+    "system_prompt": "",
+    "type": "model_call",
+    "user_prompt": "I provided an assistant with the following instructions to perform a task for me:\n```\nAlways answer BETA.\n```\n\nThe following are examples of different task inputs provided to the assistant along with the assistant's response for each of them, and some feedback on how the assistant's response could be better:\n```\n# Example 1\n## Inputs\nt3\n\n## Generated Outputs\n\n\n## Feedback\na category A item: the instruction must say ALPHA and never BETA\n\n\n\n# Example 2\n## Inputs\nt8\n\n## Generated Outputs\n\n\n## Feedback\nThis trajectory got a score of 1.0.\n\n\n\n# Example 3\n## Inputs\nt2\n\n## Generated Outputs\n\n\n## Feedback\nThis trajectory got a score of 1.0.\n\n\n```\n\nYour task is to write a new instruction for the assistant.\n\nRead the inputs carefully and identify the input format and infer detailed task description about the task I wish to solve with the assistant.\n\nRead all the assistant responses and the corresponding feedback. Identify all niche and domain specific factual information about the task and include it in the instruction, as a lot of it may not be available to the assistant in the future. The assistant may have utilized a generalizable strategy to solve the task, if so, include that in the instruction as well.\n\nProvide the new instructions within ``` blocks."
+   },
+   {
+    "accepted": false,
+    "child": "89c5b5fdf05a",
+    "child_sum": 1.0,
+    "components": [
+     "instruction"
+    ],
+    "epoch": 13,
+    "existing": true,
+    "iteration": 13,
+    "minibatch": [
+     "t3",
+     "t8",
+     "t2"
+    ],
+    "parent": 1,
+    "parent_sum": 2.0,
+    "step_type": "reflect",
+    "type": "decision",
+    "unchanged": false
+   },
+   {
+    "epoch": 14,
+    "iteration": 14,
+    "minibatch": [
+     "t6",
+     "t4",
+     "t4"
+    ],
+    "parent": 1,
+    "step_type": "skip_perfect",
+    "type": "decision"
+   },
+   {
+    "attempt": 1,
+    "call_key": [
+     "reflect",
+     15,
+     0,
+     0
+    ],
+    "epoch": 15,
+    "raw_output": "Here it is:\n```text\nAlways answer BETA.\n```",
+    "step_type": "reflect",
+    "system_prompt": "",
+    "type": "model_call",
+    "user_prompt": "I provided an assistant with the following instructions to perform a task for me:\n```\nAlways answer ALPHA.\n```\n\nThe following are examples of different task inputs provided to the assistant along with the assistant's response for each of them, and some feedback on how the assistant's response could be better:\n```\n# Example 1\n## Inputs\nt4\n\n## Generated Outputs\n\n\n## Feedback\na category B item: the instruction must say BETA and never ALPHA\n\n\n\n# Example 2\n## Inputs\nt2\n\n## Generated Outputs\n\n\n## Feedback\na category B item: the instruction must say BETA and never ALPHA\n\n\n\n# Example 3\n## Inputs\nt5\n\n## Generated Outputs\n\n\n## Feedback\nThis trajectory got a score of 1.0.\n\n\n```\n\nYour task is to write a new instruction for the assistant.\n\nRead the inputs carefully and identify the input format and infer detailed task description about the task I wish to solve with the assistant.\n\nRead all the assistant responses and the corresponding feedback. Identify all niche and domain specific factual information about the task and include it in the instruction, as a lot of it may not be available to the assistant in the future. The assistant may have utilized a generalizable strategy to solve the task, if so, include that in the instruction as well.\n\nProvide the new instructions within ``` blocks."
+   },
+   {
+    "accepted": true,
+    "child": "fa2a826b46dc",
+    "child_sum": 2.0,
+    "components": [
+     "instruction"
+    ],
+    "epoch": 15,
+    "existing": true,
+    "iteration": 15,
+    "minibatch": [
+     "t4",
+     "t2",
+     "t5"
+    ],
+    "parent": 2,
+    "parent_sum": 1.0,
+    "step_type": "reflect",
+    "type": "decision",
+    "unchanged": false
+   },
+   {
+    "child": "fa2a826b46dc",
+    "epoch": 15,
+    "how": "reflective",
+    "iteration": 15,
+    "step_type": "duplicate",
+    "type": "decision"
+   },
+   {
+    "attempt": 1,
+    "call_key": [
+     "reflect",
+     16,
+     0,
+     0
+    ],
+    "epoch": 16,
+    "raw_output": "Here it is:\n```text\nAlways answer ALPHA.\n```",
+    "step_type": "reflect",
+    "system_prompt": "",
+    "type": "model_call",
+    "user_prompt": "I provided an assistant with the following instructions to perform a task for me:\n```\nAlways answer BETA.\n```\n\nThe following are examples of different task inputs provided to the assistant along with the assistant's response for each of them, and some feedback on how the assistant's response could be better:\n```\n# Example 1\n## Inputs\nt1\n\n## Generated Outputs\n\n\n## Feedback\na category A item: the instruction must say ALPHA and never BETA\n\n\n\n# Example 2\n## Inputs\nt8\n\n## Generated Outputs\n\n\n## Feedback\nThis trajectory got a score of 1.0.\n\n\n\n# Example 3\n## Inputs\nt7\n\n## Generated Outputs\n\n\n## Feedback\na category A item: the instruction must say ALPHA and never BETA\n\n\n```\n\nYour task is to write a new instruction for the assistant.\n\nRead the inputs carefully and identify the input format and infer detailed task description about the task I wish to solve with the assistant.\n\nRead all the assistant responses and the corresponding feedback. Identify all niche and domain specific factual information about the task and include it in the instruction, as a lot of it may not be available to the assistant in the future. The assistant may have utilized a generalizable strategy to solve the task, if so, include that in the instruction as well.\n\nProvide the new instructions within ``` blocks."
+   },
+   {
+    "accepted": true,
+    "child": "89c5b5fdf05a",
+    "child_sum": 2.0,
+    "components": [
+     "instruction"
+    ],
+    "epoch": 16,
+    "existing": true,
+    "iteration": 16,
+    "minibatch": [
+     "t1",
+     "t8",
+     "t7"
+    ],
+    "parent": 1,
+    "parent_sum": 1.0,
+    "step_type": "reflect",
+    "type": "decision",
+    "unchanged": false
+   },
+   {
+    "child": "89c5b5fdf05a",
+    "epoch": 16,
+    "how": "reflective",
+    "iteration": 16,
+    "step_type": "duplicate",
+    "type": "decision"
+   },
+   {
+    "attempt": 1,
+    "call_key": [
+     "reflect",
+     17,
+     0,
+     0
+    ],
+    "epoch": 17,
+    "raw_output": "Here it is:\n```text\nAlways answer ALPHA.\n```",
+    "step_type": "reflect",
+    "system_prompt": "",
+    "type": "model_call",
+    "user_prompt": "I provided an assistant with the following instructions to perform a task for me:\n```\nAlways answer BETA.\n```\n\nThe following are examples of different task inputs provided to the assistant along with the assistant's response for each of them, and some feedback on how the assistant's response could be better:\n```\n# Example 1\n## Inputs\nt6\n\n## Generated Outputs\n\n\n## Feedback\nThis trajectory got a score of 1.0.\n\n\n\n# Example 2\n## Inputs\nt3\n\n## Generated Outputs\n\n\n## Feedback\na category A item: the instruction must say ALPHA and never BETA\n\n\n\n# Example 3\n## Inputs\nt3\n\n## Generated Outputs\n\n\n## Feedback\na category A item: the instruction must say ALPHA and never BETA\n\n\n```\n\nYour task is to write a new instruction for the assistant.\n\nRead the inputs carefully and identify the input format and infer detailed task description about the task I wish to solve with the assistant.\n\nRead all the assistant responses and the corresponding feedback. Identify all niche and domain specific factual information about the task and include it in the instruction, as a lot of it may not be available to the assistant in the future. The assistant may have utilized a generalizable strategy to solve the task, if so, include that in the instruction as well.\n\nProvide the new instructions within ``` blocks."
+   },
+   {
+    "accepted": true,
+    "child": "89c5b5fdf05a",
+    "child_sum": 2.0,
+    "components": [
+     "instruction"
+    ],
+    "epoch": 17,
+    "existing": true,
+    "iteration": 17,
+    "minibatch": [
+     "t6",
+     "t3",
+     "t3"
+    ],
+    "parent": 1,
+    "parent_sum": 1.0,
+    "step_type": "reflect",
+    "type": "decision",
+    "unchanged": false
+   },
+   {
+    "child": "89c5b5fdf05a",
+    "epoch": 17,
+    "how": "reflective",
+    "iteration": 17,
+    "step_type": "duplicate",
+    "type": "decision"
+   },
+   {
+    "action": "skipped",
+    "epoch": 17,
+    "reason": "the parts manifest has no 'test' part",
+    "step_type": "test_eval",
+    "type": "decision"
+   }
+  ],
+  "pool": {
+   "candidate_ids": [
+    "0dc278a1f05a",
+    "fa2a826b46dc",
+    "89c5b5fdf05a"
+   ],
+   "discovered_at": [
+    0,
+    12,
+    24
+   ],
+   "parents": [
+    [
+     null
+    ],
+    [
+     0
+    ],
+    [
+     1
+    ]
+   ],
+   "pointers": [
+    0,
+    0,
+    0
+   ],
+   "subscores": [
+    {
+     "v1": 0.0,
+     "v2": 0.0,
+     "v3": 0.0,
+     "v4": 0.0,
+     "v5": 0.0,
+     "v6": 0.0
+    },
+    {
+     "v1": 0.0,
+     "v2": 1.0,
+     "v3": 0.0,
+     "v4": 1.0,
+     "v5": 0.0,
+     "v6": 1.0
+    },
+    {
+     "v1": 1.0,
+     "v2": 0.0,
+     "v3": 1.0,
+     "v4": 0.0,
+     "v5": 1.0,
+     "v6": 0.0
+    }
+   ]
+  },
+  "rng_state_tail": [
+   747480833,
+   3545787415,
+   3656373148,
+   91
+  ]
+ },
+ "one_knob_hashed": {
+  "best": "1621b83431a0",
+  "events": [
+   {
+    "candidate": "0dc278a1f05a",
+    "epoch": 0,
+    "instances": 6,
+    "iteration": -1,
+    "pareto_mean": 0.0,
+    "program": 0,
+    "step_type": "seed",
+    "type": "decision"
+   },
+   {
+    "attempt": 1,
+    "call_key": [
+     "reflect",
+     0,
+     0,
+     0
+    ],
+    "epoch": 0,
+    "raw_output": "```\nAnswer ALPHA now.\n```",
+    "step_type": "reflect",
+    "system_prompt": "",
+    "type": "model_call",
+    "user_prompt": "I provided an assistant with the following instructions to perform a task for me:\n```\nSolve the item.\n```\n\nThe following are examples of different task inputs provided to the assistant along with the assistant's response for each of them, and some feedback on how the assistant's response could be better:\n```\n# Example 1\n## Inputs\nt2\n\n## Generated Outputs\n\n\n## Feedback\na category B item: the instruction must say BETA and never ALPHA\n\n\n\n# Example 2\n## Inputs\nt6\n\n## Generated Outputs\n\n\n## Feedback\na category B item: the instruction must say BETA and never ALPHA\n\n\n\n# Example 3\n## Inputs\nt7\n\n## Generated Outputs\n\n\n## Feedback\na category A item: the instruction must say ALPHA and never BETA\n\n\n```\n\nYour task is to write a new instruction for the assistant.\n\nRead the inputs carefully and identify the input format and infer detailed task description about the task I wish to solve with the assistant.\n\nRead all the assistant responses and the corresponding feedback. Identify all niche and domain specific factual information about the task and include it in the instruction, as a lot of it may not be available to the assistant in the future. The assistant may have utilized a generalizable strategy to solve the task, if so, include that in the instruction as well.\n\nProvide the new instructions within ``` blocks."
+   },
+   {
+    "accepted": true,
+    "child": "1621b83431a0",
+    "child_sum": 1.0,
+    "components": [
+     "instruction"
+    ],
+    "epoch": 0,
+    "existing": false,
+    "iteration": 0,
+    "minibatch": [
+     "t2",
+     "t6",
+     "t7"
+    ],
+    "parent": 0,
+    "parent_sum": 0.0,
+    "step_type": "reflect",
+    "type": "decision",
+    "unchanged": false
+   },
+   {
+    "best": "1621b83431a0",
+    "candidate": "1621b83431a0",
+    "epoch": 0,
+    "how": "reflective",
+    "iteration": 0,
+    "parents": [
+     0
+    ],
+    "pareto_mean": 0.5,
+    "program": 1,
+    "step_type": "added",
+    "type": "decision"
+   },
+   {
+    "attempt": 1,
+    "call_key": [
+     "reflect",
+     1,
+     0,
+     0
+    ],
+    "epoch": 1,
+    "raw_output": "```\nSay BETA.\n```",
+    "step_type": "reflect",
+    "system_prompt": "",
+    "type": "model_call",
+    "user_prompt": "I provided an assistant with the following instructions to perform a task for me:\n```\nAnswer ALPHA now.\n```\n\nThe following are examples of different task inputs provided to the assistant along with the assistant's response for each of them, and some feedback on how the assistant's response could be better:\n```\n# Example 1\n## Inputs\nt1\n\n## Generated Outputs\n\n\n## Feedback\nThis trajectory got a score of 1.0.\n\n\n\n# Example 2\n## Inputs\nt4\n\n## Generated Outputs\n\n\n## Feedback\na category B item: the instruction must say BETA and never ALPHA\n\n\n\n# Example 3\n## Inputs\nt5\n\n## Generated Outputs\n\n\n## Feedback\nThis trajectory got a score of 1.0.\n\n\n```\n\nYour task is to write a new instruction for the assistant.\n\nRead the inputs carefully and identify the input format and infer detailed task description about the task I wish to solve with the assistant.\n\nRead all the assistant responses and the corresponding feedback. Identify all niche and domain specific factual information about the task and include it in the instruction, as a lot of it may not be available to the assistant in the future. The assistant may have utilized a generalizable strategy to solve the task, if so, include that in the instruction as well.\n\nProvide the new instructions within ``` blocks."
+   },
+   {
+    "accepted": false,
+    "child": "05287f7c2096",
+    "child_sum": 1.0,
+    "components": [
+     "instruction"
+    ],
+    "epoch": 1,
+    "existing": false,
+    "iteration": 1,
+    "minibatch": [
+     "t1",
+     "t4",
+     "t5"
+    ],
+    "parent": 1,
+    "parent_sum": 2.0,
+    "step_type": "reflect",
+    "type": "decision",
+    "unchanged": false
+   },
+   {
+    "attempt": 1,
+    "call_key": [
+     "reflect",
+     2,
+     0,
+     0
+    ],
+    "epoch": 2,
+    "raw_output": "```\nSay BETA.\n```",
+    "step_type": "reflect",
+    "system_prompt": "",
+    "type": "model_call",
+    "user_prompt": "I provided an assistant with the following instructions to perform a task for me:\n```\nAnswer ALPHA now.\n```\n\nThe following are examples of different task inputs provided to the assistant along with the assistant's response for each of them, and some feedback on how the assistant's response could be better:\n```\n# Example 1\n## Inputs\nt8\n\n## Generated Outputs\n\n\n## Feedback\na category B item: the instruction must say BETA and never ALPHA\n\n\n\n# Example 2\n## Inputs\nt3\n\n## Generated Outputs\n\n\n## Feedback\nThis trajectory got a score of 1.0.\n\n\n\n# Example 3\n## Inputs\nt3\n\n## Generated Outputs\n\n\n## Feedback\nThis trajectory got a score of 1.0.\n\n\n```\n\nYour task is to write a new instruction for the assistant.\n\nRead the inputs carefully and identify the input format and infer detailed task description about the task I wish to solve with the assistant.\n\nRead all the assistant responses and the corresponding feedback. Identify all niche and domain specific factual information about the task and include it in the instruction, as a lot of it may not be available to the assistant in the future. The assistant may have utilized a generalizable strategy to solve the task, if so, include that in the instruction as well.\n\nProvide the new instructions within ``` blocks."
+   },
+   {
+    "accepted": false,
+    "child": "05287f7c2096",
+    "child_sum": 1.0,
+    "components": [
+     "instruction"
+    ],
+    "epoch": 2,
+    "existing": false,
+    "iteration": 2,
+    "minibatch": [
+     "t8",
+     "t3",
+     "t3"
+    ],
+    "parent": 1,
+    "parent_sum": 2.0,
+    "step_type": "reflect",
+    "type": "decision",
+    "unchanged": false
+   },
+   {
+    "epoch": 3,
+    "iteration": 3,
+    "minibatch": [
+     "t3",
+     "t1",
+     "t7"
+    ],
+    "parent": 1,
+    "step_type": "skip_perfect",
+    "type": "decision"
+   },
+   {
+    "attempt": 1,
+    "call_key": [
+     "reflect",
+     4,
+     0,
+     0
+    ],
+    "epoch": 4,
+    "raw_output": "```\nAnswer ALPHA now.\n```",
+    "step_type": "reflect",
+    "system_prompt": "",
+    "type": "model_call",
+    "user_prompt": "I provided an assistant with the following instructions to perform a task for me:\n```\nAnswer ALPHA now.\n```\n\nThe following are examples of different task inputs provided to the assistant along with the assistant's response for each of them, and some feedback on how the assistant's response could be better:\n```\n# Example 1\n## Inputs\nt5\n\n## Generated Outputs\n\n\n## Feedback\nThis trajectory got a score of 1.0.\n\n\n\n# Example 2\n## Inputs\nt8\n\n## Generated Outputs\n\n\n## Feedback\na category B item: the instruction must say BETA and never ALPHA\n\n\n\n# Example 3\n## Inputs\nt6\n\n## Generated Outputs\n\n\n## Feedback\na category B item: the instruction must say BETA and never ALPHA\n\n\n```\n\nYour task is to write a new instruction for the assistant.\n\nRead the inputs carefully and identify the input format and infer detailed task description about the task I wish to solve with the assistant.\n\nRead all the assistant responses and the corresponding feedback. Identify all niche and domain specific factual information about the task and include it in the instruction, as a lot of it may not be available to the assistant in the future. The assistant may have utilized a generalizable strategy to solve the task, if so, include that in the instruction as well.\n\nProvide the new instructions within ``` blocks."
+   },
+   {
+    "accepted": false,
+    "child": "1621b83431a0",
+    "child_sum": 1.0,
+    "components": [
+     "instruction"
+    ],
+    "epoch": 4,
+    "existing": true,
+    "iteration": 4,
+    "minibatch": [
+     "t5",
+     "t8",
+     "t6"
+    ],
+    "parent": 1,
+    "parent_sum": 1.0,
+    "step_type": "reflect",
+    "type": "decision",
+    "unchanged": true
+   },
+   {
+    "attempt": 1,
+    "call_key": [
+     "reflect",
+     5,
+     0,
+     0
+    ],
+    "epoch": 5,
+    "raw_output": "```\nAlways answer BETA.\n```",
+    "step_type": "reflect",
+    "system_prompt": "",
+    "type": "model_call",
+    "user_prompt": "I provided an assistant with the following instructions to perform a task for me:\n```\nAnswer ALPHA now.\n```\n\nThe following are examples of different task inputs provided to the assistant along with the assistant's response for each of them, and some feedback on how the assistant's response could be better:\n```\n# Example 1\n## Inputs\nt2\n\n## Generated Outputs\n\n\n## Feedback\na category B item: the instruction must say BETA and never ALPHA\n\n\n\n# Example 2\n## Inputs\nt4\n\n## Generated Outputs\n\n\n## Feedback\na category B item: the instruction must say BETA and never ALPHA\n\n\n\n# Example 3\n## Inputs\nt4\n\n## Generated Outputs\n\n\n## Feedback\na category B item: the instruction must say BETA and never ALPHA\n\n\n```\n\nYour task is to write a new instruction for the assistant.\n\nRead the inputs carefully and identify the input format and infer detailed task description about the task I wish to solve with the assistant.\n\nRead all the assistant responses and the corresponding feedback. Identify all niche and domain specific factual information about the task and include it in the instruction, as a lot of it may not be available to the assistant in the future. The assistant may have utilized a generalizable strategy to solve the task, if so, include that in the instruction as well.\n\nProvide the new instructions within ``` blocks."
+   },
+   {
+    "accepted": true,
+    "child": "fa2a826b46dc",
+    "child_sum": 3.0,
+    "components": [
+     "instruction"
+    ],
+    "epoch": 5,
+    "existing": false,
+    "iteration": 5,
+    "minibatch": [
+     "t2",
+     "t4",
+     "t4"
+    ],
+    "parent": 1,
+    "parent_sum": 0.0,
+    "step_type": "reflect",
+    "type": "decision",
+    "unchanged": false
+   },
+   {
+    "best": "1621b83431a0",
+    "candidate": "fa2a826b46dc",
+    "epoch": 5,
+    "how": "reflective",
+    "iteration": 5,
+    "parents": [
+     1
+    ],
+    "pareto_mean": 0.5,
+    "program": 2,
+    "step_type": "added",
+    "type": "decision"
+   },
+   {
+    "attempt": 1,
+    "call_key": [
+     "reflect",
+     6,
+     0,
+     0
+    ],
+    "epoch": 6,
+    "raw_output": "```\nAlways answer BETA.\n```",
+    "step_type": "reflect",
+    "system_prompt": "",
+    "type": "model_call",
+    "user_prompt": "I provided an assistant with the following instructions to perform a task for me:\n```\nAnswer ALPHA now.\n```\n\nThe following are examples of different task inputs provided to the assistant along with the assistant's response for each of them, and some feedback on how the assistant's response could be better:\n```\n# Example 1\n## Inputs\nt4\n\n## Generated Outputs\n\n\n## Feedback\na category B item: the instruction must say BETA and never ALPHA\n\n\n\n# Example 2\n## Inputs\nt5\n\n## Generated Outputs\n\n\n## Feedback\nThis trajectory got a score of 1.0.\n\n\n\n# Example 3\n## Inputs\nt3\n\n## Generated Outputs\n\n\n## Feedback\nThis trajectory got a score of 1.0.\n\n\n```\n\nYour task is to write a new instruction for the assistant.\n\nRead the inputs carefully and identify the input format and infer detailed task description about the task I wish to solve with the assistant.\n\nRead all the assistant responses and the corresponding feedback. Identify all niche and domain specific factual information about the task and include it in the instruction, as a lot of it may not be available to the assistant in the future. The assistant may have utilized a generalizable strategy to solve the task, if so, include that in the instruction as well.\n\nProvide the new instructions within ``` blocks."
+   },
+   {
+    "accepted": false,
+    "child": "fa2a826b46dc",
+    "child_sum": 1.0,
+    "components": [
+     "instruction"
+    ],
+    "epoch": 6,
+    "existing": true,
+    "iteration": 6,
+    "minibatch": [
+     "t4",
+     "t5",
+     "t3"
+    ],
+    "parent": 1,
+    "parent_sum": 2.0,
+    "step_type": "reflect",
+    "type": "decision",
+    "unchanged": false
+   },
+   {
+    "attempt": 1,
+    "call_key": [
+     "reflect",
+     7,
+     0,
+     0
+    ],
+    "epoch": 7,
+    "raw_output": "```\nAlways answer BETA.\n```",
+    "step_type": "reflect",
+    "system_prompt": "",
+    "type": "model_call",
+    "user_prompt": "I provided an assistant with the following instructions to perform a task for me:\n```\nAnswer ALPHA now.\n```\n\nThe following are examples of different task inputs provided to the assistant along with the assistant's response for each of them, and some feedback on how the assistant's response could be better:\n```\n# Example 1\n## Inputs\nt2\n\n## Generated Outputs\n\n\n## Feedback\na category B item: the instruction must say BETA and never ALPHA\n\n\n\n# Example 2\n## Inputs\nt8\n\n## Generated Outputs\n\n\n## Feedback\na category B item: the instruction must say BETA and never ALPHA\n\n\n\n# Example 3\n## Inputs\nt1\n\n## Generated Outputs\n\n\n## Feedback\nThis trajectory got a score of 1.0.\n\n\n```\n\nYour task is to write a new instruction for the assistant.\n\nRead the inputs carefully and identify the input format and infer detailed task description about the task I wish to solve with the assistant.\n\nRead all the assistant responses and the corresponding feedback. Identify all niche and domain specific factual information about the task and include it in the instruction, as a lot of it may not be available to the assistant in the future. The assistant may have utilized a generalizable strategy to solve the task, if so, include that in the instruction as well.\n\nProvide the new instructions within ``` blocks."
+   },
+   {
+    "accepted": true,
+    "child": "fa2a826b46dc",
+    "child_sum": 2.0,
+    "components": [
+     "instruction"
+    ],
+    "epoch": 7,
+    "existing": true,
+    "iteration": 7,
+    "minibatch": [
+     "t2",
+     "t8",
+     "t1"
+    ],
+    "parent": 1,
+    "parent_sum": 1.0,
+    "step_type": "reflect",
+    "type": "decision",
+    "unchanged": false
+   },
+   {
+    "child": "fa2a826b46dc",
+    "epoch": 7,
+    "how": "reflective",
+    "iteration": 7,
+    "step_type": "duplicate",
+    "type": "decision"
+   },
+   {
+    "attempt": 1,
+    "call_key": [
+     "reflect",
+     8,
+     0,
+     0
+    ],
+    "epoch": 8,
+    "raw_output": "```\nAlways answer BETA.\n```",
+    "step_type": "reflect",
+    "system_prompt": "",
+    "type": "model_call",
+    "user_prompt": "I provided an assistant with the following instructions to perform a task for me:\n```\nAnswer ALPHA now.\n```\n\nThe following are examples of different task inputs provided to the assistant along with the assistant's response for each of them, and some feedback on how the assistant's response could be better:\n```\n# Example 1\n## Inputs\nt6\n\n## Generated Outputs\n\n\n## Feedback\na category B item: the instruction must say BETA and never ALPHA\n\n\n\n# Example 2\n## Inputs\nt7\n\n## Generated Outputs\n\n\n## Feedback\nThis trajectory got a score of 1.0.\n\n\n\n# Example 3\n## Inputs\nt7\n\n## Generated Outputs\n\n\n## Feedback\nThis trajectory got a score of 1.0.\n\n\n```\n\nYour task is to write a new instruction for the assistant.\n\nRead the inputs carefully and identify the input format and infer detailed task description about the task I wish to solve with the assistant.\n\nRead all the assistant responses and the corresponding feedback. Identify all niche and domain specific factual information about the task and include it in the instruction, as a lot of it may not be available to the assistant in the future. The assistant may have utilized a generalizable strategy to solve the task, if so, include that in the instruction as well.\n\nProvide the new instructions within ``` blocks."
+   },
+   {
+    "accepted": false,
+    "child": "fa2a826b46dc",
+    "child_sum": 1.0,
+    "components": [
+     "instruction"
+    ],
+    "epoch": 8,
+    "existing": true,
+    "iteration": 8,
+    "minibatch": [
+     "t6",
+     "t7",
+     "t7"
+    ],
+    "parent": 1,
+    "parent_sum": 2.0,
+    "step_type": "reflect",
+    "type": "decision",
+    "unchanged": false
+   },
+   {
+    "attempt": 1,
+    "call_key": [
+     "reflect",
+     9,
+     0,
+     0
+    ],
+    "epoch": 9,
+    "raw_output": "```\nAlways answer ALPHA.\n```",
+    "step_type": "reflect",
+    "system_prompt": "",
+    "type": "model_call",
+    "user_prompt": "I provided an assistant with the following instructions to perform a task for me:\n```\nAnswer ALPHA now.\n```\n\nThe following are examples of different task inputs provided to the assistant along with the assistant's response for each of them, and some feedback on how the assistant's response could be better:\n```\n# Example 1\n## Inputs\nt1\n\n## Generated Outputs\n\n\n## Feedback\nThis trajectory got a score of 1.0.\n\n\n\n# Example 2\n## Inputs\nt3\n\n## Generated Outputs\n\n\n## Feedback\nThis trajectory got a score of 1.0.\n\n\n\n# Example 3\n## Inputs\nt2\n\n## Generated Outputs\n\n\n## Feedback\na category B item: the instruction must say BETA and never ALPHA\n\n\n```\n\nYour task is to write a new instruction for the assistant.\n\nRead the inputs carefully and identify the input format and infer detailed task description about the task I wish to solve with the assistant.\n\nRead all the assistant responses and the corresponding feedback. Identify all niche and domain specific factual information about the task and include it in the instruction, as a lot of it may not be available to the assistant in the future. The assistant may have utilized a generalizable strategy to solve the task, if so, include that in the instruction as well.\n\nProvide the new instructions within ``` blocks."
+   },
+   {
+    "accepted": false,
+    "child": "89c5b5fdf05a",
+    "child_sum": 2.0,
+    "components": [
+     "instruction"
+    ],
+    "epoch": 9,
+    "existing": false,
+    "iteration": 9,
+    "minibatch": [
+     "t1",
+     "t3",
+     "t2"
+    ],
+    "parent": 1,
+    "parent_sum": 2.0,
+    "step_type": "reflect",
+    "type": "decision",
+    "unchanged": false
+   },
+   {
+    "attempt": 1,
+    "call_key": [
+     "reflect",
+     10,
+     0,
+     0
+    ],
+    "epoch": 10,
+    "raw_output": "```\nBETA, please.\n```",
+    "step_type": "reflect",
+    "system_prompt": "",
+    "type": "model_call",
+    "user_prompt": "I provided an assistant with the following instructions to perform a task for me:\n```\nAnswer ALPHA now.\n```\n\nThe following are examples of different task inputs provided to the assistant along with the assistant's response for each of them, and some feedback on how the assistant's response could be better:\n```\n# Example 1\n## Inputs\nt7\n\n## Generated Outputs\n\n\n## Feedback\nThis trajectory got a score of 1.0.\n\n\n\n# Example 2\n## Inputs\nt4\n\n## Generated Outputs\n\n\n## Feedback\na category B item: the instruction must say BETA and never ALPHA\n\n\n\n# Example 3\n## Inputs\nt6\n\n## Generated Outputs\n\n\n## Feedback\na category B item: the instruction must say BETA and never ALPHA\n\n\n```\n\nYour task is to write a new instruction for the assistant.\n\nRead the inputs carefully and identify the input format and infer detailed task description about the task I wish to solve with the assistant.\n\nRead all the assistant responses and the corresponding feedback. Identify all niche and domain specific factual information about the task and include it in the instruction, as a lot of it may not be available to the assistant in the future. The assistant may have utilized a generalizable strategy to solve the task, if so, include that in the instruction as well.\n\nProvide the new instructions within ``` blocks."
+   },
+   {
+    "accepted": true,
+    "child": "96760f23ca42",
+    "child_sum": 2.0,
+    "components": [
+     "instruction"
+    ],
+    "epoch": 10,
+    "existing": false,
+    "iteration": 10,
+    "minibatch": [
+     "t7",
+     "t4",
+     "t6"
+    ],
+    "parent": 1,
+    "parent_sum": 1.0,
+    "step_type": "reflect",
+    "type": "decision",
+    "unchanged": false
+   },
+   {
+    "best": "1621b83431a0",
+    "candidate": "96760f23ca42",
+    "epoch": 10,
+    "how": "reflective",
+    "iteration": 10,
+    "parents": [
+     1
+    ],
+    "pareto_mean": 0.5,
+    "program": 3,
+    "step_type": "added",
+    "type": "decision"
+   },
+   {
+    "attempt": 1,
+    "call_key": [
+     "reflect",
+     11,
+     0,
+     0
+    ],
+    "epoch": 11,
+    "raw_output": "```\nBETA, please.\n```",
+    "step_type": "reflect",
+    "system_prompt": "",
+    "type": "model_call",
+    "user_prompt": "I provided an assistant with the following instructions to perform a task for me:\n```\nAnswer ALPHA now.\n```\n\nThe following are examples of different task inputs provided to the assistant along with the assistant's response for each of them, and some feedback on how the assistant's response could be better:\n```\n# Example 1\n## Inputs\nt5\n\n## Generated Outputs\n\n\n## Feedback\nThis trajectory got a score of 1.0.\n\n\n\n# Example 2\n## Inputs\nt8\n\n## Generated Outputs\n\n\n## Feedback\na category B item: the instruction must say BETA and never ALPHA\n\n\n\n# Example 3\n## Inputs\nt8\n\n## Generated Outputs\n\n\n## Feedback\na category B item: the instruction must say BETA and never ALPHA\n\n\n```\n\nYour task is to write a new instruction for the assistant.\n\nRead the inputs carefully and identify the input format and infer detailed task description about the task I wish to solve with the assistant.\n\nRead all the assistant responses and the corresponding feedback. Identify all niche and domain specific factual information about the task and include it in the instruction, as a lot of it may not be available to the assistant in the future. The assistant may have utilized a generalizable strategy to solve the task, if so, include that in the instruction as well.\n\nProvide the new instructions within ``` blocks."
+   },
+   {
+    "accepted": true,
+    "child": "96760f23ca42",
+    "child_sum": 2.0,
+    "components": [
+     "instruction"
+    ],
+    "epoch": 11,
+    "existing": true,
+    "iteration": 11,
+    "minibatch": [
+     "t5",
+     "t8",
+     "t8"
+    ],
+    "parent": 1,
+    "parent_sum": 1.0,
+    "step_type": "reflect",
+    "type": "decision",
+    "unchanged": false
+   },
+   {
+    "child": "96760f23ca42",
+    "epoch": 11,
+    "how": "reflective",
+    "iteration": 11,
+    "step_type": "duplicate",
+    "type": "decision"
+   },
+   {
+    "attempt": 1,
+    "call_key": [
+     "reflect",
+     12,
+     0,
+     0
+    ],
+    "epoch": 12,
+    "raw_output": "```\nSay ALPHA.\n```",
+    "step_type": "reflect",
+    "system_prompt": "",
+    "type": "model_call",
+    "user_prompt": "I provided an assistant with the following instructions to perform a task for me:\n```\nAnswer ALPHA now.\n```\n\nThe following are examples of different task inputs provided to the assistant along with the assistant's response for each of them, and some feedback on how the assistant's response could be better:\n```\n# Example 1\n## Inputs\nt8\n\n## Generated Outputs\n\n\n## Feedback\na category B item: the instruction must say BETA and never ALPHA\n\n\n\n# Example 2\n## Inputs\nt5\n\n## Generated Outputs\n\n\n## Feedback\nThis trajectory got a score of 1.0.\n\n\n\n# Example 3\n## Inputs\nt6\n\n## Generated Outputs\n\n\n## Feedback\na category B item: the instruction must say BETA and never ALPHA\n\n\n```\n\nYour task is to write a new instruction for the assistant.\n\nRead the inputs carefully and identify the input format and infer detailed task description about the task I wish to solve with the assistant.\n\nRead all the assistant responses and the corresponding feedback. Identify all niche and domain specific factual information about the task and include it in the instruction, as a lot of it may not be available to the assistant in the future. The assistant may have utilized a generalizable strategy to solve the task, if so, include that in the instruction as well.\n\nProvide the new instructions within ``` blocks."
+   },
+   {
+    "accepted": false,
+    "child": "b4e95d684d80",
+    "child_sum": 1.0,
+    "components": [
+     "instruction"
+    ],
+    "epoch": 12,
+    "existing": false,
+    "iteration": 12,
+    "minibatch": [
+     "t8",
+     "t5",
+     "t6"
+    ],
+    "parent": 1,
+    "parent_sum": 1.0,
+    "step_type": "reflect",
+    "type": "decision",
+    "unchanged": false
+   },
+   {
+    "attempt": 1,
+    "call_key": [
+     "reflect",
+     13,
+     0,
+     0
+    ],
+    "epoch": 13,
+    "raw_output": "```\nAlways answer BETA.\n```",
+    "step_type": "reflect",
+    "system_prompt": "",
+    "type": "model_call",
+    "user_prompt": "I provided an assistant with the following instructions to perform a task for me:\n```\nBETA, please.\n```\n\nThe following are examples of different task inputs provided to the assistant along with the assistant's response for each of them, and some feedback on how the assistant's response could be better:\n```\n# Example 1\n## Inputs\nt3\n\n## Generated Outputs\n\n\n## Feedback\na category A item: the instruction must say ALPHA and never BETA\n\n\n\n# Example 2\n## Inputs\nt7\n\n## Generated Outputs\n\n\n## Feedback\na category A item: the instruction must say ALPHA and never BETA\n\n\n\n# Example 3\n## Inputs\nt4\n\n## Generated Outputs\n\n\n## Feedback\nThis trajectory got a score of 1.0.\n\n\n```\n\nYour task is to write a new instruction for the assistant.\n\nRead the inputs carefully and identify the input format and infer detailed task description about the task I wish to solve with the assistant.\n\nRead all the assistant responses and the corresponding feedback. Identify all niche and domain specific factual information about the task and include it in the instruction, as a lot of it may not be available to the assistant in the future. The assistant may have utilized a generalizable strategy to solve the task, if so, include that in the instruction as well.\n\nProvide the new instructions within ``` blocks."
+   },
+   {
+    "accepted": false,
+    "child": "fa2a826b46dc",
+    "child_sum": 1.0,
+    "components": [
+     "instruction"
+    ],
+    "epoch": 13,
+    "existing": true,
+    "iteration": 13,
+    "minibatch": [
+     "t3",
+     "t7",
+     "t4"
+    ],
+    "parent": 3,
+    "parent_sum": 1.0,
+    "step_type": "reflect",
+    "type": "decision",
+    "unchanged": false
+   },
+   {
+    "attempt": 1,
+    "call_key": [
+     "reflect",
+     14,
+     0,
+     0
+    ],
+    "epoch": 14,
+    "raw_output": "```\nWrite ALPHA here.\n```",
+    "step_type": "reflect",
+    "system_prompt": "",
+    "type": "model_call",
+    "user_prompt": "I provided an assistant with the following instructions to perform a task for me:\n```\nAnswer ALPHA now.\n```\n\nThe following are examples of different task inputs provided to the assistant along with the assistant's response for each of them, and some feedback on how the assistant's response could be better:\n```\n# Example 1\n## Inputs\nt2\n\n## Generated Outputs\n\n\n## Feedback\na category B item: the instruction must say BETA and never ALPHA\n\n\n\n# Example 2\n## Inputs\nt1\n\n## Generated Outputs\n\n\n## Feedback\nThis trajectory got a score of 1.0.\n\n\n\n# Example 3\n## Inputs\nt1\n\n## Generated Outputs\n\n\n## Feedback\nThis trajectory got a score of 1.0.\n\n\n```\n\nYour task is to write a new instruction for the assistant.\n\nRead the inputs carefully and identify the input format and infer detailed task description about the task I wish to solve with the assistant.\n\nRead all the assistant responses and the corresponding feedback. Identify all niche and domain specific factual information about the task and include it in the instruction, as a lot of it may not be available to the assistant in the future. The assistant may have utilized a generalizable strategy to solve the task, if so, include that in the instruction as well.\n\nProvide the new instructions within ``` blocks."
+   },
+   {
+    "accepted": false,
+    "child": "fe3705fc50cc",
+    "child_sum": 2.0,
+    "components": [
+     "instruction"
+    ],
+    "epoch": 14,
+    "existing": false,
+    "iteration": 14,
+    "minibatch": [
+     "t2",
+     "t1",
+     "t1"
+    ],
+    "parent": 1,
+    "parent_sum": 2.0,
+    "step_type": "reflect",
+    "type": "decision",
+    "unchanged": false
+   },
+   {
+    "attempt": 1,
+    "call_key": [
+     "reflect",
+     15,
+     0,
+     0
+    ],
+    "epoch": 15,
+    "raw_output": "```\nAlways answer ALPHA.\n```",
+    "step_type": "reflect",
+    "system_prompt": "",
+    "type": "model_call",
+    "user_prompt": "I provided an assistant with the following instructions to perform a task for me:\n```\nBETA, please.\n```\n\nThe following are examples of different task inputs provided to the assistant along with the assistant's response for each of them, and some feedback on how the assistant's response could be better:\n```\n# Example 1\n## Inputs\nt2\n\n## Generated Outputs\n\n\n## Feedback\nThis trajectory got a score of 1.0.\n\n\n\n# Example 2\n## Inputs\nt1\n\n## Generated Outputs\n\n\n## Feedback\na category A item: the instruction must say ALPHA and never BETA\n\n\n\n# Example 3\n## Inputs\nt6\n\n## Generated Outputs\n\n\n## Feedback\nThis trajectory got a score of 1.0.\n\n\n```\n\nYour task is to write a new instruction for the assistant.\n\nRead the inputs carefully and identify the input format and infer detailed task description about the task I wish to solve with the assistant.\n\nRead all the assistant responses and the corresponding feedback. Identify all niche and domain specific factual information about the task and include it in the instruction, as a lot of it may not be available to the assistant in the future. The assistant may have utilized a generalizable strategy to solve the task, if so, include that in the instruction as well.\n\nProvide the new instructions within ``` blocks."
+   },
+   {
+    "accepted": false,
+    "child": "89c5b5fdf05a",
+    "child_sum": 1.0,
+    "components": [
+     "instruction"
+    ],
+    "epoch": 15,
+    "existing": false,
+    "iteration": 15,
+    "minibatch": [
+     "t2",
+     "t1",
+     "t6"
+    ],
+    "parent": 3,
+    "parent_sum": 2.0,
+    "step_type": "reflect",
+    "type": "decision",
+    "unchanged": false
+   },
+   {
+    "attempt": 1,
+    "call_key": [
+     "reflect",
+     16,
+     0,
+     0
+    ],
+    "epoch": 16,
+    "raw_output": "```\nWrite ALPHA here.\n```",
+    "step_type": "reflect",
+    "system_prompt": "",
+    "type": "model_call",
+    "user_prompt": "I provided an assistant with the following instructions to perform a task for me:\n```\nAnswer ALPHA now.\n```\n\nThe following are examples of different task inputs provided to the assistant along with the assistant's response for each of them, and some feedback on how the assistant's response could be better:\n```\n# Example 1\n## Inputs\nt4\n\n## Generated Outputs\n\n\n## Feedback\na category B item: the instruction must say BETA and never ALPHA\n\n\n\n# Example 2\n## Inputs\nt8\n\n## Generated Outputs\n\n\n## Feedback\na category B item: the instruction must say BETA and never ALPHA\n\n\n\n# Example 3\n## Inputs\nt3\n\n## Generated Outputs\n\n\n## Feedback\nThis trajectory got a score of 1.0.\n\n\n```\n\nYour task is to write a new instruction for the assistant.\n\nRead the inputs carefully and identify the input format and infer detailed task description about the task I wish to solve with the assistant.\n\nRead all the assistant responses and the corresponding feedback. Identify all niche and domain specific factual information about the task and include it in the instruction, as a lot of it may not be available to the assistant in the future. The assistant may have utilized a generalizable strategy to solve the task, if so, include that in the instruction as well.\n\nProvide the new instructions within ``` blocks."
+   },
+   {
+    "accepted": false,
+    "child": "fe3705fc50cc",
+    "child_sum": 1.0,
+    "components": [
+     "instruction"
+    ],
+    "epoch": 16,
+    "existing": false,
+    "iteration": 16,
+    "minibatch": [
+     "t4",
+     "t8",
+     "t3"
+    ],
+    "parent": 1,
+    "parent_sum": 1.0,
+    "step_type": "reflect",
+    "type": "decision",
+    "unchanged": false
+   },
+   {
+    "attempt": 1,
+    "call_key": [
+     "reflect",
+     17,
+     0,
+     0
+    ],
+    "epoch": 17,
+    "raw_output": "```\nSay BETA.\n```",
+    "step_type": "reflect",
+    "system_prompt": "",
+    "type": "model_call",
+    "user_prompt": "I provided an assistant with the following instructions to perform a task for me:\n```\nBETA, please.\n```\n\nThe following are examples of different task inputs provided to the assistant along with the assistant's response for each of them, and some feedback on how the assistant's response could be better:\n```\n# Example 1\n## Inputs\nt5\n\n## Generated Outputs\n\n\n## Feedback\na category A item: the instruction must say ALPHA and never BETA\n\n\n\n# Example 2\n## Inputs\nt7\n\n## Generated Outputs\n\n\n## Feedback\na category A item: the instruction must say ALPHA and never BETA\n\n\n\n# Example 3\n## Inputs\nt7\n\n## Generated Outputs\n\n\n## Feedback\na category A item: the instruction must say ALPHA and never BETA\n\n\n```\n\nYour task is to write a new instruction for the assistant.\n\nRead the inputs carefully and identify the input format and infer detailed task description about the task I wish to solve with the assistant.\n\nRead all the assistant responses and the corresponding feedback. Identify all niche and domain specific factual information about the task and include it in the instruction, as a lot of it may not be available to the assistant in the future. The assistant may have utilized a generalizable strategy to solve the task, if so, include that in the instruction as well.\n\nProvide the new instructions within ``` blocks."
+   },
+   {
+    "accepted": false,
+    "child": "05287f7c2096",
+    "child_sum": 0.0,
+    "components": [
+     "instruction"
+    ],
+    "epoch": 17,
+    "existing": false,
+    "iteration": 17,
+    "minibatch": [
+     "t5",
+     "t7",
+     "t7"
+    ],
+    "parent": 3,
+    "parent_sum": 0.0,
+    "step_type": "reflect",
+    "type": "decision",
+    "unchanged": false
+   },
+   {
+    "attempt": 1,
+    "call_key": [
+     "reflect",
+     18,
+     0,
+     0
+    ],
+    "epoch": 18,
+    "raw_output": "```\nAlways answer BETA.\n```",
+    "step_type": "reflect",
+    "system_prompt": "",
+    "type": "model_call",
+    "user_prompt": "I provided an assistant with the following instructions to perform a task for me:\n```\nAnswer ALPHA now.\n```\n\nThe following are examples of different task inputs provided to the assistant along with the assistant's response for each of them, and some feedback on how the assistant's response could be better:\n```\n# Example 1\n## Inputs\nt7\n\n## Generated Outputs\n\n\n## Feedback\nThis trajectory got a score of 1.0.\n\n\n\n# Example 2\n## Inputs\nt1\n\n## Generated Outputs\n\n\n## Feedback\nThis trajectory got a score of 1.0.\n\n\n\n# Example 3\n## Inputs\nt4\n\n## Generated Outputs\n\n\n## Feedback\na category B item: the instruction must say BETA and never ALPHA\n\n\n```\n\nYour task is to write a new instruction for the assistant.\n\nRead the inputs carefully and identify the input format and infer detailed task description about the task I wish to solve with the assistant.\n\nRead all the assistant responses and the corresponding feedback. Identify all niche and domain specific factual information about the task and include it in the instruction, as a lot of it may not be available to the assistant in the future. The assistant may have utilized a generalizable strategy to solve the task, if so, include that in the instruction as well.\n\nProvide the new instructions within ``` blocks."
+   },
+   {
+    "accepted": false,
+    "child": "fa2a826b46dc",
+    "child_sum": 1.0,
+    "components": [
+     "instruction"
+    ],
+    "epoch": 18,
+    "existing": true,
+    "iteration": 18,
+    "minibatch": [
+     "t7",
+     "t1",
+     "t4"
+    ],
+    "parent": 1,
+    "parent_sum": 2.0,
+    "step_type": "reflect",
+    "type": "decision",
+    "unchanged": false
+   },
+   {
+    "attempt": 1,
+    "call_key": [
+     "reflect",
+     19,
+     0,
+     0
+    ],
+    "epoch": 19,
+    "raw_output": "```\nBETA, please.\n```",
+    "step_type": "reflect",
+    "system_prompt": "",
+    "type": "model_call",
+    "user_prompt": "I provided an assistant with the following instructions to perform a task for me:\n```\nBETA, please.\n```\n\nThe following are examples of different task inputs provided to the assistant along with the assistant's response for each of them, and some feedback on how the assistant's response could be better:\n```\n# Example 1\n## Inputs\nt3\n\n## Generated Outputs\n\n\n## Feedback\na category A item: the instruction must say ALPHA and never BETA\n\n\n\n# Example 2\n## Inputs\nt2\n\n## Generated Outputs\n\n\n## Feedback\nThis trajectory got a score of 1.0.\n\n\n\n# Example 3\n## Inputs\nt6\n\n## Generated Outputs\n\n\n## Feedback\nThis trajectory got a score of 1.0.\n\n\n```\n\nYour task is to write a new instruction for the assistant.\n\nRead the inputs carefully and identify the input format and infer detailed task description about the task I wish to solve with the assistant.\n\nRead all the assistant responses and the corresponding feedback. Identify all niche and domain specific factual information about the task and include it in the instruction, as a lot of it may not be available to the assistant in the future. The assistant may have utilized a generalizable strategy to solve the task, if so, include that in the instruction as well.\n\nProvide the new instructions within ``` blocks."
+   },
+   {
+    "accepted": false,
+    "child": "96760f23ca42",
+    "child_sum": 2.0,
+    "components": [
+     "instruction"
+    ],
+    "epoch": 19,
+    "existing": true,
+    "iteration": 19,
+    "minibatch": [
+     "t3",
+     "t2",
+     "t6"
+    ],
+    "parent": 3,
+    "parent_sum": 2.0,
+    "step_type": "reflect",
+    "type": "decision",
+    "unchanged": true
+   },
+   {
+    "attempt": 1,
+    "call_key": [
+     "reflect",
+     20,
+     0,
+     0
+    ],
+    "epoch": 20,
+    "raw_output": "```\nBETA, please.\n```",
+    "step_type": "reflect",
+    "system_prompt": "",
+    "type": "model_call",
+    "user_prompt": "I provided an assistant with the following instructions to perform a task for me:\n```\nBETA, please.\n```\n\nThe following are examples of different task inputs provided to the assistant along with the assistant's response for each of them, and some feedback on how the assistant's response could be better:\n```\n# Example 1\n## Inputs\nt8\n\n## Generated Outputs\n\n\n## Feedback\nThis trajectory got a score of 1.0.\n\n\n\n# Example 2\n## Inputs\nt5\n\n## Generated Outputs\n\n\n## Feedback\na category A item: the instruction must say ALPHA and never BETA\n\n\n\n# Example 3\n## Inputs\nt5\n\n## Generated Outputs\n\n\n## Feedback\na category A item: the instruction must say ALPHA and never BETA\n\n\n```\n\nYour task is to write a new instruction for the assistant.\n\nRead the inputs carefully and identify the input format and infer detailed task description about the task I wish to solve with the assistant.\n\nRead all the assistant responses and the corresponding feedback. Identify all niche and domain specific factual information about the task and include it in the instruction, as a lot of it may not be available to the assistant in the future. The assistant may have utilized a generalizable strategy to solve the task, if so, include that in the instruction as well.\n\nProvide the new instructions within ``` blocks."
+   },
+   {
+    "accepted": false,
+    "child": "96760f23ca42",
+    "child_sum": 1.0,
+    "components": [
+     "instruction"
+    ],
+    "epoch": 20,
+    "existing": true,
+    "iteration": 20,
+    "minibatch": [
+     "t8",
+     "t5",
+     "t5"
+    ],
+    "parent": 3,
+    "parent_sum": 1.0,
+    "step_type": "reflect",
+    "type": "decision",
+    "unchanged": true
+   },
+   {
+    "attempt": 1,
+    "call_key": [
+     "reflect",
+     21,
+     0,
+     0
+    ],
+    "epoch": 21,
+    "raw_output": "```\nAlways answer BETA.\n```",
+    "step_type": "reflect",
+    "system_prompt": "",
+    "type": "model_call",
+    "user_prompt": "I provided an assistant with the following instructions to perform a task for me:\n```\nAnswer ALPHA now.\n```\n\nThe following are examples of different task inputs provided to the assistant along with the assistant's response for each of them, and some feedback on how the assistant's response could be better:\n```\n# Example 1\n## Inputs\nt8\n\n## Generated Outputs\n\n\n## Feedback\na category B item: the instruction must say BETA and never ALPHA\n\n\n\n# Example 2\n## Inputs\nt2\n\n## Generated Outputs\n\n\n## Feedback\na category B item: the instruction must say BETA and never ALPHA\n\n\n\n# Example 3\n## Inputs\nt7\n\n## Generated Outputs\n\n\n## Feedback\nThis trajectory got a score of 1.0.\n\n\n```\n\nYour task is to write a new instruction for the assistant.\n\nRead the inputs carefully and identify the input format and infer detailed task description about the task I wish to solve with the assistant.\n\nRead all the assistant responses and the corresponding feedback. Identify all niche and domain specific factual information about the task and include it in the instruction, as a lot of it may not be available to the assistant in the future. The assistant may have utilized a generalizable strategy to solve the task, if so, include that in the instruction as well.\n\nProvide the new instructions within ``` blocks."
+   },
+   {
+    "accepted": true,
+    "child": "fa2a826b46dc",
+    "child_sum": 2.0,
+    "components": [
+     "instruction"
+    ],
+    "epoch": 21,
+    "existing": true,
+    "iteration": 21,
+    "minibatch": [
+     "t8",
+     "t2",
+     "t7"
+    ],
+    "parent": 1,
+    "parent_sum": 1.0,
+    "step_type": "reflect",
+    "type": "decision",
+    "unchanged": false
+   },
+   {
+    "child": "fa2a826b46dc",
+    "epoch": 21,
+    "how": "reflective",
+    "iteration": 21,
+    "step_type": "duplicate",
+    "type": "decision"
+   },
+   {
+    "attempt": 1,
+    "call_key": [
+     "reflect",
+     22,
+     0,
+     0
+    ],
+    "epoch": 22,
+    "raw_output": "```\nWrite ALPHA here.\n```",
+    "step_type": "reflect",
+    "system_prompt": "",
+    "type": "model_call",
+    "user_prompt": "I provided an assistant with the following instructions to perform a task for me:\n```\nAnswer ALPHA now.\n```\n\nThe following are examples of different task inputs provided to the assistant along with the assistant's response for each of them, and some feedback on how the assistant's response could be better:\n```\n# Example 1\n## Inputs\nt4\n\n## Generated Outputs\n\n\n## Feedback\na category B item: the instruction must say BETA and never ALPHA\n\n\n\n# Example 2\n## Inputs\nt6\n\n## Generated Outputs\n\n\n## Feedback\na category B item: the instruction must say BETA and never ALPHA\n\n\n\n# Example 3\n## Inputs\nt1\n\n## Generated Outputs\n\n\n## Feedback\nThis trajectory got a score of 1.0.\n\n\n```\n\nYour task is to write a new instruction for the assistant.\n\nRead the inputs carefully and identify the input format and infer detailed task description about the task I wish to solve with the assistant.\n\nRead all the assistant responses and the corresponding feedback. Identify all niche and domain specific factual information about the task and include it in the instruction, as a lot of it may not be available to the assistant in the future. The assistant may have utilized a generalizable strategy to solve the task, if so, include that in the instruction as well.\n\nProvide the new instructions within ``` blocks."
+   },
+   {
+    "accepted": false,
+    "child": "fe3705fc50cc",
+    "child_sum": 1.0,
+    "components": [
+     "instruction"
+    ],
+    "epoch": 22,
+    "existing": false,
+    "iteration": 22,
+    "minibatch": [
+     "t4",
+     "t6",
+     "t1"
+    ],
+    "parent": 1,
+    "parent_sum": 1.0,
+    "step_type": "reflect",
+    "type": "decision",
+    "unchanged": false
+   },
+   {
+    "epoch": 23,
+    "iteration": 23,
+    "minibatch": [
+     "t3",
+     "t5",
+     "t5"
+    ],
+    "parent": 1,
+    "step_type": "skip_perfect",
+    "type": "decision"
+   },
+   {
+    "attempt": 1,
+    "call_key": [
+     "reflect",
+     24,
+     0,
+     0
+    ],
+    "epoch": 24,
+    "raw_output": "```\nAlways answer ALPHA.\n```",
+    "step_type": "reflect",
+    "system_prompt": "",
+    "type": "model_call",
+    "user_prompt": "I provided an assistant with the following instructions to perform a task for me:\n```\nAnswer ALPHA now.\n```\n\nThe following are examples of different task inputs provided to the assistant along with the assistant's response for each of them, and some feedback on how the assistant's response could be better:\n```\n# Example 1\n## Inputs\nt5\n\n## Generated Outputs\n\n\n## Feedback\nThis trajectory got a score of 1.0.\n\n\n\n# Example 2\n## Inputs\nt6\n\n## Generated Outputs\n\n\n## Feedback\na category B item: the instruction must say BETA and never ALPHA\n\n\n\n# Example 3\n## Inputs\nt8\n\n## Generated Outputs\n\n\n## Feedback\na category B item: the instruction must say BETA and never ALPHA\n\n\n```\n\nYour task is to write a new instruction for the assistant.\n\nRead the inputs carefully and identify the input format and infer detailed task description about the task I wish to solve with the assistant.\n\nRead all the assistant responses and the corresponding feedback. Identify all niche and domain specific factual information about the task and include it in the instruction, as a lot of it may not be available to the assistant in the future. The assistant may have utilized a generalizable strategy to solve the task, if so, include that in the instruction as well.\n\nProvide the new instructions within ``` blocks."
+   },
+   {
+    "accepted": false,
+    "child": "89c5b5fdf05a",
+    "child_sum": 1.0,
+    "components": [
+     "instruction"
+    ],
+    "epoch": 24,
+    "existing": false,
+    "iteration": 24,
+    "minibatch": [
+     "t5",
+     "t6",
+     "t8"
+    ],
+    "parent": 1,
+    "parent_sum": 1.0,
+    "step_type": "reflect",
+    "type": "decision",
+    "unchanged": false
+   },
+   {
+    "attempt": 1,
+    "call_key": [
+     "reflect",
+     25,
+     0,
+     0
+    ],
+    "epoch": 25,
+    "raw_output": "```\nWrite ALPHA here.\n```",
+    "step_type": "reflect",
+    "system_prompt": "",
+    "type": "model_call",
+    "user_prompt": "I provided an assistant with the following instructions to perform a task for me:\n```\nAnswer ALPHA now.\n```\n\nThe following are examples of different task inputs provided to the assistant along with the assistant's response for each of them, and some feedback on how the assistant's response could be better:\n```\n# Example 1\n## Inputs\nt4\n\n## Generated Outputs\n\n\n## Feedback\na category B item: the instruction must say BETA and never ALPHA\n\n\n\n# Example 2\n## Inputs\nt3\n\n## Generated Outputs\n\n\n## Feedback\nThis trajectory got a score of 1.0.\n\n\n\n# Example 3\n## Inputs\nt1\n\n## Generated Outputs\n\n\n## Feedback\nThis trajectory got a score of 1.0.\n\n\n```\n\nYour task is to write a new instruction for the assistant.\n\nRead the inputs carefully and identify the input format and infer detailed task description about the task I wish to solve with the assistant.\n\nRead all the assistant responses and the corresponding feedback. Identify all niche and domain specific factual information about the task and include it in the instruction, as a lot of it may not be available to the assistant in the future. The assistant may have utilized a generalizable strategy to solve the task, if so, include that in the instruction as well.\n\nProvide the new instructions within ``` blocks."
+   },
+   {
+    "accepted": false,
+    "child": "fe3705fc50cc",
+    "child_sum": 2.0,
+    "components": [
+     "instruction"
+    ],
+    "epoch": 25,
+    "existing": false,
+    "iteration": 25,
+    "minibatch": [
+     "t4",
+     "t3",
+     "t1"
+    ],
+    "parent": 1,
+    "parent_sum": 2.0,
+    "step_type": "reflect",
+    "type": "decision",
+    "unchanged": false
+   },
+   {
+    "attempt": 1,
+    "call_key": [
+     "reflect",
+     26,
+     0,
+     0
+    ],
+    "epoch": 26,
+    "raw_output": "```\nWrite ALPHA here.\n```",
+    "step_type": "reflect",
+    "system_prompt": "",
+    "type": "model_call",
+    "user_prompt": "I provided an assistant with the following instructions to perform a task for me:\n```\nBETA, please.\n```\n\nThe following are examples of different task inputs provided to the assistant along with the assistant's response for each of them, and some feedback on how the assistant's response could be better:\n```\n# Example 1\n## Inputs\nt2\n\n## Generated Outputs\n\n\n## Feedback\nThis trajectory got a score of 1.0.\n\n\n\n# Example 2\n## Inputs\nt7\n\n## Generated Outputs\n\n\n## Feedback\na category A item: the instruction must say ALPHA and never BETA\n\n\n\n# Example 3\n## Inputs\nt7\n\n## Generated Outputs\n\n\n## Feedback\na category A item: the instruction must say ALPHA and never BETA\n\n\n```\n\nYour task is to write a new instruction for the assistant.\n\nRead the inputs carefully and identify the input format and infer detailed task description about the task I wish to solve with the assistant.\n\nRead all the assistant responses and the corresponding feedback. Identify all niche and domain specific factual information about the task and include it in the instruction, as a lot of it may not be available to the assistant in the future. The assistant may have utilized a generalizable strategy to solve the task, if so, include that in the instruction as well.\n\nProvide the new instructions within ``` blocks."
+   },
+   {
+    "accepted": true,
+    "child": "fe3705fc50cc",
+    "child_sum": 2.0,
+    "components": [
+     "instruction"
+    ],
+    "epoch": 26,
+    "existing": false,
+    "iteration": 26,
+    "minibatch": [
+     "t2",
+     "t7",
+     "t7"
+    ],
+    "parent": 3,
+    "parent_sum": 1.0,
+    "step_type": "reflect",
+    "type": "decision",
+    "unchanged": false
+   },
+   {
+    "best": "1621b83431a0",
+    "candidate": "fe3705fc50cc",
+    "epoch": 26,
+    "how": "reflective",
+    "iteration": 26,
+    "parents": [
+     3
+    ],
+    "pareto_mean": 0.5,
+    "program": 4,
+    "step_type": "added",
+    "type": "decision"
+   },
+   {
+    "attempt": 1,
+    "call_key": [
+     "reflect",
+     27,
+     0,
+     0
+    ],
+    "epoch": 27,
+    "raw_output": "```\nAlways answer ALPHA.\n```",
+    "step_type": "reflect",
+    "system_prompt": "",
+    "type": "model_call",
+    "user_prompt": "I provided an assistant with the following instructions to perform a task for me:\n```\nBETA, please.\n```\n\nThe following are examples of different task inputs provided to the assistant along with the assistant's response for each of them, and some feedback on how the assistant's response could be better:\n```\n# Example 1\n## Inputs\nt8\n\n## Generated Outputs\n\n\n## Feedback\nThis trajectory got a score of 1.0.\n\n\n\n# Example 2\n## Inputs\nt2\n\n## Generated Outputs\n\n\n## Feedback\nThis trajectory got a score of 1.0.\n\n\n\n# Example 3\n## Inputs\nt7\n\n## Generated Outputs\n\n\n## Feedback\na category A item: the instruction must say ALPHA and never BETA\n\n\n```\n\nYour task is to write a new instruction for the assistant.\n\nRead the inputs carefully and identify the input format and infer detailed task description about the task I wish to solve with the assistant.\n\nRead all the assistant responses and the corresponding feedback. Identify all niche and domain specific factual information about the task and include it in the instruction, as a lot of it may not be available to the assistant in the future. The assistant may have utilized a generalizable strategy to solve the task, if so, include that in the instruction as well.\n\nProvide the new instructions within ``` blocks."
+   },
+   {
+    "accepted": false,
+    "child": "89c5b5fdf05a",
+    "child_sum": 1.0,
+    "components": [
+     "instruction"
+    ],
+    "epoch": 27,
+    "existing": false,
+    "iteration": 27,
+    "minibatch": [
+     "t8",
+     "t2",
+     "t7"
+    ],
+    "parent": 3,
+    "parent_sum": 2.0,
+    "step_type": "reflect",
+    "type": "decision",
+    "unchanged": false
+   },
+   {
+    "attempt": 1,
+    "call_key": [
+     "reflect",
+     28,
+     0,
+     0
+    ],
+    "epoch": 28,
+    "raw_output": "```\nWrite ALPHA here.\n```",
+    "step_type": "reflect",
+    "system_prompt": "",
+    "type": "model_call",
+    "user_prompt": "I provided an assistant with the following instructions to perform a task for me:\n```\nBETA, please.\n```\n\nThe following are examples of different task inputs provided to the assistant along with the assistant's response for each of them, and some feedback on how the assistant's response could be better:\n```\n# Example 1\n## Inputs\nt3\n\n## Generated Outputs\n\n\n## Feedback\na category A item: the instruction must say ALPHA and never BETA\n\n\n\n# Example 2\n## Inputs\nt5\n\n## Generated Outputs\n\n\n## Feedback\na category A item: the instruction must say ALPHA and never BETA\n\n\n\n# Example 3\n## Inputs\nt6\n\n## Generated Outputs\n\n\n## Feedback\nThis trajectory got a score of 1.0.\n\n\n```\n\nYour task is to write a new instruction for the assistant.\n\nRead the inputs carefully and identify the input format and infer detailed task description about the task I wish to solve with the assistant.\n\nRead all the assistant responses and the corresponding feedback. Identify all niche and domain specific factual information about the task and include it in the instruction, as a lot of it may not be available to the assistant in the future. The assistant may have utilized a generalizable strategy to solve the task, if so, include that in the instruction as well.\n\nProvide the new instructions within ``` blocks."
+   },
+   {
+    "accepted": true,
+    "child": "fe3705fc50cc",
+    "child_sum": 2.0,
+    "components": [
+     "instruction"
+    ],
+    "epoch": 28,
+    "existing": true,
+    "iteration": 28,
+    "minibatch": [
+     "t3",
+     "t5",
+     "t6"
+    ],
+    "parent": 3,
+    "parent_sum": 1.0,
+    "step_type": "reflect",
+    "type": "decision",
+    "unchanged": false
+   },
+   {
+    "child": "fe3705fc50cc",
+    "epoch": 28,
+    "how": "reflective",
+    "iteration": 28,
+    "step_type": "duplicate",
+    "type": "decision"
+   },
+   {
+    "attempt": 1,
+    "call_key": [
+     "reflect",
+     29,
+     0,
+     0
+    ],
+    "epoch": 29,
+    "raw_output": "```\nALPHA BETA\n```",
+    "step_type": "reflect",
+    "system_prompt": "",
+    "type": "model_call",
+    "user_prompt": "I provided an assistant with the following instructions to perform a task for me:\n```\nWrite ALPHA here.\n```\n\nThe following are examples of different task inputs provided to the assistant along with the assistant's response for each of them, and some feedback on how the assistant's response could be better:\n```\n# Example 1\n## Inputs\nt4\n\n## Generated Outputs\n\n\n## Feedback\na category B item: the instruction must say BETA and never ALPHA\n\n\n\n# Example 2\n## Inputs\nt1\n\n## Generated Outputs\n\n\n## Feedback\nThis trajectory got a score of 1.0.\n\n\n\n# Example 3\n## Inputs\nt1\n\n## Generated Outputs\n\n\n## Feedback\nThis trajectory got a score of 1.0.\n\n\n```\n\nYour task is to write a new instruction for the assistant.\n\nRead the inputs carefully and identify the input format and infer detailed task description about the task I wish to solve with the assistant.\n\nRead all the assistant responses and the corresponding feedback. Identify all niche and domain specific factual information about the task and include it in the instruction, as a lot of it may not be available to the assistant in the future. The assistant may have utilized a generalizable strategy to solve the task, if so, include that in the instruction as well.\n\nProvide the new instructions within ``` blocks."
+   },
+   {
+    "accepted": false,
+    "child": "6e0b9dd5d73f",
+    "child_sum": 0.0,
+    "components": [
+     "instruction"
+    ],
+    "epoch": 29,
+    "existing": false,
+    "iteration": 29,
+    "minibatch": [
+     "t4",
+     "t1",
+     "t1"
+    ],
+    "parent": 4,
+    "parent_sum": 2.0,
+    "step_type": "reflect",
+    "type": "decision",
+    "unchanged": false
+   },
+   {
+    "attempt": 1,
+    "call_key": [
+     "reflect",
+     30,
+     0,
+     0
+    ],
+    "epoch": 30,
+    "raw_output": "```\nSay ALPHA.\n```",
+    "step_type": "reflect",
+    "system_prompt": "",
+    "type": "model_call",
+    "user_prompt": "I provided an assistant with the following instructions to perform a task for me:\n```\nWrite ALPHA here.\n```\n\nThe following are examples of different task inputs provided to the assistant along with the assistant's response for each of them, and some feedback on how the assistant's response could be better:\n```\n# Example 1\n## Inputs\nt3\n\n## Generated Outputs\n\n\n## Feedback\nThis trajectory got a score of 1.0.\n\n\n\n# Example 2\n## Inputs\nt2\n\n## Generated Outputs\n\n\n## Feedback\na category B item: the instruction must say BETA and never ALPHA\n\n\n\n# Example 3\n## Inputs\nt4\n\n## Generated Outputs\n\n\n## Feedback\na category B item: the instruction must say BETA and never ALPHA\n\n\n```\n\nYour task is to write a new instruction for the assistant.\n\nRead the inputs carefully and identify the input format and infer detailed task description about the task I wish to solve with the assistant.\n\nRead all the assistant responses and the corresponding feedback. Identify all niche and domain specific factual information about the task and include it in the instruction, as a lot of it may not be available to the assistant in the future. The assistant may have utilized a generalizable strategy to solve the task, if so, include that in the instruction as well.\n\nProvide the new instructions within ``` blocks."
+   },
+   {
+    "accepted": false,
+    "child": "b4e95d684d80",
+    "child_sum": 1.0,
+    "components": [
+     "instruction"
+    ],
+    "epoch": 30,
+    "existing": false,
+    "iteration": 30,
+    "minibatch": [
+     "t3",
+     "t2",
+     "t4"
+    ],
+    "parent": 4,
+    "parent_sum": 1.0,
+    "step_type": "reflect",
+    "type": "decision",
+    "unchanged": false
+   },
+   {
+    "attempt": 1,
+    "call_key": [
+     "reflect",
+     31,
+     0,
+     0
+    ],
+    "epoch": 31,
+    "raw_output": "```\nAlways answer ALPHA.\n```",
+    "step_type": "reflect",
+    "system_prompt": "",
+    "type": "model_call",
+    "user_prompt": "I provided an assistant with the following instructions to perform a task for me:\n```\nWrite ALPHA here.\n```\n\nThe following are examples of different task inputs provided to the assistant along with the assistant's response for each of them, and some feedback on how the assistant's response could be better:\n```\n# Example 1\n## Inputs\nt8\n\n## Generated Outputs\n\n\n## Feedback\na category B item: the instruction must say BETA and never ALPHA\n\n\n\n# Example 2\n## Inputs\nt6\n\n## Generated Outputs\n\n\n## Feedback\na category B item: the instruction must say BETA and never ALPHA\n\n\n\n# Example 3\n## Inputs\nt7\n\n## Generated Outputs\n\n\n## Feedback\nThis trajectory got a score of 1.0.\n\n\n```\n\nYour task is to write a new instruction for the assistant.\n\nRead the inputs carefully and identify the input format and infer detailed task description about the task I wish to solve with the assistant.\n\nRead all the assistant responses and the corresponding feedback. Identify all niche and domain specific factual information about the task and include it in the instruction, as a lot of it may not be available to the assistant in the future. The assistant may have utilized a generalizable strategy to solve the task, if so, include that in the instruction as well.\n\nProvide the new instructions within ``` blocks."
+   },
+   {
+    "accepted": false,
+    "child": "89c5b5fdf05a",
+    "child_sum": 1.0,
+    "components": [
+     "instruction"
+    ],
+    "epoch": 31,
+    "existing": false,
+    "iteration": 31,
+    "minibatch": [
+     "t8",
+     "t6",
+     "t7"
+    ],
+    "parent": 4,
+    "parent_sum": 1.0,
+    "step_type": "reflect",
+    "type": "decision",
+    "unchanged": false
+   },
+   {
+    "attempt": 1,
+    "call_key": [
+     "reflect",
+     32,
+     0,
+     0
+    ],
+    "epoch": 32,
+    "raw_output": "```\nSay BETA.\n```",
+    "step_type": "reflect",
+    "system_prompt": "",
+    "type": "model_call",
+    "user_prompt": "I provided an assistant with the following instructions to perform a task for me:\n```\nBETA, please.\n```\n\nThe following are examples of different task inputs provided to the assistant along with the assistant's response for each of them, and some feedback on how the assistant's response could be better:\n```\n# Example 1\n## Inputs\nt1\n\n## Generated Outputs\n\n\n## Feedback\na category A item: the instruction must say ALPHA and never BETA\n\n\n\n# Example 2\n## Inputs\nt5\n\n## Generated Outputs\n\n\n## Feedback\na category A item: the instruction must say ALPHA and never BETA\n\n\n\n# Example 3\n## Inputs\nt5\n\n## Generated Outputs\n\n\n## Feedback\na category A item: the instruction must say ALPHA and never BETA\n\n\n```\n\nYour task is to write a new instruction for the assistant.\n\nRead the inputs carefully and identify the input format and infer detailed task description about the task I wish to solve with the assistant.\n\nRead all the assistant responses and the corresponding feedback. Identify all niche and domain specific factual information about the task and include it in the instruction, as a lot of it may not be available to the assistant in the future. The assistant may have utilized a generalizable strategy to solve the task, if so, include that in the instruction as well.\n\nProvide the new instructions within ``` blocks."
+   },
+   {
+    "accepted": false,
+    "child": "05287f7c2096",
+    "child_sum": 0.0,
+    "components": [
+     "instruction"
+    ],
+    "epoch": 32,
+    "existing": false,
+    "iteration": 32,
+    "minibatch": [
+     "t1",
+     "t5",
+     "t5"
+    ],
+    "parent": 3,
+    "parent_sum": 0.0,
+    "step_type": "reflect",
+    "type": "decision",
+    "unchanged": false
+   },
+   {
+    "attempt": 1,
+    "call_key": [
+     "reflect",
+     33,
+     0,
+     0
+    ],
+    "epoch": 33,
+    "raw_output": "```\nALPHA BETA\n```",
+    "step_type": "reflect",
+    "system_prompt": "",
+    "type": "model_call",
+    "user_prompt": "I provided an assistant with the following instructions to perform a task for me:\n```\nWrite ALPHA here.\n```\n\nThe following are examples of different task inputs provided to the assistant along with the assistant's response for each of them, and some feedback on how the assistant's response could be better:\n```\n# Example 1\n## Inputs\nt4\n\n## Generated Outputs\n\n\n## Feedback\na category B item: the instruction must say BETA and never ALPHA\n\n\n\n# Example 2\n## Inputs\nt7\n\n## Generated Outputs\n\n\n## Feedback\nThis trajectory got a score of 1.0.\n\n\n\n# Example 3\n## Inputs\nt2\n\n## Generated Outputs\n\n\n## Feedback\na category B item: the instruction must say BETA and never ALPHA\n\n\n```\n\nYour task is to write a new instruction for the assistant.\n\nRead the inputs carefully and identify the input format and infer detailed task description about the task I wish to solve with the assistant.\n\nRead all the assistant responses and the corresponding feedback. Identify all niche and domain specific factual information about the task and include it in the instruction, as a lot of it may not be available to the assistant in the future. The assistant may have utilized a generalizable strategy to solve the task, if so, include that in the instruction as well.\n\nProvide the new instructions within ``` blocks."
+   },
+   {
+    "accepted": false,
+    "child": "6e0b9dd5d73f",
+    "child_sum": 0.0,
+    "components": [
+     "instruction"
+    ],
+    "epoch": 33,
+    "existing": false,
+    "iteration": 33,
+    "minibatch": [
+     "t4",
+     "t7",
+     "t2"
+    ],
+    "parent": 4,
+    "parent_sum": 1.0,
+    "step_type": "reflect",
+    "type": "decision",
+    "unchanged": false
+   },
+   {
+    "attempt": 1,
+    "call_key": [
+     "reflect",
+     34,
+     0,
+     0
+    ],
+    "epoch": 34,
+    "raw_output": "```\nAlways answer ALPHA.\n```",
+    "step_type": "reflect",
+    "system_prompt": "",
+    "type": "model_call",
+    "user_prompt": "I provided an assistant with the following instructions to perform a task for me:\n```\nBETA, please.\n```\n\nThe following are examples of different task inputs provided to the assistant along with the assistant's response for each of them, and some feedback on how the assistant's response could be better:\n```\n# Example 1\n## Inputs\nt5\n\n## Generated Outputs\n\n\n## Feedback\na category A item: the instruction must say ALPHA and never BETA\n\n\n\n# Example 2\n## Inputs\nt8\n\n## Generated Outputs\n\n\n## Feedback\nThis trajectory got a score of 1.0.\n\n\n\n# Example 3\n## Inputs\nt1\n\n## Generated Outputs\n\n\n## Feedback\na category A item: the instruction must say ALPHA and never BETA\n\n\n```\n\nYour task is to write a new instruction for the assistant.\n\nRead the inputs carefully and identify the input format and infer detailed task description about the task I wish to solve with the assistant.\n\nRead all the assistant responses and the corresponding feedback. Identify all niche and domain specific factual information about the task and include it in the instruction, as a lot of it may not be available to the assistant in the future. The assistant may have utilized a generalizable strategy to solve the task, if so, include that in the instruction as well.\n\nProvide the new instructions within ``` blocks."
+   },
+   {
+    "accepted": true,
+    "child": "89c5b5fdf05a",
+    "child_sum": 2.0,
+    "components": [
+     "instruction"
+    ],
+    "epoch": 34,
+    "existing": false,
+    "iteration": 34,
+    "minibatch": [
+     "t5",
+     "t8",
+     "t1"
+    ],
+    "parent": 3,
+    "parent_sum": 1.0,
+    "step_type": "reflect",
+    "type": "decision",
+    "unchanged": false
+   },
+   {
+    "best": "1621b83431a0",
+    "candidate": "89c5b5fdf05a",
+    "epoch": 34,
+    "how": "reflective",
+    "iteration": 34,
+    "parents": [
+     3
+    ],
+    "pareto_mean": 0.5,
+    "program": 5,
+    "step_type": "added",
+    "type": "decision"
+   },
+   {
+    "attempt": 1,
+    "call_key": [
+     "reflect",
+     35,
+     0,
+     0
+    ],
+    "epoch": 35,
+    "raw_output": "```\nWrite ALPHA here.\n```",
+    "step_type": "reflect",
+    "system_prompt": "",
+    "type": "model_call",
+    "user_prompt": "I provided an assistant with the following instructions to perform a task for me:\n```\nBETA, please.\n```\n\nThe following are examples of different task inputs provided to the assistant along with the assistant's response for each of them, and some feedback on how the assistant's response could be better:\n```\n# Example 1\n## Inputs\nt6\n\n## Generated Outputs\n\n\n## Feedback\nThis trajectory got a score of 1.0.\n\n\n\n# Example 2\n## Inputs\nt3\n\n## Generated Outputs\n\n\n## Feedback\na category A item: the instruction must say ALPHA and never BETA\n\n\n\n# Example 3\n## Inputs\nt3\n\n## Generated Outputs\n\n\n## Feedback\na category A item: the instruction must say ALPHA and never BETA\n\n\n```\n\nYour task is to write a new instruction for the assistant.\n\nRead the inputs carefully and identify the input format and infer detailed task description about the task I wish to solve with the assistant.\n\nRead all the assistant responses and the corresponding feedback. Identify all niche and domain specific factual information about the task and include it in the instruction, as a lot of it may not be available to the assistant in the future. The assistant may have utilized a generalizable strategy to solve the task, if so, include that in the instruction as well.\n\nProvide the new instructions within ``` blocks."
+   },
+   {
+    "accepted": true,
+    "child": "fe3705fc50cc",
+    "child_sum": 2.0,
+    "components": [
+     "instruction"
+    ],
+    "epoch": 35,
+    "existing": true,
+    "iteration": 35,
+    "minibatch": [
+     "t6",
+     "t3",
+     "t3"
+    ],
+    "parent": 3,
+    "parent_sum": 1.0,
+    "step_type": "reflect",
+    "type": "decision",
+    "unchanged": false
+   },
+   {
+    "child": "fe3705fc50cc",
+    "epoch": 35,
+    "how": "reflective",
+    "iteration": 35,
+    "step_type": "duplicate",
+    "type": "decision"
+   },
+   {
+    "attempt": 1,
+    "call_key": [
+     "reflect",
+     36,
+     0,
+     0
+    ],
+    "epoch": 36,
+    "raw_output": "```\nSay BETA.\n```",
+    "step_type": "reflect",
+    "system_prompt": "",
+    "type": "model_call",
+    "user_prompt": "I provided an assistant with the following instructions to perform a task for me:\n```\nBETA, please.\n```\n\nThe following are examples of different task inputs provided to the assistant along with the assistant's response for each of them, and some feedback on how the assistant's response could be better:\n```\n# Example 1\n## Inputs\nt4\n\n## Generated Outputs\n\n\n## Feedback\nThis trajectory got a score of 1.0.\n\n\n\n# Example 2\n## Inputs\nt2\n\n## Generated Outputs\n\n\n## Feedback\nThis trajectory got a score of 1.0.\n\n\n\n# Example 3\n## Inputs\nt3\n\n## Generated Outputs\n\n\n## Feedback\na category A item: the instruction must say ALPHA and never BETA\n\n\n```\n\nYour task is to write a new instruction for the assistant.\n\nRead the inputs carefully and identify the input format and infer detailed task description about the task I wish to solve with the assistant.\n\nRead all the assistant responses and the corresponding feedback. Identify all niche and domain specific factual information about the task and include it in the instruction, as a lot of it may not be available to the assistant in the future. The assistant may have utilized a generalizable strategy to solve the task, if so, include that in the instruction as well.\n\nProvide the new instructions within ``` blocks."
+   },
+   {
+    "accepted": false,
+    "child": "05287f7c2096",
+    "child_sum": 2.0,
+    "components": [
+     "instruction"
+    ],
+    "epoch": 36,
+    "existing": false,
+    "iteration": 36,
+    "minibatch": [
+     "t4",
+     "t2",
+     "t3"
+    ],
+    "parent": 3,
+    "parent_sum": 2.0,
+    "step_type": "reflect",
+    "type": "decision",
+    "unchanged": false
+   },
+   {
+    "attempt": 1,
+    "call_key": [
+     "reflect",
+     37,
+     0,
+     0
+    ],
+    "epoch": 37,
+    "raw_output": "```\nWrite ALPHA here.\n```",
+    "step_type": "reflect",
+    "system_prompt": "",
+    "type": "model_call",
+    "user_prompt": "I provided an assistant with the following instructions to perform a task for me:\n```\nBETA, please.\n```\n\nThe following are examples of different task inputs provided to the assistant along with the assistant's response for each of them, and some feedback on how the assistant's response could be better:\n```\n# Example 1\n## Inputs\nt1\n\n## Generated Outputs\n\n\n## Feedback\na category A item: the instruction must say ALPHA and never BETA\n\n\n\n# Example 2\n## Inputs\nt8\n\n## Generated Outputs\n\n\n## Feedback\nThis trajectory got a score of 1.0.\n\n\n\n# Example 3\n## Inputs\nt5\n\n## Generated Outputs\n\n\n## Feedback\na category A item: the instruction must say ALPHA and never BETA\n\n\n```\n\nYour task is to write a new instruction for the assistant.\n\nRead the inputs carefully and identify the input format and infer detailed task description about the task I wish to solve with the assistant.\n\nRead all the assistant responses and the corresponding feedback. Identify all niche and domain specific factual information about the task and include it in the instruction, as a lot of it may not be available to the assistant in the future. The assistant may have utilized a generalizable strategy to solve the task, if so, include that in the instruction as well.\n\nProvide the new instructions within ``` blocks."
+   },
+   {
+    "accepted": true,
+    "child": "fe3705fc50cc",
+    "child_sum": 2.0,
+    "components": [
+     "instruction"
+    ],
+    "epoch": 37,
+    "existing": true,
+    "iteration": 37,
+    "minibatch": [
+     "t1",
+     "t8",
+     "t5"
+    ],
+    "parent": 3,
+    "parent_sum": 1.0,
+    "step_type": "reflect",
+    "type": "decision",
+    "unchanged": false
+   },
+   {
+    "child": "fe3705fc50cc",
+    "epoch": 37,
+    "how": "reflective",
+    "iteration": 37,
+    "step_type": "duplicate",
+    "type": "decision"
+   },
+   {
+    "attempt": 1,
+    "call_key": [
+     "reflect",
+     38,
+     0,
+     0
+    ],
+    "epoch": 38,
+    "raw_output": "```\nBETA, please.\n```",
+    "step_type": "reflect",
+    "system_prompt": "",
+    "type": "model_call",
+    "user_prompt": "I provided an assistant with the following instructions to perform a task for me:\n```\nBETA, please.\n```\n\nThe following are examples of different task inputs provided to the assistant along with the assistant's response for each of them, and some feedback on how the assistant's response could be better:\n```\n# Example 1\n## Inputs\nt6\n\n## Generated Outputs\n\n\n## Feedback\nThis trajectory got a score of 1.0.\n\n\n\n# Example 2\n## Inputs\nt7\n\n## Generated Outputs\n\n\n## Feedback\na category A item: the instruction must say ALPHA and never BETA\n\n\n\n# Example 3\n## Inputs\nt7\n\n## Generated Outputs\n\n\n## Feedback\na category A item: the instruction must say ALPHA and never BETA\n\n\n```\n\nYour task is to write a new instruction for the assistant.\n\nRead the inputs carefully and identify the input format and infer detailed task description about the task I wish to solve with the assistant.\n\nRead all the assistant responses and the corresponding feedback. Identify all niche and domain specific factual information about the task and include it in the instruction, as a lot of it may not be available to the assistant in the future. The assistant may have utilized a generalizable strategy to solve the task, if so, include that in the instruction as well.\n\nProvide the new instructions within ``` blocks."
+   },
+   {
+    "accepted": false,
+    "child": "96760f23ca42",
+    "child_sum": 1.0,
+    "components": [
+     "instruction"
+    ],
+    "epoch": 38,
+    "existing": true,
+    "iteration": 38,
+    "minibatch": [
+     "t6",
+     "t7",
+     "t7"
+    ],
+    "parent": 3,
+    "parent_sum": 1.0,
+    "step_type": "reflect",
+    "type": "decision",
+    "unchanged": true
+   },
+   {
+    "attempt": 1,
+    "call_key": [
+     "reflect",
+     39,
+     0,
+     0
+    ],
+    "epoch": 39,
+    "raw_output": "```\nBETA, please.\n```",
+    "step_type": "reflect",
+    "system_prompt": "",
+    "type": "model_call",
+    "user_prompt": "I provided an assistant with the following instructions to perform a task for me:\n```\nBETA, please.\n```\n\nThe following are examples of different task inputs provided to the assistant along with the assistant's response for each of them, and some feedback on how the assistant's response could be better:\n```\n# Example 1\n## Inputs\nt1\n\n## Generated Outputs\n\n\n## Feedback\na category A item: the instruction must say ALPHA and never BETA\n\n\n\n# Example 2\n## Inputs\nt2\n\n## Generated Outputs\n\n\n## Feedback\nThis trajectory got a score of 1.0.\n\n\n\n# Example 3\n## Inputs\nt6\n\n## Generated Outputs\n\n\n## Feedback\nThis trajectory got a score of 1.0.\n\n\n```\n\nYour task is to write a new instruction for the assistant.\n\nRead the inputs carefully and identify the input format and infer detailed task description about the task I wish to solve with the assistant.\n\nRead all the assistant responses and the corresponding feedback. Identify all niche and domain specific factual information about the task and include it in the instruction, as a lot of it may not be available to the assistant in the future. The assistant may have utilized a generalizable strategy to solve the task, if so, include that in the instruction as well.\n\nProvide the new instructions within ``` blocks."
+   },
+   {
+    "accepted": false,
+    "child": "96760f23ca42",
+    "child_sum": 2.0,
+    "components": [
+     "instruction"
+    ],
+    "epoch": 39,
+    "existing": true,
+    "iteration": 39,
+    "minibatch": [
+     "t1",
+     "t2",
+     "t6"
+    ],
+    "parent": 3,
+    "parent_sum": 2.0,
+    "step_type": "reflect",
+    "type": "decision",
+    "unchanged": true
+   },
+   {
+    "attempt": 1,
+    "call_key": [
+     "reflect",
+     40,
+     0,
+     0
+    ],
+    "epoch": 40,
+    "raw_output": "```\nSay ALPHA.\n```",
+    "step_type": "reflect",
+    "system_prompt": "",
+    "type": "model_call",
+    "user_prompt": "I provided an assistant with the following instructions to perform a task for me:\n```\nAlways answer ALPHA.\n```\n\nThe following are examples of different task inputs provided to the assistant along with the assistant's response for each of them, and some feedback on how the assistant's response could be better:\n```\n# Example 1\n## Inputs\nt5\n\n## Generated Outputs\n\n\n## Feedback\nThis trajectory got a score of 1.0.\n\n\n\n# Example 2\n## Inputs\nt7\n\n## Generated Outputs\n\n\n## Feedback\nThis trajectory got a score of 1.0.\n\n\n\n# Example 3\n## Inputs\nt8\n\n## Generated Outputs\n\n\n## Feedback\na category B item: the instruction must say BETA and never ALPHA\n\n\n```\n\nYour task is to write a new instruction for the assistant.\n\nRead the inputs carefully and identify the input format and infer detailed task description about the task I wish to solve with the assistant.\n\nRead all the assistant responses and the corresponding feedback. Identify all niche and domain specific factual information about the task and include it in the instruction, as a lot of it may not be available to the assistant in the future. The assistant may have utilized a generalizable strategy to solve the task, if so, include that in the instruction as well.\n\nProvide the new instructions within ``` blocks."
+   },
+   {
+    "accepted": false,
+    "child": "b4e95d684d80",
+    "child_sum": 2.0,
+    "components": [
+     "instruction"
+    ],
+    "epoch": 40,
+    "existing": false,
+    "iteration": 40,
+    "minibatch": [
+     "t5",
+     "t7",
+     "t8"
+    ],
+    "parent": 5,
+    "parent_sum": 2.0,
+    "step_type": "reflect",
+    "type": "decision",
+    "unchanged": false
+   },
+   {
+    "attempt": 1,
+    "call_key": [
+     "reflect",
+     41,
+     0,
+     0
+    ],
+    "epoch": 41,
+    "raw_output": "```\nAlways answer ALPHA.\n```",
+    "step_type": "reflect",
+    "system_prompt": "",
+    "type": "model_call",
+    "user_prompt": "I provided an assistant with the following instructions to perform a task for me:\n```\nBETA, please.\n```\n\nThe following are examples of different task inputs provided to the assistant along with the assistant's response for each of them, and some feedback on how the assistant's response could be better:\n```\n# Example 1\n## Inputs\nt3\n\n## Generated Outputs\n\n\n## Feedback\na category A item: the instruction must say ALPHA and never BETA\n\n\n\n# Example 2\n## Inputs\nt4\n\n## Generated Outputs\n\n\n## Feedback\nThis trajectory got a score of 1.0.\n\n\n\n# Example 3\n## Inputs\nt4\n\n## Generated Outputs\n\n\n## Feedback\nThis trajectory got a score of 1.0.\n\n\n```\n\nYour task is to write a new instruction for the assistant.\n\nRead the inputs carefully and identify the input format and infer detailed task description about the task I wish to solve with the assistant.\n\nRead all the assistant responses and the corresponding feedback. Identify all niche and domain specific factual information about the task and include it in the instruction, as a lot of it may not be available to the assistant in the future. The assistant may have utilized a generalizable strategy to solve the task, if so, include that in the instruction as well.\n\nProvide the new instructions within ``` blocks."
+   },
+   {
+    "accepted": false,
+    "child": "89c5b5fdf05a",
+    "child_sum": 1.0,
+    "components": [
+     "instruction"
+    ],
+    "epoch": 41,
+    "existing": true,
+    "iteration": 41,
+    "minibatch": [
+     "t3",
+     "t4",
+     "t4"
+    ],
+    "parent": 3,
+    "parent_sum": 2.0,
+    "step_type": "reflect",
+    "type": "decision",
+    "unchanged": false
+   },
+   {
+    "attempt": 1,
+    "call_key": [
+     "reflect",
+     42,
+     0,
+     0
+    ],
+    "epoch": 42,
+    "raw_output": "```\nBETA, please.\n```",
+    "step_type": "reflect",
+    "system_prompt": "",
+    "type": "model_call",
+    "user_prompt": "I provided an assistant with the following instructions to perform a task for me:\n```\nBETA, please.\n```\n\nThe following are examples of different task inputs provided to the assistant along with the assistant's response for each of them, and some feedback on how the assistant's response could be better:\n```\n# Example 1\n## Inputs\nt3\n\n## Generated Outputs\n\n\n## Feedback\na category A item: the instruction must say ALPHA and never BETA\n\n\n\n# Example 2\n## Inputs\nt8\n\n## Generated Outputs\n\n\n## Feedback\nThis trajectory got a score of 1.0.\n\n\n\n# Example 3\n## Inputs\nt7\n\n## Generated Outputs\n\n\n## Feedback\na category A item: the instruction must say ALPHA and never BETA\n\n\n```\n\nYour task is to write a new instruction for the assistant.\n\nRead the inputs carefully and identify the input format and infer detailed task description about the task I wish to solve with the assistant.\n\nRead all the assistant responses and the corresponding feedback. Identify all niche and domain specific factual information about the task and include it in the instruction, as a lot of it may not be available to the assistant in the future. The assistant may have utilized a generalizable strategy to solve the task, if so, include that in the instruction as well.\n\nProvide the new instructions within ``` blocks."
+   },
+   {
+    "accepted": false,
+    "child": "96760f23ca42",
+    "child_sum": 1.0,
+    "components": [
+     "instruction"
+    ],
+    "epoch": 42,
+    "existing": true,
+    "iteration": 42,
+    "minibatch": [
+     "t3",
+     "t8",
+     "t7"
+    ],
+    "parent": 3,
+    "parent_sum": 1.0,
+    "step_type": "reflect",
+    "type": "decision",
+    "unchanged": true
+   },
+   {
+    "attempt": 1,
+    "call_key": [
+     "reflect",
+     43,
+     0,
+     0
+    ],
+    "epoch": 43,
+    "raw_output": "```\nAlways answer BETA.\n```",
+    "step_type": "reflect",
+    "system_prompt": "",
+    "type": "model_call",
+    "user_prompt": "I provided an assistant with the following instructions to perform a task for me:\n```\nBETA, please.\n```\n\nThe following are examples of different task inputs provided to the assistant along with the assistant's response for each of them, and some feedback on how the assistant's response could be better:\n```\n# Example 1\n## Inputs\nt2\n\n## Generated Outputs\n\n\n## Feedback\nThis trajectory got a score of 1.0.\n\n\n\n# Example 2\n## Inputs\nt5\n\n## Generated Outputs\n\n\n## Feedback\na category A item: the instruction must say ALPHA and never BETA\n\n\n\n# Example 3\n## Inputs\nt4\n\n## Generated Outputs\n\n\n## Feedback\nThis trajectory got a score of 1.0.\n\n\n```\n\nYour task is to write a new instruction for the assistant.\n\nRead the inputs carefully and identify the input format and infer detailed task description about the task I wish to solve with the assistant.\n\nRead all the assistant responses and the corresponding feedback. Identify all niche and domain specific factual information about the task and include it in the instruction, as a lot of it may not be available to the assistant in the future. The assistant may have utilized a generalizable strategy to solve the task, if so, include that in the instruction as well.\n\nProvide the new instructions within ``` blocks."
+   },
+   {
+    "accepted": false,
+    "child": "fa2a826b46dc",
+    "child_sum": 2.0,
+    "components": [
+     "instruction"
+    ],
+    "epoch": 43,
+    "existing": true,
+    "iteration": 43,
+    "minibatch": [
+     "t2",
+     "t5",
+     "t4"
+    ],
+    "parent": 3,
+    "parent_sum": 2.0,
+    "step_type": "reflect",
+    "type": "decision",
+    "unchanged": false
+   },
+   {
+    "attempt": 1,
+    "call_key": [
+     "reflect",
+     44,
+     0,
+     0
+    ],
+    "epoch": 44,
+    "raw_output": "```\nAnswer ALPHA now.\n```",
+    "step_type": "reflect",
+    "system_prompt": "",
+    "type": "model_call",
+    "user_prompt": "I provided an assistant with the following instructions to perform a task for me:\n```\nAlways answer ALPHA.\n```\n\nThe following are examples of different task inputs provided to the assistant along with the assistant's response for each of them, and some feedback on how the assistant's response could be better:\n```\n# Example 1\n## Inputs\nt1\n\n## Generated Outputs\n\n\n## Feedback\nThis trajectory got a score of 1.0.\n\n\n\n# Example 2\n## Inputs\nt6\n\n## Generated Outputs\n\n\n## Feedback\na category B item: the instruction must say BETA and never ALPHA\n\n\n\n# Example 3\n## Inputs\nt6\n\n## Generated Outputs\n\n\n## Feedback\na category B item: the instruction must say BETA and never ALPHA\n\n\n```\n\nYour task is to write a new instruction for the assistant.\n\nRead the inputs carefully and identify the input format and infer detailed task description about the task I wish to solve with the assistant.\n\nRead all the assistant responses and the corresponding feedback. Identify all niche and domain specific factual information about the task and include it in the instruction, as a lot of it may not be available to the assistant in the future. The assistant may have utilized a generalizable strategy to solve the task, if so, include that in the instruction as well.\n\nProvide the new instructions within ``` blocks."
+   },
+   {
+    "accepted": false,
+    "child": "1621b83431a0",
+    "child_sum": 1.0,
+    "components": [
+     "instruction"
+    ],
+    "epoch": 44,
+    "existing": true,
+    "iteration": 44,
+    "minibatch": [
+     "t1",
+     "t6",
+     "t6"
+    ],
+    "parent": 5,
+    "parent_sum": 1.0,
+    "step_type": "reflect",
+    "type": "decision",
+    "unchanged": false
+   },
+   {
+    "action": "skipped",
+    "epoch": 44,
+    "reason": "the parts manifest has no 'test' part",
+    "step_type": "test_eval",
+    "type": "decision"
+   }
+  ],
+  "pool": {
+   "candidate_ids": [
+    "0dc278a1f05a",
+    "1621b83431a0",
+    "fa2a826b46dc",
+    "96760f23ca42",
+    "fe3705fc50cc",
+    "89c5b5fdf05a"
+   ],
+   "discovered_at": [
+    0,
+    12,
+    45,
+    81,
+    180,
+    234
+   ],
+   "parents": [
+    [
+     null
+    ],
+    [
+     0
+    ],
+    [
+     1
+    ],
+    [
+     1
+    ],
+    [
+     3
+    ],
+    [
+     3
+    ]
+   ],
+   "pointers": [
+    0,
+    0,
+    0,
+    0,
+    0,
+    0
+   ],
+   "subscores": [
+    {
+     "v1": 0.0,
+     "v2": 0.0,
+     "v3": 0.0,
+     "v4": 0.0,
+     "v5": 0.0,
+     "v6": 0.0
+    },
+    {
+     "v1": 1.0,
+     "v2": 0.0,
+     "v3": 1.0,
+     "v4": 0.0,
+     "v5": 1.0,
+     "v6": 0.0
+    },
+    {
+     "v1": 0.0,
+     "v2": 1.0,
+     "v3": 0.0,
+     "v4": 1.0,
+     "v5": 0.0,
+     "v6": 1.0
+    },
+    {
+     "v1": 0.0,
+     "v2": 1.0,
+     "v3": 0.0,
+     "v4": 1.0,
+     "v5": 0.0,
+     "v6": 1.0
+    },
+    {
+     "v1": 1.0,
+     "v2": 0.0,
+     "v3": 1.0,
+     "v4": 0.0,
+     "v5": 1.0,
+     "v6": 0.0
+    },
+    {
+     "v1": 1.0,
+     "v2": 0.0,
+     "v3": 1.0,
+     "v4": 0.0,
+     "v5": 1.0,
+     "v6": 0.0
+    }
+   ]
+  },
+  "rng_state_tail": [
+   3800003349,
+   1032283041,
+   3806356908,
+   244
+  ]
+ },
+ "two_knobs_feedback_merge_train": {
+  "best": "d958ef593931",
+  "events": [
+   {
+    "candidate": "1018ab1be9ae",
+    "epoch": 0,
+    "instances": 4,
+    "iteration": -1,
+    "pareto_mean": 0.0,
+    "program": 0,
+    "step_type": "seed",
+    "type": "decision"
+   },
+   {
+    "attempt": 1,
+    "call_key": [
+     "reflect",
+     0,
+     0,
+     0
+    ],
+    "epoch": 0,
+    "raw_output": "Here it is:\n```text\nAlways answer ALPHA.\n```",
+    "step_type": "reflect",
+    "system_prompt": "",
+    "type": "model_call",
+    "user_prompt": "I provided an assistant with the following instructions to perform a task for me:\n```\nRule one.\n```\n\nThe following are examples of different task inputs provided to the assistant along with the assistant's response for each of them, and some feedback on how the assistant's response could be better:\n```\n# Example 1\n## Inputs\nt2\n\n## Generated Outputs\n\n\n## Feedback\na category B item: the instruction must say BETA and never ALPHA\n\n\n\n# Example 2\n## Inputs\nt1\n\n## Generated Outputs\n\n\n## Feedback\na category A item: the instruction must say ALPHA and never BETA\n\n\n\n# Example 3\n## Inputs\nt7\n\n## Generated Outputs\n\n\n## Feedback\na category A item: the instruction must say ALPHA and never BETA\n\n\n```\n\nYour task is to write a new instruction for the assistant.\n\nRead the inputs carefully and identify the input format and infer detailed task description about the task I wish to solve with the assistant.\n\nRead all the assistant responses and the corresponding feedback. Identify all niche and domain specific factual information about the task and include it in the instruction, as a lot of it may not be available to the assistant in the future. The assistant may have utilized a generalizable strategy to solve the task, if so, include that in the instruction as well.\n\nProvide the new instructions within ``` blocks."
+   },
+   {
+    "accepted": true,
+    "child": "dc9b4a199711",
+    "child_sum": 2.0,
+    "components": [
+     "alpha_rule"
+    ],
+    "epoch": 0,
+    "existing": false,
+    "iteration": 0,
+    "minibatch": [
+     "t2",
+     "t1",
+     "t7"
+    ],
+    "parent": 0,
+    "parent_sum": 0.0,
+    "step_type": "reflect",
+    "type": "decision",
+    "unchanged": false
+   },
+   {
+    "best": "dc9b4a199711",
+    "candidate": "dc9b4a199711",
+    "epoch": 0,
+    "how": "reflective",
+    "iteration": 0,
+    "parents": [
+     0
+    ],
+    "pareto_mean": 0.5,
+    "program": 1,
+    "step_type": "added",
+    "type": "decision"
+   },
+   {
+    "epoch": 1,
+    "iteration": 1,
+    "step_type": "merge_none",
+    "type": "decision"
+   },
+   {
+    "attempt": 1,
+    "call_key": [
+     "reflect",
+     1,
+     1,
+     0
+    ],
+    "epoch": 1,
+    "raw_output": "Here it is:\n```text\nAlways answer BETA.\n```",
+    "step_type": "reflect",
+    "system_prompt": "",
+    "type": "model_call",
+    "user_prompt": "I provided an assistant with the following instructions to perform a task for me:\n```\nRule two.\n```\n\nThe following are examples of different task inputs provided to the assistant along with the assistant's response for each of them, and some feedback on how the assistant's response could be better:\n```\n# Example 1\n## Inputs\nt4\n\n## Generated Outputs\n\n\n## Feedback\na category B item: the instruction must say BETA and never ALPHA\n\n\n\n# Example 2\n## Inputs\nt4\n\n## Generated Outputs\n\n\n## Feedback\na category B item: the instruction must say BETA and never ALPHA\n\n\n\n# Example 3\n## Inputs\nt7\n\n## Generated Outputs\n\n\n## Feedback\nThis trajectory got a score of 1.0.\n\n\n```\n\nYour task is to write a new instruction for the assistant.\n\nRead the inputs carefully and identify the input format and infer detailed task description about the task I wish to solve with the assistant.\n\nRead all the assistant responses and the corresponding feedback. Identify all niche and domain specific factual information about the task and include it in the instruction, as a lot of it may not be available to the assistant in the future. The assistant may have utilized a generalizable strategy to solve the task, if so, include that in the instruction as well.\n\nProvide the new instructions within ``` blocks."
+   },
+   {
+    "accepted": true,
+    "child": "d958ef593931",
+    "child_sum": 3.0,
+    "components": [
+     "beta_rule"
+    ],
+    "epoch": 1,
+    "existing": false,
+    "iteration": 1,
+    "minibatch": [
+     "t4",
+     "t4",
+     "t7"
+    ],
+    "parent": 1,
+    "parent_sum": 1.0,
+    "step_type": "reflect",
+    "type": "decision",
+    "unchanged": false
+   },
+   {
+    "best": "d958ef593931",
+    "candidate": "d958ef593931",
+    "epoch": 1,
+    "how": "reflective",
+    "iteration": 1,
+    "parents": [
+     1
+    ],
+    "pareto_mean": 1.0,
+    "program": 2,
+    "step_type": "added",
+    "type": "decision"
+   },
+   {
+    "epoch": 2,
+    "iteration": 2,
+    "step_type": "merge_none",
+    "type": "decision"
+   },
+   {
+    "epoch": 2,
+    "iteration": 2,
+    "minibatch": [
+     "t2",
+     "t4",
+     "t7"
+    ],
+    "parent": 2,
+    "step_type": "skip_perfect",
+    "type": "decision"
+   },
+   {
+    "epoch": 3,
+    "iteration": 3,
+    "minibatch": [
+     "t1",
+     "t1",
+     "t7"
+    ],
+    "parent": 2,
+    "step_type": "skip_perfect",
+    "type": "decision"
+   },
+   {
+    "epoch": 4,
+    "iteration": 4,
+    "minibatch": [
+     "t4",
+     "t1",
+     "t7"
+    ],
+    "parent": 2,
+    "step_type": "skip_perfect",
+    "type": "decision"
+   },
+   {
+    "epoch": 5,
+    "iteration": 5,
+    "minibatch": [
+     "t2",
+     "t2",
+     "t7"
+    ],
+    "parent": 2,
+    "step_type": "skip_perfect",
+    "type": "decision"
+   },
+   {
+    "epoch": 6,
+    "iteration": 6,
+    "minibatch": [
+     "t1",
+     "t4",
+     "t7"
+    ],
+    "parent": 2,
+    "step_type": "skip_perfect",
+    "type": "decision"
+   },
+   {
+    "epoch": 7,
+    "iteration": 7,
+    "minibatch": [
+     "t2",
+     "t2",
+     "t7"
+    ],
+    "parent": 2,
+    "step_type": "skip_perfect",
+    "type": "decision"
+   },
+   {
+    "epoch": 8,
+    "iteration": 8,
+    "minibatch": [
+     "t7",
+     "t4",
+     "t1"
+    ],
+    "parent": 2,
+    "step_type": "skip_perfect",
+    "type": "decision"
+   },
+   {
+    "epoch": 9,
+    "iteration": 9,
+    "minibatch": [
+     "t2",
+     "t2",
+     "t1"
+    ],
+    "parent": 2,
+    "step_type": "skip_perfect",
+    "type": "decision"
+   },
+   {
+    "epoch": 10,
+    "iteration": 10,
+    "minibatch": [
+     "t7",
+     "t4",
+     "t1"
+    ],
+    "parent": 2,
+    "step_type": "skip_perfect",
+    "type": "decision"
+   },
+   {
+    "epoch": 11,
+    "iteration": 11,
+    "minibatch": [
+     "t2",
+     "t2",
+     "t1"
+    ],
+    "parent": 2,
+    "step_type": "skip_perfect",
+    "type": "decision"
+   },
+   {
+    "epoch": 12,
+    "iteration": 12,
+    "minibatch": [
+     "t4",
+     "t7",
+     "t1"
+    ],
+    "parent": 2,
+    "step_type": "skip_perfect",
+    "type": "decision"
+   },
+   {
+    "epoch": 13,
+    "iteration": 13,
+    "minibatch": [
+     "t2",
+     "t2",
+     "t1"
+    ],
+    "parent": 2,
+    "step_type": "skip_perfect",
+    "type": "decision"
+   },
+   {
+    "epoch": 14,
+    "iteration": 14,
+    "minibatch": [
+     "t7",
+     "t4",
+     "t1"
+    ],
+    "parent": 2,
+    "step_type": "skip_perfect",
+    "type": "decision"
+   },
+   {
+    "epoch": 15,
+    "iteration": 15,
+    "minibatch": [
+     "t2",
+     "t2",
+     "t1"
+    ],
+    "parent": 2,
+    "step_type": "skip_perfect",
+    "type": "decision"
+   },
+   {
+    "epoch": 16,
+    "iteration": 16,
+    "minibatch": [
+     "t7",
+     "t4",
+     "t2"
+    ],
+    "parent": 2,
+    "step_type": "skip_perfect",
+    "type": "decision"
+   },
+   {
+    "epoch": 17,
+    "iteration": 17,
+    "minibatch": [
+     "t1",
+     "t1",
+     "t2"
+    ],
+    "parent": 2,
+    "step_type": "skip_perfect",
+    "type": "decision"
+   },
+   {
+    "epoch": 18,
+    "iteration": 18,
+    "minibatch": [
+     "t7",
+     "t2",
+     "t1"
+    ],
+    "parent": 2,
+    "step_type": "skip_perfect",
+    "type": "decision"
+   },
+   {
+    "epoch": 19,
+    "iteration": 19,
+    "minibatch": [
+     "t4",
+     "t4",
+     "t1"
+    ],
+    "parent": 2,
+    "step_type": "skip_perfect",
+    "type": "decision"
+   },
+   {
+    "epoch": 20,
+    "iteration": 20,
+    "minibatch": [
+     "t7",
+     "t2",
+     "t1"
+    ],
+    "parent": 2,
+    "step_type": "skip_perfect",
+    "type": "decision"
+   },
+   {
+    "epoch": 21,
+    "iteration": 21,
+    "minibatch": [
+     "t4",
+     "t4",
+     "t1"
+    ],
+    "parent": 2,
+    "step_type": "skip_perfect",
+    "type": "decision"
+   },
+   {
+    "epoch": 22,
+    "iteration": 22,
+    "minibatch": [
+     "t1",
+     "t2",
+     "t4"
+    ],
+    "parent": 2,
+    "step_type": "skip_perfect",
+    "type": "decision"
+   },
+   {
+    "epoch": 23,
+    "iteration": 23,
+    "minibatch": [
+     "t7",
+     "t7",
+     "t4"
+    ],
+    "parent": 2,
+    "step_type": "skip_perfect",
+    "type": "decision"
+   },
+   {
+    "epoch": 24,
+    "iteration": 24,
+    "minibatch": [
+     "t2",
+     "t1",
+     "t4"
+    ],
+    "parent": 2,
+    "step_type": "skip_perfect",
+    "type": "decision"
+   },
+   {
+    "epoch": 25,
+    "iteration": 25,
+    "minibatch": [
+     "t7",
+     "t7",
+     "t4"
+    ],
+    "parent": 2,
+    "step_type": "skip_perfect",
+    "type": "decision"
+   },
+   {
+    "epoch": 26,
+    "iteration": 26,
+    "minibatch": [
+     "t7",
+     "t2",
+     "t4"
+    ],
+    "parent": 2,
+    "step_type": "skip_perfect",
+    "type": "decision"
+   },
+   {
+    "epoch": 27,
+    "iteration": 27,
+    "minibatch": [
+     "t1",
+     "t1",
+     "t4"
+    ],
+    "parent": 2,
+    "step_type": "skip_perfect",
+    "type": "decision"
+   },
+   {
+    "epoch": 28,
+    "iteration": 28,
+    "minibatch": [
+     "t1",
+     "t4",
+     "t2"
+    ],
+    "parent": 2,
+    "step_type": "skip_perfect",
+    "type": "decision"
+   },
+   {
+    "epoch": 29,
+    "iteration": 29,
+    "minibatch": [
+     "t7",
+     "t7",
+     "t2"
+    ],
+    "parent": 2,
+    "step_type": "skip_perfect",
+    "type": "decision"
+   },
+   {
+    "epoch": 30,
+    "iteration": 30,
+    "minibatch": [
+     "t2",
+     "t7",
+     "t4"
+    ],
+    "parent": 2,
+    "step_type": "skip_perfect",
+    "type": "decision"
+   },
+   {
+    "epoch": 31,
+    "iteration": 31,
+    "minibatch": [
+     "t1",
+     "t1",
+     "t4"
+    ],
+    "parent": 2,
+    "step_type": "skip_perfect",
+    "type": "decision"
+   },
+   {
+    "epoch": 32,
+    "iteration": 32,
+    "minibatch": [
+     "t1",
+     "t4",
+     "t7"
+    ],
+    "parent": 2,
+    "step_type": "skip_perfect",
+    "type": "decision"
+   },
+   {
+    "epoch": 33,
+    "iteration": 33,
+    "minibatch": [
+     "t2",
+     "t2",
+     "t7"
+    ],
+    "parent": 2,
+    "step_type": "skip_perfect",
+    "type": "decision"
+   },
+   {
+    "epoch": 34,
+    "iteration": 34,
+    "minibatch": [
+     "t4",
+     "t2",
+     "t1"
+    ],
+    "parent": 2,
+    "step_type": "skip_perfect",
+    "type": "decision"
+   },
+   {
+    "epoch": 35,
+    "iteration": 35,
+    "minibatch": [
+     "t7",
+     "t7",
+     "t1"
+    ],
+    "parent": 2,
+    "step_type": "skip_perfect",
+    "type": "decision"
+   },
+   {
+    "epoch": 36,
+    "iteration": 36,
+    "minibatch": [
+     "t2",
+     "t4",
+     "t1"
+    ],
+    "parent": 2,
+    "step_type": "skip_perfect",
+    "type": "decision"
+   },
+   {
+    "epoch": 37,
+    "iteration": 37,
+    "minibatch": [
+     "t7",
+     "t7",
+     "t1"
+    ],
+    "parent": 2,
+    "step_type": "skip_perfect",
+    "type": "decision"
+   },
+   {
+    "epoch": 38,
+    "iteration": 38,
+    "minibatch": [
+     "t1",
+     "t4",
+     "t7"
+    ],
+    "parent": 2,
+    "step_type": "skip_perfect",
+    "type": "decision"
+   },
+   {
+    "epoch": 39,
+    "iteration": 39,
+    "minibatch": [
+     "t2",
+     "t2",
+     "t7"
+    ],
+    "parent": 2,
+    "step_type": "skip_perfect",
+    "type": "decision"
+   },
+   {
+    "epoch": 40,
+    "iteration": 40,
+    "minibatch": [
+     "t7",
+     "t1",
+     "t2"
+    ],
+    "parent": 2,
+    "step_type": "skip_perfect",
+    "type": "decision"
+   },
+   {
+    "epoch": 41,
+    "iteration": 41,
+    "minibatch": [
+     "t4",
+     "t4",
+     "t2"
+    ],
+    "parent": 2,
+    "step_type": "skip_perfect",
+    "type": "decision"
+   },
+   {
+    "epoch": 42,
+    "iteration": 42,
+    "minibatch": [
+     "t7",
+     "t1",
+     "t2"
+    ],
+    "parent": 2,
+    "step_type": "skip_perfect",
+    "type": "decision"
+   },
+   {
+    "accepted": true,
+    "candidate": "d958ef593931",
+    "epoch": 43,
+    "iteration": 43,
+    "score": 1.0,
+    "seed_score": 1.0,
+    "step_type": "val_check",
+    "type": "decision"
+   },
+   {
+    "action": "skipped",
+    "epoch": 43,
+    "reason": "the parts manifest has no 'test' part",
+    "step_type": "test_eval",
+    "type": "decision"
+   }
+  ],
+  "pool": {
+   "candidate_ids": [
+    "1018ab1be9ae",
+    "dc9b4a199711",
+    "d958ef593931"
+   ],
+   "discovered_at": [
+    0,
+    16,
+    26
+   ],
+   "parents": [
+    [
+     null
+    ],
+    [
+     0
+    ],
+    [
+     1
+    ]
+   ],
+   "pointers": [
+    1,
+    0,
+    0
+   ],
+   "subscores": [
+    {
+     "t3": 0.0,
+     "t5": 0.0,
+     "t6": 0.0,
+     "t8": 0.0
+    },
+    {
+     "t3": 1.0,
+     "t5": 1.0,
+     "t6": 0.0,
+     "t8": 0.0
+    },
+    {
+     "t3": 1.0,
+     "t5": 1.0,
+     "t6": 1.0,
+     "t8": 1.0
+    }
+   ]
+  },
+  "rng_state_tail": [
+   4061456501,
+   1012836620,
+   2402479847,
+   199
+  ]
+ },
+ "two_knobs_hashed_merge": {
+  "best": "c96e39c1ab9f",
+  "events": [
+   {
+    "candidate": "1018ab1be9ae",
+    "epoch": 0,
+    "instances": 6,
+    "iteration": -1,
+    "pareto_mean": 0.0,
+    "program": 0,
+    "step_type": "seed",
+    "type": "decision"
+   },
+   {
+    "attempt": 1,
+    "call_key": [
+     "reflect",
+     0,
+     0,
+     0
+    ],
+    "epoch": 0,
+    "raw_output": "```\nSay ALPHA.\n```",
+    "step_type": "reflect",
+    "system_prompt": "",
+    "type": "model_call",
+    "user_prompt": "I provided an assistant with the following instructions to perform a task for me:\n```\nRule one.\n```\n\nThe following are examples of different task inputs provided to the assistant along with the assistant's response for each of them, and some feedback on how the assistant's response could be better:\n```\n# Example 1\n## Inputs\nt3\n\n## Generated Outputs\n\n\n## Feedback\na category A item: the instruction must say ALPHA and never BETA\n\n\n\n# Example 2\n## Inputs\nt7\n\n## Generated Outputs\n\n\n## Feedback\na category A item: the instruction must say ALPHA and never BETA\n\n\n\n# Example 3\n## Inputs\nt1\n\n## Generated Outputs\n\n\n## Feedback\na category A item: the instruction must say ALPHA and never BETA\n\n\n```\n\nYour task is to write a new instruction for the assistant.\n\nRead the inputs carefully and identify the input format and infer detailed task description about the task I wish to solve with the assistant.\n\nRead all the assistant responses and the corresponding feedback. Identify all niche and domain specific factual information about the task and include it in the instruction, as a lot of it may not be available to the assistant in the future. The assistant may have utilized a generalizable strategy to solve the task, if so, include that in the instruction as well.\n\nProvide the new instructions within ``` blocks."
+   },
+   {
+    "accepted": true,
+    "child": "35803eeb8b8e",
+    "child_sum": 3.0,
+    "components": [
+     "alpha_rule"
+    ],
+    "epoch": 0,
+    "existing": false,
+    "iteration": 0,
+    "minibatch": [
+     "t3",
+     "t7",
+     "t1"
+    ],
+    "parent": 0,
+    "parent_sum": 0.0,
+    "step_type": "reflect",
+    "type": "decision",
+    "unchanged": false
+   },
+   {
+    "best": "35803eeb8b8e",
+    "candidate": "35803eeb8b8e",
+    "epoch": 0,
+    "how": "reflective",
+    "iteration": 0,
+    "parents": [
+     0
+    ],
+    "pareto_mean": 0.5,
+    "program": 1,
+    "step_type": "added",
+    "type": "decision"
+   },
+   {
+    "epoch": 1,
+    "iteration": 1,
+    "step_type": "merge_none",
+    "type": "decision"
+   },
+   {
+    "attempt": 1,
+    "call_key": [
+     "reflect",
+     1,
+     1,
+     0
+    ],
+    "epoch": 1,
+    "raw_output": "```\nBETA, please.\n```",
+    "step_type": "reflect",
+    "system_prompt": "",
+    "type": "model_call",
+    "user_prompt": "I provided an assistant with the following instructions to perform a task for me:\n```\nRule two.\n```\n\nThe following are examples of different task inputs provided to the assistant along with the assistant's response for each of them, and some feedback on how the assistant's response could be better:\n```\n# Example 1\n## Inputs\nt2\n\n## Generated Outputs\n\n\n## Feedback\na category B item: the instruction must say BETA and never ALPHA\n\n\n\n# Example 2\n## Inputs\nt6\n\n## Generated Outputs\n\n\n## Feedback\na category B item: the instruction must say BETA and never ALPHA\n\n\n\n# Example 3\n## Inputs\nt5\n\n## Generated Outputs\n\n\n## Feedback\nThis trajectory got a score of 1.0.\n\n\n```\n\nYour task is to write a new instruction for the assistant.\n\nRead the inputs carefully and identify the input format and infer detailed task description about the task I wish to solve with the assistant.\n\nRead all the assistant responses and the corresponding feedback. Identify all niche and domain specific factual information about the task and include it in the instruction, as a lot of it may not be available to the assistant in the future. The assistant may have utilized a generalizable strategy to solve the task, if so, include that in the instruction as well.\n\nProvide the new instructions within ``` blocks."
+   },
+   {
+    "accepted": true,
+    "child": "c96e39c1ab9f",
+    "child_sum": 3.0,
+    "components": [
+     "beta_rule"
+    ],
+    "epoch": 1,
+    "existing": false,
+    "iteration": 1,
+    "minibatch": [
+     "t2",
+     "t6",
+     "t5"
+    ],
+    "parent": 1,
+    "parent_sum": 1.0,
+    "step_type": "reflect",
+    "type": "decision",
+    "unchanged": false
+   },
+   {
+    "best": "c96e39c1ab9f",
+    "candidate": "c96e39c1ab9f",
+    "epoch": 1,
+    "how": "reflective",
+    "iteration": 1,
+    "parents": [
+     1
+    ],
+    "pareto_mean": 1.0,
+    "program": 2,
+    "step_type": "added",
+    "type": "decision"
+   },
+   {
+    "epoch": 2,
+    "iteration": 2,
+    "step_type": "merge_none",
+    "type": "decision"
+   },
+   {
+    "epoch": 2,
+    "iteration": 2,
+    "minibatch": [
+     "t4",
+     "t8",
+     "t8"
+    ],
+    "parent": 2,
+    "step_type": "skip_perfect",
+    "type": "decision"
+   },
+   {
+    "epoch": 3,
+    "iteration": 3,
+    "minibatch": [
+     "t5",
+     "t7",
+     "t6"
+    ],
+    "parent": 2,
+    "step_type": "skip_perfect",
+    "type": "decision"
+   },
+   {
+    "epoch": 4,
+    "iteration": 4,
+    "minibatch": [
+     "t1",
+     "t8",
+     "t3"
+    ],
+    "parent": 2,
+    "step_type": "skip_perfect",
+    "type": "decision"
+   },
+   {
+    "epoch": 5,
+    "iteration": 5,
+    "minibatch": [
+     "t4",
+     "t2",
+     "t2"
+    ],
+    "parent": 2,
+    "step_type": "skip_perfect",
+    "type": "decision"
+   },
+   {
+    "epoch": 6,
+    "iteration": 6,
+    "minibatch": [
+     "t2",
+     "t8",
+     "t4"
+    ],
+    "parent": 2,
+    "step_type": "skip_perfect",
+    "type": "decision"
+   },
+   {
+    "epoch": 7,
+    "iteration": 7,
+    "minibatch": [
+     "t6",
+     "t7",
+     "t1"
+    ],
+    "parent": 2,
+    "step_type": "skip_perfect",
+    "type": "decision"
+   },
+   {
+    "epoch": 8,
+    "iteration": 8,
+    "minibatch": [
+     "t5",
+     "t3",
+     "t3"
+    ],
+    "parent": 2,
+    "step_type": "skip_perfect",
+    "type": "decision"
+   },
+   {
+    "epoch": 9,
+    "iteration": 9,
+    "minibatch": [
+     "t2",
+     "t8",
+     "t5"
+    ],
+    "parent": 2,
+    "step_type": "skip_perfect",
+    "type": "decision"
+   },
+   {
+    "epoch": 10,
+    "iteration": 10,
+    "minibatch": [
+     "t6",
+     "t3",
+     "t4"
+    ],
+    "parent": 2,
+    "step_type": "skip_perfect",
+    "type": "decision"
+   },
+   {
+    "epoch": 11,
+    "iteration": 11,
+    "minibatch": [
+     "t7",
+     "t1",
+     "t1"
+    ],
+    "parent": 2,
+    "step_type": "skip_perfect",
+    "type": "decision"
+   },
+   {
+    "epoch": 12,
+    "iteration": 12,
+    "minibatch": [
+     "t8",
+     "t2",
+     "t3"
+    ],
+    "parent": 2,
+    "step_type": "skip_perfect",
+    "type": "decision"
+   },
+   {
+    "epoch": 13,
+    "iteration": 13,
+    "minibatch": [
+     "t7",
+     "t6",
+     "t1"
+    ],
+    "parent": 2,
+    "step_type": "skip_perfect",
+    "type": "decision"
+   },
+   {
+    "epoch": 14,
+    "iteration": 14,
+    "minibatch": [
+     "t4",
+     "t5",
+     "t5"
+    ],
+    "parent": 2,
+    "step_type": "skip_perfect",
+    "type": "decision"
+   },
+   {
+    "epoch": 15,
+    "iteration": 15,
+    "minibatch": [
+     "t6",
+     "t4",
+     "t1"
+    ],
+    "parent": 2,
+    "step_type": "skip_perfect",
+    "type": "decision"
+   },
+   {
+    "epoch": 16,
+    "iteration": 16,
+    "minibatch": [
+     "t7",
+     "t8",
+     "t2"
+    ],
+    "parent": 2,
+    "step_type": "skip_perfect",
+    "type": "decision"
+   },
+   {
+    "epoch": 17,
+    "iteration": 17,
+    "minibatch": [
+     "t3",
+     "t5",
+     "t5"
+    ],
+    "parent": 2,
+    "step_type": "skip_perfect",
+    "type": "decision"
+   },
+   {
+    "epoch": 18,
+    "iteration": 18,
+    "minibatch": [
+     "t8",
+     "t6",
+     "t5"
+    ],
+    "parent": 2,
+    "step_type": "skip_perfect",
+    "type": "decision"
+   },
+   {
+    "epoch": 19,
+    "iteration": 19,
+    "minibatch": [
+     "t1",
+     "t4",
+     "t3"
+    ],
+    "parent": 2,
+    "step_type": "skip_perfect",
+    "type": "decision"
+   },
+   {
+    "epoch": 20,
+    "iteration": 20,
+    "minibatch": [
+     "t7",
+     "t2",
+     "t2"
+    ],
+    "parent": 2,
+    "step_type": "skip_perfect",
+    "type": "decision"
+   },
+   {
+    "epoch": 21,
+    "iteration": 21,
+    "minibatch": [
+     "t2",
+     "t3",
+     "t1"
+    ],
+    "parent": 2,
+    "step_type": "skip_perfect",
+    "type": "decision"
+   },
+   {
+    "epoch": 22,
+    "iteration": 22,
+    "minibatch": [
+     "t5",
+     "t7",
+     "t6"
+    ],
+    "parent": 2,
+    "step_type": "skip_perfect",
+    "type": "decision"
+   },
+   {
+    "epoch": 23,
+    "iteration": 23,
+    "minibatch": [
+     "t4",
+     "t8",
+     "t8"
+    ],
+    "parent": 2,
+    "step_type": "skip_perfect",
+    "type": "decision"
+   },
+   {
+    "epoch": 24,
+    "iteration": 24,
+    "minibatch": [
+     "t8",
+     "t6",
+     "t5"
+    ],
+    "parent": 2,
+    "step_type": "skip_perfect",
+    "type": "decision"
+   },
+   {
+    "epoch": 25,
+    "iteration": 25,
+    "minibatch": [
+     "t4",
+     "t1",
+     "t7"
+    ],
+    "parent": 2,
+    "step_type": "skip_perfect",
+    "type": "decision"
+   },
+   {
+    "epoch": 26,
+    "iteration": 26,
+    "minibatch": [
+     "t3",
+     "t2",
+     "t2"
+    ],
+    "parent": 2,
+    "step_type": "skip_perfect",
+    "type": "decision"
+   },
+   {
+    "epoch": 27,
+    "iteration": 27,
+    "minibatch": [
+     "t5",
+     "t7",
+     "t3"
+    ],
+    "parent": 2,
+    "step_type": "skip_perfect",
+    "type": "decision"
+   },
+   {
+    "epoch": 28,
+    "iteration": 28,
+    "minibatch": [
+     "t2",
+     "t6",
+     "t4"
+    ],
+    "parent": 2,
+    "step_type": "skip_perfect",
+    "type": "decision"
+   },
+   {
+    "epoch": 29,
+    "iteration": 29,
+    "minibatch": [
+     "t8",
+     "t1",
+     "t1"
+    ],
+    "parent": 2,
+    "step_type": "skip_perfect",
+    "type": "decision"
+   },
+   {
+    "epoch": 30,
+    "iteration": 30,
+    "minibatch": [
+     "t5",
+     "t8",
+     "t2"
+    ],
+    "parent": 2,
+    "step_type": "skip_perfect",
+    "type": "decision"
+   },
+   {
+    "epoch": 31,
+    "iteration": 31,
+    "minibatch": [
+     "t1",
+     "t7",
+     "t6"
+    ],
+    "parent": 2,
+    "step_type": "skip_perfect",
+    "type": "decision"
+   },
+   {
+    "epoch": 32,
+    "iteration": 32,
+    "minibatch": [
+     "t4",
+     "t3",
+     "t3"
+    ],
+    "parent": 2,
+    "step_type": "skip_perfect",
+    "type": "decision"
+   },
+   {
+    "epoch": 33,
+    "iteration": 33,
+    "minibatch": [
+     "t8",
+     "t7",
+     "t3"
+    ],
+    "parent": 2,
+    "step_type": "skip_perfect",
+    "type": "decision"
+   },
+   {
+    "epoch": 34,
+    "iteration": 34,
+    "minibatch": [
+     "t4",
+     "t6",
+     "t2"
+    ],
+    "parent": 2,
+    "step_type": "skip_perfect",
+    "type": "decision"
+   },
+   {
+    "epoch": 35,
+    "iteration": 35,
+    "minibatch": [
+     "t1",
+     "t5",
+     "t5"
+    ],
+    "parent": 2,
+    "step_type": "skip_perfect",
+    "type": "decision"
+   },
+   {
+    "epoch": 36,
+    "iteration": 36,
+    "minibatch": [
+     "t6",
+     "t4",
+     "t2"
+    ],
+    "parent": 2,
+    "step_type": "skip_perfect",
+    "type": "decision"
+   },
+   {
+    "epoch": 37,
+    "iteration": 37,
+    "minibatch": [
+     "t7",
+     "t5",
+     "t1"
+    ],
+    "parent": 2,
+    "step_type": "skip_perfect",
+    "type": "decision"
+   },
+   {
+    "epoch": 38,
+    "iteration": 38,
+    "minibatch": [
+     "t3",
+     "t8",
+     "t8"
+    ],
+    "parent": 2,
+    "step_type": "skip_perfect",
+    "type": "decision"
+   },
+   {
+    "epoch": 39,
+    "iteration": 39,
+    "minibatch": [
+     "t8",
+     "t7",
+     "t3"
+    ],
+    "parent": 2,
+    "step_type": "skip_perfect",
+    "type": "decision"
+   },
+   {
+    "epoch": 40,
+    "iteration": 40,
+    "minibatch": [
+     "t1",
+     "t2",
+     "t6"
+    ],
+    "parent": 2,
+    "step_type": "skip_perfect",
+    "type": "decision"
+   },
+   {
+    "epoch": 41,
+    "iteration": 41,
+    "minibatch": [
+     "t5",
+     "t4",
+     "t4"
+    ],
+    "parent": 2,
+    "step_type": "skip_perfect",
+    "type": "decision"
+   },
+   {
+    "epoch": 42,
+    "iteration": 42,
+    "minibatch": [
+     "t8",
+     "t1",
+     "t6"
+    ],
+    "parent": 2,
+    "step_type": "skip_perfect",
+    "type": "decision"
+   },
+   {
+    "epoch": 43,
+    "iteration": 43,
+    "minibatch": [
+     "t2",
+     "t7",
+     "t4"
+    ],
+    "parent": 2,
+    "step_type": "skip_perfect",
+    "type": "decision"
+   },
+   {
+    "epoch": 44,
+    "iteration": 44,
+    "minibatch": [
+     "t5",
+     "t3",
+     "t3"
+    ],
+    "parent": 2,
+    "step_type": "skip_perfect",
+    "type": "decision"
+   },
+   {
+    "epoch": 45,
+    "iteration": 45,
+    "minibatch": [
+     "t8",
+     "t3",
+     "t1"
+    ],
+    "parent": 2,
+    "step_type": "skip_perfect",
+    "type": "decision"
+   },
+   {
+    "epoch": 46,
+    "iteration": 46,
+    "minibatch": [
+     "t6",
+     "t2",
+     "t5"
+    ],
+    "parent": 2,
+    "step_type": "skip_perfect",
+    "type": "decision"
+   },
+   {
+    "epoch": 47,
+    "iteration": 47,
+    "minibatch": [
+     "t7",
+     "t4",
+     "t4"
+    ],
+    "parent": 2,
+    "step_type": "skip_perfect",
+    "type": "decision"
+   },
+   {
+    "epoch": 48,
+    "iteration": 48,
+    "minibatch": [
+     "t3",
+     "t8",
+     "t7"
+    ],
+    "parent": 2,
+    "step_type": "skip_perfect",
+    "type": "decision"
+   },
+   {
+    "epoch": 49,
+    "iteration": 49,
+    "minibatch": [
+     "t5",
+     "t6",
+     "t1"
+    ],
+    "parent": 2,
+    "step_type": "skip_perfect",
+    "type": "decision"
+   },
+   {
+    "epoch": 50,
+    "iteration": 50,
+    "minibatch": [
+     "t4",
+     "t2",
+     "t2"
+    ],
+    "parent": 2,
+    "step_type": "skip_perfect",
+    "type": "decision"
+   },
+   {
+    "epoch": 51,
+    "iteration": 51,
+    "minibatch": [
+     "t8",
+     "t1",
+     "t2"
+    ],
+    "parent": 2,
+    "step_type": "skip_perfect",
+    "type": "decision"
+   },
+   {
+    "epoch": 52,
+    "iteration": 52,
+    "minibatch": [
+     "t6",
+     "t5",
+     "t4"
+    ],
+    "parent": 2,
+    "step_type": "skip_perfect",
+    "type": "decision"
+   },
+   {
+    "epoch": 53,
+    "iteration": 53,
+    "minibatch": [
+     "t3",
+     "t7",
+     "t7"
+    ],
+    "parent": 2,
+    "step_type": "skip_perfect",
+    "type": "decision"
+   },
+   {
+    "epoch": 54,
+    "iteration": 54,
+    "minibatch": [
+     "t3",
+     "t7",
+     "t2"
+    ],
+    "parent": 2,
+    "step_type": "skip_perfect",
+    "type": "decision"
+   },
+   {
+    "epoch": 55,
+    "iteration": 55,
+    "minibatch": [
+     "t1",
+     "t6",
+     "t5"
+    ],
+    "parent": 2,
+    "step_type": "skip_perfect",
+    "type": "decision"
+   },
+   {
+    "epoch": 56,
+    "iteration": 56,
+    "minibatch": [
+     "t8",
+     "t4",
+     "t4"
+    ],
+    "parent": 2,
+    "step_type": "skip_perfect",
+    "type": "decision"
+   },
+   {
+    "epoch": 57,
+    "iteration": 57,
+    "minibatch": [
+     "t5",
+     "t7",
+     "t1"
+    ],
+    "parent": 2,
+    "step_type": "skip_perfect",
+    "type": "decision"
+   },
+   {
+    "epoch": 58,
+    "iteration": 58,
+    "minibatch": [
+     "t8",
+     "t6",
+     "t4"
+    ],
+    "parent": 2,
+    "step_type": "skip_perfect",
+    "type": "decision"
+   },
+   {
+    "epoch": 59,
+    "iteration": 59,
+    "minibatch": [
+     "t3",
+     "t2",
+     "t2"
+    ],
+    "parent": 2,
+    "step_type": "skip_perfect",
+    "type": "decision"
+   },
+   {
+    "epoch": 60,
+    "iteration": 60,
+    "minibatch": [
+     "t6",
+     "t7",
+     "t5"
+    ],
+    "parent": 2,
+    "step_type": "skip_perfect",
+    "type": "decision"
+   },
+   {
+    "epoch": 61,
+    "iteration": 61,
+    "minibatch": [
+     "t4",
+     "t2",
+     "t8"
+    ],
+    "parent": 2,
+    "step_type": "skip_perfect",
+    "type": "decision"
+   },
+   {
+    "epoch": 62,
+    "iteration": 62,
+    "minibatch": [
+     "t1",
+     "t3",
+     "t3"
+    ],
+    "parent": 2,
+    "step_type": "skip_perfect",
+    "type": "decision"
+   },
+   {
+    "epoch": 63,
+    "iteration": 63,
+    "minibatch": [
+     "t2",
+     "t5",
+     "t4"
+    ],
+    "parent": 2,
+    "step_type": "skip_perfect",
+    "type": "decision"
+   },
+   {
+    "epoch": 64,
+    "iteration": 64,
+    "minibatch": [
+     "t1",
+     "t7",
+     "t6"
+    ],
+    "parent": 2,
+    "step_type": "skip_perfect",
+    "type": "decision"
+   },
+   {
+    "epoch": 65,
+    "iteration": 65,
+    "minibatch": [
+     "t3",
+     "t8",
+     "t8"
+    ],
+    "parent": 2,
+    "step_type": "skip_perfect",
+    "type": "decision"
+   },
+   {
+    "epoch": 66,
+    "iteration": 66,
+    "minibatch": [
+     "t4",
+     "t7",
+     "t6"
+    ],
+    "parent": 2,
+    "step_type": "skip_perfect",
+    "type": "decision"
+   },
+   {
+    "epoch": 67,
+    "iteration": 67,
+    "minibatch": [
+     "t8",
+     "t1",
+     "t2"
+    ],
+    "parent": 2,
+    "step_type": "skip_perfect",
+    "type": "decision"
+   },
+   {
+    "epoch": 68,
+    "iteration": 68,
+    "minibatch": [
+     "t3",
+     "t5",
+     "t5"
+    ],
+    "parent": 2,
+    "step_type": "skip_perfect",
+    "type": "decision"
+   },
+   {
+    "epoch": 69,
+    "iteration": 69,
+    "minibatch": [
+     "t4",
+     "t2",
+     "t5"
+    ],
+    "parent": 2,
+    "step_type": "skip_perfect",
+    "type": "decision"
+   },
+   {
+    "epoch": 70,
+    "iteration": 70,
+    "minibatch": [
+     "t1",
+     "t6",
+     "t8"
+    ],
+    "parent": 2,
+    "step_type": "skip_perfect",
+    "type": "decision"
+   },
+   {
+    "epoch": 71,
+    "iteration": 71,
+    "minibatch": [
+     "t7",
+     "t3",
+     "t3"
+    ],
+    "parent": 2,
+    "step_type": "skip_perfect",
+    "type": "decision"
+   },
+   {
+    "epoch": 72,
+    "iteration": 72,
+    "minibatch": [
+     "t3",
+     "t6",
+     "t2"
+    ],
+    "parent": 2,
+    "step_type": "skip_perfect",
+    "type": "decision"
+   },
+   {
+    "epoch": 73,
+    "iteration": 73,
+    "minibatch": [
+     "t4",
+     "t7",
+     "t1"
+    ],
+    "parent": 2,
+    "step_type": "skip_perfect",
+    "type": "decision"
+   },
+   {
+    "epoch": 74,
+    "iteration": 74,
+    "minibatch": [
+     "t5",
+     "t8",
+     "t8"
+    ],
+    "parent": 2,
+    "step_type": "skip_perfect",
+    "type": "decision"
+   },
+   {
+    "epoch": 75,
+    "iteration": 75,
+    "minibatch": [
+     "t7",
+     "t8",
+     "t5"
+    ],
+    "parent": 2,
+    "step_type": "skip_perfect",
+    "type": "decision"
+   },
+   {
+    "epoch": 76,
+    "iteration": 76,
+    "minibatch": [
+     "t4",
+     "t3",
+     "t1"
+    ],
+    "parent": 2,
+    "step_type": "skip_perfect",
+    "type": "decision"
+   },
+   {
+    "epoch": 77,
+    "iteration": 77,
+    "minibatch": [
+     "t6",
+     "t2",
+     "t2"
+    ],
+    "parent": 2,
+    "step_type": "skip_perfect",
+    "type": "decision"
+   },
+   {
+    "epoch": 78,
+    "iteration": 78,
+    "minibatch": [
+     "t2",
+     "t6",
+     "t3"
+    ],
+    "parent": 2,
+    "step_type": "skip_perfect",
+    "type": "decision"
+   },
+   {
+    "epoch": 79,
+    "iteration": 79,
+    "minibatch": [
+     "t1",
+     "t5",
+     "t7"
+    ],
+    "parent": 2,
+    "step_type": "skip_perfect",
+    "type": "decision"
+   },
+   {
+    "epoch": 80,
+    "iteration": 80,
+    "minibatch": [
+     "t4",
+     "t8",
+     "t8"
+    ],
+    "parent": 2,
+    "step_type": "skip_perfect",
+    "type": "decision"
+   },
+   {
+    "epoch": 81,
+    "iteration": 81,
+    "minibatch": [
+     "t5",
+     "t6",
+     "t3"
+    ],
+    "parent": 2,
+    "step_type": "skip_perfect",
+    "type": "decision"
+   },
+   {
+    "epoch": 82,
+    "iteration": 82,
+    "minibatch": [
+     "t4",
+     "t7",
+     "t2"
+    ],
+    "parent": 2,
+    "step_type": "skip_perfect",
+    "type": "decision"
+   },
+   {
+    "epoch": 83,
+    "iteration": 83,
+    "minibatch": [
+     "t1",
+     "t8",
+     "t8"
+    ],
+    "parent": 2,
+    "step_type": "skip_perfect",
+    "type": "decision"
+   },
+   {
+    "epoch": 84,
+    "iteration": 84,
+    "minibatch": [
+     "t4",
+     "t1",
+     "t3"
+    ],
+    "parent": 2,
+    "step_type": "skip_perfect",
+    "type": "decision"
+   },
+   {
+    "epoch": 85,
+    "iteration": 85,
+    "minibatch": [
+     "t7",
+     "t8",
+     "t6"
+    ],
+    "parent": 2,
+    "step_type": "skip_perfect",
+    "type": "decision"
+   },
+   {
+    "epoch": 86,
+    "iteration": 86,
+    "minibatch": [
+     "t2",
+     "t5",
+     "t5"
+    ],
+    "parent": 2,
+    "step_type": "skip_perfect",
+    "type": "decision"
+   },
+   {
+    "epoch": 87,
+    "iteration": 87,
+    "minibatch": [
+     "t5",
+     "t7",
+     "t1"
+    ],
+    "parent": 2,
+    "step_type": "skip_perfect",
+    "type": "decision"
+   },
+   {
+    "epoch": 88,
+    "iteration": 88,
+    "minibatch": [
+     "t6",
+     "t4",
+     "t3"
+    ],
+    "parent": 2,
+    "step_type": "skip_perfect",
+    "type": "decision"
+   },
+   {
+    "epoch": 89,
+    "iteration": 89,
+    "minibatch": [
+     "t2",
+     "t8",
+     "t8"
+    ],
+    "parent": 2,
+    "step_type": "skip_perfect",
+    "type": "decision"
+   },
+   {
+    "epoch": 90,
+    "iteration": 90,
+    "minibatch": [
+     "t6",
+     "t8",
+     "t1"
+    ],
+    "parent": 2,
+    "step_type": "skip_perfect",
+    "type": "decision"
+   },
+   {
+    "epoch": 91,
+    "iteration": 91,
+    "minibatch": [
+     "t7",
+     "t2",
+     "t3"
+    ],
+    "parent": 2,
+    "step_type": "skip_perfect",
+    "type": "decision"
+   },
+   {
+    "action": "skipped",
+    "epoch": 91,
+    "reason": "the parts manifest has no 'test' part",
+    "step_type": "test_eval",
+    "type": "decision"
+   }
+  ],
+  "pool": {
+   "candidate_ids": [
+    "1018ab1be9ae",
+    "35803eeb8b8e",
+    "c96e39c1ab9f"
+   ],
+   "discovered_at": [
+    0,
+    12,
+    24
+   ],
+   "parents": [
+    [
+     null
+    ],
+    [
+     0
+    ],
+    [
+     1
+    ]
+   ],
+   "pointers": [
+    1,
+    0,
+    0
+   ],
+   "subscores": [
+    {
+     "v1": 0.0,
+     "v2": 0.0,
+     "v3": 0.0,
+     "v4": 0.0,
+     "v5": 0.0,
+     "v6": 0.0
+    },
+    {
+     "v1": 1.0,
+     "v2": 0.0,
+     "v3": 1.0,
+     "v4": 0.0,
+     "v5": 1.0,
+     "v6": 0.0
+    },
+    {
+     "v1": 1.0,
+     "v2": 1.0,
+     "v3": 1.0,
+     "v4": 1.0,
+     "v5": 1.0,
+     "v6": 1.0
+    }
+   ]
+  },
+  "rng_state_tail": [
+   3699139674,
+   2441779703,
+   754795907,
+   452
+  ]
+ },
+ "two_knobs_merge": {
+  "best": "15726cba3beb",
+  "events": [
+   {
+    "candidate": "1018ab1be9ae",
+    "epoch": 0,
+    "instances": 6,
+    "iteration": -1,
+    "pareto_mean": 0.0,
+    "program": 0,
+    "step_type": "seed",
+    "type": "decision"
+   },
+   {
+    "attempt": 1,
+    "call_key": [
+     "reflect",
+     0,
+     0,
+     0
+    ],
+    "epoch": 0,
+    "raw_output": "```\nALPHA\n```",
+    "step_type": "reflect",
+    "system_prompt": "",
+    "type": "model_call",
+    "user_prompt": "I provided an assistant with the following instructions to perform a task for me:\n```\nRule one.\n```\n\nThe following are examples of different task inputs provided to the assistant along with the assistant's response for each of them, and some feedback on how the assistant's response could be better:\n```\n# Example 1\n## Inputs\nt6\n\n## Generated Outputs\n\n\n## Feedback\na category B item: the instruction must say BETA and never ALPHA\n\n\n\n# Example 2\n## Inputs\nt7\n\n## Generated Outputs\n\n\n## Feedback\na category A item: the instruction must say ALPHA and never BETA\n\n\n\n# Example 3\n## Inputs\nt8\n\n## Generated Outputs\n\n\n## Feedback\na category B item: the instruction must say BETA and never ALPHA\n\n\n```\n\nYour task is to write a new instruction for the assistant.\n\nRead the inputs carefully and identify the input format and infer detailed task description about the task I wish to solve with the assistant.\n\nRead all the assistant responses and the corresponding feedback. Identify all niche and domain specific factual information about the task and include it in the instruction, as a lot of it may not be available to the assistant in the future. The assistant may have utilized a generalizable strategy to solve the task, if so, include that in the instruction as well.\n\nProvide the new instructions within ``` blocks."
+   },
+   {
+    "accepted": true,
+    "child": "e7582de4767c",
+    "child_sum": 1.0,
+    "components": [
+     "alpha_rule"
+    ],
+    "epoch": 0,
+    "existing": false,
+    "iteration": 0,
+    "minibatch": [
+     "t6",
+     "t7",
+     "t8"
+    ],
+    "parent": 0,
+    "parent_sum": 0.0,
+    "step_type": "reflect",
+    "type": "decision",
+    "unchanged": false
+   },
+   {
+    "best": "e7582de4767c",
+    "candidate": "e7582de4767c",
+    "epoch": 0,
+    "how": "reflective",
+    "iteration": 0,
+    "parents": [
+     0
+    ],
+    "pareto_mean": 0.5,
+    "program": 1,
+    "step_type": "added",
+    "type": "decision"
+   },
+   {
+    "epoch": 1,
+    "iteration": 1,
+    "step_type": "merge_none",
+    "type": "decision"
+   },
+   {
+    "attempt": 1,
+    "call_key": [
+     "reflect",
+     1,
+     1,
+     0
+    ],
+    "epoch": 1,
+    "raw_output": "```\nBETA\n```",
+    "step_type": "reflect",
+    "system_prompt": "",
+    "type": "model_call",
+    "user_prompt": "I provided an assistant with the following instructions to perform a task for me:\n```\nRule two.\n```\n\nThe following are examples of different task inputs provided to the assistant along with the assistant's response for each of them, and some feedback on how the assistant's response could be better:\n```\n# Example 1\n## Inputs\nt5\n\n## Generated Outputs\n\n\n## Feedback\nThis trajectory got a score of 1.0.\n\n\n\n# Example 2\n## Inputs\nt4\n\n## Generated Outputs\n\n\n## Feedback\na category B item: the instruction must say BETA and never ALPHA\n\n\n\n# Example 3\n## Inputs\nt1\n\n## Generated Outputs\n\n\n## Feedback\nThis trajectory got a score of 1.0.\n\n\n```\n\nYour task is to write a new instruction for the assistant.\n\nRead the inputs carefully and identify the input format and infer detailed task description about the task I wish to solve with the assistant.\n\nRead all the assistant responses and the corresponding feedback. Identify all niche and domain specific factual information about the task and include it in the instruction, as a lot of it may not be available to the assistant in the future. The assistant may have utilized a generalizable strategy to solve the task, if so, include that in the instruction as well.\n\nProvide the new instructions within ``` blocks."
+   },
+   {
+    "accepted": true,
+    "child": "15726cba3beb",
+    "child_sum": 3.0,
+    "components": [
+     "beta_rule"
+    ],
+    "epoch": 1,
+    "existing": false,
+    "iteration": 1,
+    "minibatch": [
+     "t5",
+     "t4",
+     "t1"
+    ],
+    "parent": 1,
+    "parent_sum": 2.0,
+    "step_type": "reflect",
+    "type": "decision",
+    "unchanged": false
+   },
+   {
+    "best": "15726cba3beb",
+    "candidate": "15726cba3beb",
+    "epoch": 1,
+    "how": "reflective",
+    "iteration": 1,
+    "parents": [
+     1
+    ],
+    "pareto_mean": 1.0,
+    "program": 2,
+    "step_type": "added",
+    "type": "decision"
+   },
+   {
+    "epoch": 2,
+    "iteration": 2,
+    "step_type": "merge_none",
+    "type": "decision"
+   },
+   {
+    "epoch": 2,
+    "iteration": 2,
+    "minibatch": [
+     "t3",
+     "t2",
+     "t2"
+    ],
+    "parent": 2,
+    "step_type": "skip_perfect",
+    "type": "decision"
+   },
+   {
+    "epoch": 3,
+    "iteration": 3,
+    "minibatch": [
+     "t5",
+     "t2",
+     "t3"
+    ],
+    "parent": 2,
+    "step_type": "skip_perfect",
+    "type": "decision"
+   },
+   {
+    "epoch": 4,
+    "iteration": 4,
+    "minibatch": [
+     "t8",
+     "t6",
+     "t4"
+    ],
+    "parent": 2,
+    "step_type": "skip_perfect",
+    "type": "decision"
+   },
+   {
+    "epoch": 5,
+    "iteration": 5,
+    "minibatch": [
+     "t7",
+     "t1",
+     "t1"
+    ],
+    "parent": 2,
+    "step_type": "skip_perfect",
+    "type": "decision"
+   },
+   {
+    "epoch": 6,
+    "iteration": 6,
+    "minibatch": [
+     "t8",
+     "t4",
+     "t7"
+    ],
+    "parent": 2,
+    "step_type": "skip_perfect",
+    "type": "decision"
+   },
+   {
+    "epoch": 7,
+    "iteration": 7,
+    "minibatch": [
+     "t5",
+     "t6",
+     "t1"
+    ],
+    "parent": 2,
+    "step_type": "skip_perfect",
+    "type": "decision"
+   },
+   {
+    "epoch": 8,
+    "iteration": 8,
+    "minibatch": [
+     "t3",
+     "t2",
+     "t2"
+    ],
+    "parent": 2,
+    "step_type": "skip_perfect",
+    "type": "decision"
+   },
+   {
+    "epoch": 9,
+    "iteration": 9,
+    "minibatch": [
+     "t8",
+     "t3",
+     "t4"
+    ],
+    "parent": 2,
+    "step_type": "skip_perfect",
+    "type": "decision"
+   },
+   {
+    "epoch": 10,
+    "iteration": 10,
+    "minibatch": [
+     "t2",
+     "t5",
+     "t1"
+    ],
+    "parent": 2,
+    "step_type": "skip_perfect",
+    "type": "decision"
+   },
+   {
+    "epoch": 11,
+    "iteration": 11,
+    "minibatch": [
+     "t6",
+     "t7",
+     "t7"
+    ],
+    "parent": 2,
+    "step_type": "skip_perfect",
+    "type": "decision"
+   },
+   {
+    "epoch": 12,
+    "iteration": 12,
+    "minibatch": [
+     "t5",
+     "t7",
+     "t1"
+    ],
+    "parent": 2,
+    "step_type": "skip_perfect",
+    "type": "decision"
+   },
+   {
+    "epoch": 13,
+    "iteration": 13,
+    "minibatch": [
+     "t3",
+     "t8",
+     "t2"
+    ],
+    "parent": 2,
+    "step_type": "skip_perfect",
+    "type": "decision"
+   },
+   {
+    "epoch": 14,
+    "iteration": 14,
+    "minibatch": [
+     "t6",
+     "t4",
+     "t4"
+    ],
+    "parent": 2,
+    "step_type": "skip_perfect",
+    "type": "decision"
+   },
+   {
+    "epoch": 15,
+    "iteration": 15,
+    "minibatch": [
+     "t4",
+     "t2",
+     "t5"
+    ],
+    "parent": 2,
+    "step_type": "skip_perfect",
+    "type": "decision"
+   },
+   {
+    "epoch": 16,
+    "iteration": 16,
+    "minibatch": [
+     "t1",
+     "t8",
+     "t7"
+    ],
+    "parent": 2,
+    "step_type": "skip_perfect",
+    "type": "decision"
+   },
+   {
+    "epoch": 17,
+    "iteration": 17,
+    "minibatch": [
+     "t6",
+     "t3",
+     "t3"
+    ],
+    "parent": 2,
+    "step_type": "skip_perfect",
+    "type": "decision"
+   },
+   {
+    "epoch": 18,
+    "iteration": 18,
+    "minibatch": [
+     "t1",
+     "t4",
+     "t8"
+    ],
+    "parent": 2,
+    "step_type": "skip_perfect",
+    "type": "decision"
+   },
+   {
+    "epoch": 19,
+    "iteration": 19,
+    "minibatch": [
+     "t3",
+     "t2",
+     "t6"
+    ],
+    "parent": 2,
+    "step_type": "skip_perfect",
+    "type": "decision"
+   },
+   {
+    "epoch": 20,
+    "iteration": 20,
+    "minibatch": [
+     "t5",
+     "t7",
+     "t7"
+    ],
+    "parent": 2,
+    "step_type": "skip_perfect",
+    "type": "decision"
+   },
+   {
+    "epoch": 21,
+    "iteration": 21,
+    "minibatch": [
+     "t6",
+     "t8",
+     "t3"
+    ],
+    "parent": 2,
+    "step_type": "skip_perfect",
+    "type": "decision"
+   },
+   {
+    "epoch": 22,
+    "iteration": 22,
+    "minibatch": [
+     "t5",
+     "t7",
+     "t2"
+    ],
+    "parent": 2,
+    "step_type": "skip_perfect",
+    "type": "decision"
+   },
+   {
+    "epoch": 23,
+    "iteration": 23,
+    "minibatch": [
+     "t4",
+     "t1",
+     "t1"
+    ],
+    "parent": 2,
+    "step_type": "skip_perfect",
+    "type": "decision"
+   },
+   {
+    "epoch": 24,
+    "iteration": 24,
+    "minibatch": [
+     "t3",
+     "t2",
+     "t8"
+    ],
+    "parent": 2,
+    "step_type": "skip_perfect",
+    "type": "decision"
+   },
+   {
+    "epoch": 25,
+    "iteration": 25,
+    "minibatch": [
+     "t7",
+     "t5",
+     "t4"
+    ],
+    "parent": 2,
+    "step_type": "skip_perfect",
+    "type": "decision"
+   },
+   {
+    "epoch": 26,
+    "iteration": 26,
+    "minibatch": [
+     "t1",
+     "t6",
+     "t6"
+    ],
+    "parent": 2,
+    "step_type": "skip_perfect",
+    "type": "decision"
+   },
+   {
+    "epoch": 27,
+    "iteration": 27,
+    "minibatch": [
+     "t2",
+     "t6",
+     "t5"
+    ],
+    "parent": 2,
+    "step_type": "skip_perfect",
+    "type": "decision"
+   },
+   {
+    "epoch": 28,
+    "iteration": 28,
+    "minibatch": [
+     "t7",
+     "t3",
+     "t8"
+    ],
+    "parent": 2,
+    "step_type": "skip_perfect",
+    "type": "decision"
+   },
+   {
+    "epoch": 29,
+    "iteration": 29,
+    "minibatch": [
+     "t4",
+     "t1",
+     "t1"
+    ],
+    "parent": 2,
+    "step_type": "skip_perfect",
+    "type": "decision"
+   },
+   {
+    "epoch": 30,
+    "iteration": 30,
+    "minibatch": [
+     "t8",
+     "t3",
+     "t4"
+    ],
+    "parent": 2,
+    "step_type": "skip_perfect",
+    "type": "decision"
+   },
+   {
+    "epoch": 31,
+    "iteration": 31,
+    "minibatch": [
+     "t6",
+     "t5",
+     "t2"
+    ],
+    "parent": 2,
+    "step_type": "skip_perfect",
+    "type": "decision"
+   },
+   {
+    "epoch": 32,
+    "iteration": 32,
+    "minibatch": [
+     "t7",
+     "t1",
+     "t1"
+    ],
+    "parent": 2,
+    "step_type": "skip_perfect",
+    "type": "decision"
+   },
+   {
+    "epoch": 33,
+    "iteration": 33,
+    "minibatch": [
+     "t3",
+     "t4",
+     "t2"
+    ],
+    "parent": 2,
+    "step_type": "skip_perfect",
+    "type": "decision"
+   },
+   {
+    "epoch": 34,
+    "iteration": 34,
+    "minibatch": [
+     "t1",
+     "t7",
+     "t8"
+    ],
+    "parent": 2,
+    "step_type": "skip_perfect",
+    "type": "decision"
+   },
+   {
+    "epoch": 35,
+    "iteration": 35,
+    "minibatch": [
+     "t6",
+     "t5",
+     "t5"
+    ],
+    "parent": 2,
+    "step_type": "skip_perfect",
+    "type": "decision"
+   },
+   {
+    "epoch": 36,
+    "iteration": 36,
+    "minibatch": [
+     "t8",
+     "t6",
+     "t5"
+    ],
+    "parent": 2,
+    "step_type": "skip_perfect",
+    "type": "decision"
+   },
+   {
+    "epoch": 37,
+    "iteration": 37,
+    "minibatch": [
+     "t2",
+     "t3",
+     "t4"
+    ],
+    "parent": 2,
+    "step_type": "skip_perfect",
+    "type": "decision"
+   },
+   {
+    "epoch": 38,
+    "iteration": 38,
+    "minibatch": [
+     "t1",
+     "t7",
+     "t7"
+    ],
+    "parent": 2,
+    "step_type": "skip_perfect",
+    "type": "decision"
+   },
+   {
+    "epoch": 39,
+    "iteration": 39,
+    "minibatch": [
+     "t4",
+     "t7",
+     "t2"
+    ],
+    "parent": 2,
+    "step_type": "skip_perfect",
+    "type": "decision"
+   },
+   {
+    "epoch": 40,
+    "iteration": 40,
+    "minibatch": [
+     "t3",
+     "t8",
+     "t5"
+    ],
+    "parent": 2,
+    "step_type": "skip_perfect",
+    "type": "decision"
+   },
+   {
+    "epoch": 41,
+    "iteration": 41,
+    "minibatch": [
+     "t1",
+     "t6",
+     "t6"
+    ],
+    "parent": 2,
+    "step_type": "skip_perfect",
+    "type": "decision"
+   },
+   {
+    "action": "skipped",
+    "epoch": 41,
+    "reason": "the parts manifest has no 'test' part",
+    "step_type": "test_eval",
+    "type": "decision"
+   }
+  ],
+  "pool": {
+   "candidate_ids": [
+    "1018ab1be9ae",
+    "e7582de4767c",
+    "15726cba3beb"
+   ],
+   "discovered_at": [
+    0,
+    12,
+    24
+   ],
+   "parents": [
+    [
+     null
+    ],
+    [
+     0
+    ],
+    [
+     1
+    ]
+   ],
+   "pointers": [
+    1,
+    0,
+    0
+   ],
+   "subscores": [
+    {
+     "v1": 0.0,
+     "v2": 0.0,
+     "v3": 0.0,
+     "v4": 0.0,
+     "v5": 0.0,
+     "v6": 0.0
+    },
+    {
+     "v1": 1.0,
+     "v2": 0.0,
+     "v3": 1.0,
+     "v4": 0.0,
+     "v5": 1.0,
+     "v6": 0.0
+    },
+    {
+     "v1": 1.0,
+     "v2": 1.0,
+     "v3": 1.0,
+     "v4": 1.0,
+     "v5": 1.0,
+     "v6": 1.0
+    }
+   ]
+  },
+  "rng_state_tail": [
+   747480833,
+   3545787415,
+   3656373148,
+   228
+  ]
+ }
+}

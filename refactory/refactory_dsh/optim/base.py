@@ -1183,7 +1183,7 @@ class ProposalContext:
     #: or empty without the gate. Under ``pool`` the gate note says what the pool is.
     selection: str = ""
     #: Under ``pool``, whether a population parent picker (``archive``, ``evolutionary``,
-    #: ``islands``, ``map_elites``) chooses the parent from every judged candidate
+    #: ``islands``, ``map_elites``, ``pareto``) chooses the parent from every judged candidate
     #: rather than from the pool; the gate note says which (``_gate_note``).
     population_parents: bool = False
     #: What is there before each node of the edited graph, on every path that reaches

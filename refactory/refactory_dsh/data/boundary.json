@@ -65,6 +65,7 @@
     "refactory_dsh.optim.feedback",
     "refactory_dsh.optim.integrity",
     "refactory_dsh.optim.memory",
+    "refactory_dsh.optim.pareto",
     "refactory_dsh.optim.policies",
     "refactory_dsh.optim.random_optimizer",
     "refactory_dsh.optim.repair",
