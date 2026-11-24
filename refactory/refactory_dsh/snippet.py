@@ -62,7 +62,7 @@ import shutil
 import subprocess
 import sys
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Mapping, Sequence
 
 #: The code op, the code gate and the verdict gate, as ``call``/``evaluator`` names them.
 RUN = "refactory_dsh.snippet:run"
@@ -965,6 +965,23 @@ def _lead_word(line: str) -> tuple[str, str]:
     return (match.group(0), body[match.end():]) if match else ("", body)
 
 
+#: A tag a verdict may follow (``VERDICT: reloop``, ``**Verdict:** proceed``): the word,
+#: then a colon. Read only when the gate has no answer of that name.
+_TAG = "verdict"
+
+
+def _verdict_word(text: str, lower: dict[str, str]) -> tuple[str, str]:
+    """`_lead_word`, past a leading ``Verdict:`` tag: ``("reloop", " -- why")`` for
+    ``VERDICT: reloop -- why``. The word after the tag must itself be an answer, as a first
+    word must, so ``Verdict: do not proceed`` names none."""
+    word, rest = _lead_word(text)
+    if word.lower() == _TAG and _TAG not in lower:
+        after = rest.lstrip(_CLOSE)
+        if after.startswith(":"):
+            return _lead_word(after[1:])
+    return word, rest
+
+
 def _list_item(line: str) -> bool:
     """Whether a line is a list item (after any quoting), which is never a verdict."""
     return _BULLET.match(line.strip().lstrip(" \t>")) is not None
@@ -976,7 +993,7 @@ def _last_line_verdict(line: str, lower: dict[str, str]) -> tuple[str, str, bool
     separator and the ``tail``. ``None`` for anything else, a list item included."""
     if _list_item(line):
         return None
-    word, rest = _lead_word(line.strip().lstrip(" \t>"))
+    word, rest = _verdict_word(line.strip().lstrip(" \t>"), lower)
     label = lower.get(word.lower())
     if label is None:
         return None
@@ -1001,7 +1018,8 @@ def parse_verdict(text: str, labels: list[str]) -> tuple[str, str] | None:
        follows the separator.
 
     A line that is a list item (``- Halt: no``, ``1. proceed``) is never a verdict, first
-    or last, and neither is a code fence.
+    or last, and neither is a code fence. Either may carry a ``Verdict:`` tag before its
+    word (``VERDICT: reloop -- show B``), which is read past (`_verdict_word`).
 
     ``None`` otherwise -- nothing between the first word and the last line is read:
     "Do not proceed" names no verdict, rather than proceed, and neither does a last line
@@ -1013,7 +1031,7 @@ def parse_verdict(text: str, labels: list[str]) -> tuple[str, str] | None:
     body = str(text or "").strip()
     lines = body.splitlines()
     listed = bool(lines) and _list_item(lines[0])
-    word, rest = ("", body) if listed else _lead_word(body)
+    word, rest = ("", body) if listed else _verdict_word(body, lower)
     label = lower.get(word.lower())
     if label is not None:
         last = _last_line_verdict(lines[-1], lower) if len(lines) > 1 else None
@@ -1083,6 +1101,48 @@ def verdict(ctx: Any) -> Any:
                            "text with the answer, or puts it alone on the last line")
     label, reason = parsed
     return Verdict(label, reason=reason)
+
+
+# ── a verdict the writer did not name: asked again (`node_retry.settle_verdict`) ──
+
+#: The fresh call an agent gets when the file a verdict gate reads from it names no
+#: verdict: its own answer, and the gate's answers to reply with, alone.
+VERDICT_REASK = (
+    "You were asked to start your answer with one word: {labels}. Your answer, below, "
+    "starts with none of them and does not end with one alone on its last line, so the "
+    "pipeline cannot read which one it decides.\n\n<your-answer>\n{text}\n</your-answer>"
+    "\n\nReply with only the one word your answer decides: {labels}. Nothing else.")
+#: How much of the answer the re-ask quotes: its start and its end, where verdicts are.
+REASK_HEAD_CHARS, REASK_TAIL_CHARS = 2000, 8000
+#: The line written under the verdict a re-ask named, above the answer it decides: the
+#: gate's reason, and so the item's record, says how the verdict was read.
+REASKED_NOTE = ("[refactory: the answer below named no verdict; asked again for the word "
+                "alone, {node} answered {label!r}]")
+#: The same when the re-ask named none either and the gate's declared way on is taken.
+UNREADABLE_NOTE = ("[refactory: the answer below named no verdict, also when {node} was asked "
+                   "again ({why}); gate {gate!r} takes {label!r}, as it does when its loop "
+                   "cannot settle (on_exhausted: continue)]")
+
+
+def reask_prompt(text: str, labels: Sequence[str]) -> str:
+    """The re-ask (`VERDICT_REASK`) for an answer ``text`` that named none of ``labels``;
+    a long answer is quoted by its start and its end."""
+    body = str(text or "").strip()
+    if len(body) > REASK_HEAD_CHARS + REASK_TAIL_CHARS:
+        cut = len(body) - REASK_HEAD_CHARS - REASK_TAIL_CHARS
+        body = (f"{body[:REASK_HEAD_CHARS]}\n[... {cut} characters left out ...]\n"
+                f"{body[-REASK_TAIL_CHARS:]}")
+    return VERDICT_REASK.format(labels=" or ".join(labels), text=body)
+
+
+def names_verdict(text: str, labels: Sequence[str]) -> bool | None:
+    """Whether ``text`` names one of ``labels`` as a verdict gate reads it
+    (`parse_verdict`): ``True``, ``False`` when it names none, ``None`` when it names two
+    (which the gate refuses as it is: a re-ask would only add a third)."""
+    try:
+        return parse_verdict(text, list(labels)) is not None
+    except SnippetError:
+        return None
 
 
 # ── the shared grader-secret scan (E-secret) ──────────────────────────────

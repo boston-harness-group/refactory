@@ -6176,6 +6176,16 @@ class Optimizer:
             self.last_repair_refusal = list(outcome)
         return None
 
+    def review_wiring(self, ctx: ProposalContext, proposal: Proposal, warnings: Sequence[str],
+                      parent: Candidate) -> Proposal | None:
+        """The proposal with its wiring changed after it was shown the wiring warnings its
+        edit adds (`nn.validate.wiring_warnings`), or ``None`` to keep it as it is
+        (``Loop._wiring_check``). The default asks nothing and keeps it: an optimizer that
+        asks a model overrides it with one slim call (`AutoresearchOptimizer.review_wiring`).
+        After a call, ``last_wiring_answer`` holds what the proposer said."""
+        self.last_wiring_answer = ""
+        return None
+
     def repairs_used(self, epoch: int) -> int:
         """How many slim repair calls `repair_refused` made in ``epoch``."""
         return int(self.__dict__.get("_repair_calls", {}).get(epoch, 0))
