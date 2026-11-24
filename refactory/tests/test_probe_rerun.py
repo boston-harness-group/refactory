@@ -687,8 +687,9 @@ def test_the_base_checks_worktree_is_reused_and_never_reset(tmp_path, monkeypatc
     base_wt = _base_check_worktree(ctx)
     check = f"{sys.executable} -m pytest -q tests/test_calc.py"
     ctx.facts["check"] = check
-    key = base_check.cache_key(found.base, "", "", check)
-    base_check._write_targeted(ctx.workdir / base_check.TARGETED_CACHE_FILE, key, {}, prepared=True)
+    # The base check prepared it: the one record `run_base_check` and
+    # `targeted_base_failures` share (`base_check.mark_prepared`).
+    base_check.mark_base_prepared(ctx, found, base_wt, found.base)
 
     probe_rerun.rerun_probes(ctx)
 

@@ -841,6 +841,7 @@ The steps a mode uses to change a repository: where it works, what lands, how it
 | kind | name | signature |
 |---|---|---|
 | function | `apply_emission` | `(answer: 'str', found: 'worktree.Worktree', workdir: 'Path', *, from_worktree: 'bool' = False) -> 'tuple[dict[Path, str], tuple[Path, ...], str, list[str]]'` |
+| function | `check_steps` | `(ctx: 'Any', command: 'str', run: 'Any', *, beside_reviews: 'bool') -> 'Any'` |
 | function | `knob_names` | `() -> 'tuple[str, ...]'` |
 | function | `knobs` | `() -> 'dict[str, Knob]'` |
 | function | `locate` | `(ctx: 'Any', name: 'str', task: 'dict[str, Any]', *, in_worktree: 'bool \| None' = None, needs_worktree: 'tuple[str, ...]' = (), output_only: 'tuple[str, ...]' = ()) -> 'dict[str, Any]'` |
@@ -854,10 +855,11 @@ The steps a mode uses to change a repository: where it works, what lands, how it
 | function | `refused` | `(ctx: 'Any') -> 'str'` |
 | function | `remove_check_copy` | `(target: 'Path', run_id: 'str') -> 'None'` |
 | function | `report` | `(ctx: 'Any', name: 'str', payload: 'dict[str, Any]') -> 'dict[str, Any]'` |
-| function | `run_check` | `(ctx: 'Any', command: 'str', timeout: 'float', *, triage_prep: 'bool' = True, prepared: 'bool' = False, beside_reviews: 'bool' = False) -> 'Any'` |
+| function | `run_check` | `(ctx: 'Any', command: 'str', timeout: 'float', *, triage_prep: 'bool' = True, prepared: 'bool' = False, beside_reviews: 'bool' = False, per_step: 'bool' = False) -> 'Any'` |
 | function | `wants_worktree` | `(ctx: 'Any') -> 'bool'` |
 
 - **`apply_emission`** — Parse emit.txt and resolve edits against the run worktree, read-only.
+- **`check_steps`** — Run ``command`` once through ``run`` (a `run_check` call), as its marker script when
 - **`knob_names`** — The knobs `knobs` declares, for the prepare node's ``knobs``.
 - **`knobs`** — The knobs that say where a run works.
 - **`locate`** — Where the run works, as facts for the mode's prepare op to return.

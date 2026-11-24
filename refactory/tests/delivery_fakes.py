@@ -69,6 +69,18 @@ def draft(ctx: Any, *, fact: dict[str, Any]) -> None:
     ctx.facts["draft_delivery"] = fact
 
 
+def owe_whole_check(ctx: Any, *, counter: str, before: str, fail_flag: str = "") -> None:
+    """The reviewed commit's full check deselected the self-check's passes
+    (`delivery.record_deselected_check`), so no whole passing run stands for its tree (the
+    ledger `delivery.record_full_check` keeps is gone): how many checks ran so far goes to
+    ``before``, and ``fail_flag``, when given, is made so the check fails from now on."""
+    (Path(ctx.workdir) / delivery.PASSED_CHECKS).unlink(missing_ok=True)
+    delivery.record_deselected_check(ctx, worktree.recorded(ctx.workdir).head)
+    Path(before).write_text(str(len(Path(counter).read_text()) if Path(counter).exists() else 0))
+    if fail_flag:
+        Path(fail_flag).write_text("fail\n")
+
+
 def seen_head(ctx: Any, *, path: str) -> None:
     """The run's reviewed commit as delivery found it, into ``path``."""
     Path(path).write_text(worktree.recorded(ctx.workdir).head)
@@ -150,7 +162,7 @@ def stop_at(ctx: Any, *, counter: str, call: int) -> None:
 
 
 STEPS = {"move_main": move_main, "move_main_each": move_main_each, "stop_at": stop_at, "put_back": put_back, "untracked": untracked, "draft": draft,
-         "seen_head": seen_head, "run_git": run_git, "touch": touch, "seen_record": seen_record,
+         "seen_head": seen_head, "owe_whole_check": owe_whole_check, "run_git": run_git, "touch": touch, "seen_record": seen_record,
          "hook": hook, "absent": absent, "patch": patch}
 
 

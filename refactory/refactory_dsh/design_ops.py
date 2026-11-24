@@ -1811,10 +1811,30 @@ def _full_check(ctx: Any, command: str, check_timeout: int, prev_record: dict[st
     from refactory_dsh.create_ops import repair
     from refactory_dsh.failfast import detect_stuck, record_check_history
 
+    from refactory_dsh import base_check
+
+    # The tests the self-check passed on this very commit are not run again: they are
+    # deselected here and their passes merged in (`self_check_passed`), only beside the
+    # reviews, in the check copy, and only when the copy holds the same files beside the
+    # commit as the run's worktree did when the self-check ran (`base_check.residue`): a
+    # file the copy lacks could be what made a test pass. The check runs once, step by
+    # step when it is a chain (`base_check.run_chain`), so the comparison with the base
+    # reads each step's result from this run.
+    merged = _mergeable_passes(ctx, command, check_timeout) if beside_reviews else []
+    run_command, merged = base_check.with_deselected(command, merged)
     if beside_reviews:
-        result = repo_change.run_check(ctx, command, check_timeout, beside_reviews=True)
+        result = repo_change.check_steps(ctx, run_command, lambda script: repo_change.run_check(
+            ctx, script, check_timeout, beside_reviews=True), beside_reviews=True)
     else:
-        result = repo_change.run_check(ctx, command, check_timeout)
+        result = repo_change.check_steps(ctx, run_command, lambda script: repo_change.run_check(
+            ctx, script, check_timeout), beside_reviews=False)
+    if merged:
+        # A step whose every test was deselected ran none: pytest's exit 5 is then a pass.
+        base_check.settle_deselected(result, run_command)
+        # Delivery runs the whole suite on this commit (`delivery.whole_suite_owed`).
+        from refactory_dsh import delivery
+
+        delivery.record_deselected_check(ctx, str(ctx.facts.get("commit") or ""))
     detail = "\n".join((result.problem(), result.stdout or "", result.stderr or "")).strip()
     outcome = {"command": command, "status": "pass" if result.ok else evidence.check_failure_kind(
         result, budget=getattr(ctx, "budget", None)),
@@ -1822,6 +1842,11 @@ def _full_check(ctx: Any, command: str, check_timeout: int, prev_record: dict[st
         "timed_out": result.timed_out, "elapsed_s": result.elapsed_s,
         "check_mode": "full",
         "targeted_command": targeted_command}
+    if merged:
+        # Each passed in the self-check on this commit; the check did not run them again.
+        outcome["self_check_passed"] = len(merged)
+        detail = (detail + f"\n\n({len(merged)} test(s) that passed in the self-check on this "
+                  "commit were not run again)").strip()
     if check_attempt:
         # The prepared attempt this evidence belongs to: a review taken beside this
         # check binds to it (`authoring_evidence.current_problems`).
@@ -1838,7 +1863,6 @@ def _full_check(ctx: Any, command: str, check_timeout: int, prev_record: dict[st
 
     # Whether the new tests fail without the change is evidence for the reviewers, passing
     # or not; recorded before the receipt, which hashes it.
-    from refactory_dsh import base_check
     guardedness = None
     if worktree.recorded(ctx.workdir) is not None:
         ctx.set_fact("inherited_failures", [])
@@ -1877,7 +1901,10 @@ def _full_check(ctx: Any, command: str, check_timeout: int, prev_record: dict[st
             return repair(ctx, [detail])
         ctx.set_fact("validation", "(the check passed)")
         _checked = worktree.recorded(ctx.workdir)
-        if _checked is not None:
+        if _checked is not None and not merged:
+            # Only a run of the whole suite may stand for delivery's merged-result check:
+            # one that deselected the self-check's passes never does, so delivery then
+            # runs the whole suite once (order-dependent failures, residue).
             from refactory_dsh import delivery
             delivery.record_full_check(ctx, Path(_checked.path), command)
         ctx.write_json("check-record.json", {
@@ -2303,6 +2330,11 @@ def _fixup_self_check(ctx: Any, command: str, check_timeout: int, prev_record: d
                              "fixups_before": _fixups_used(ctx)}
     touched, changed_since = _fixup_changes(root, found, last)
     selection = self_check_selection(root, command, touched, prev_record, earlier)
+    # What the worktree holds beside the commit as the self-check runs: its passes are
+    # shared only with a check copy that holds the same (`_mergeable_passes`).
+    from refactory_dsh import base_check
+
+    here = base_check.residue(found) if found is not None else None
     prepass = targeted_prepass(
         prev_record, command,
         lambda cmd, timeout: repo_change.run_check(ctx, cmd, timeout, triage_prep=False,
@@ -2312,6 +2344,7 @@ def _fixup_self_check(ctx: Any, command: str, check_timeout: int, prev_record: d
         self_check_timeout_s=int(ctx.knob("self_check_timeout_s", 300)),
         alone=selection.alone,
     )
+    _record_self_check_passed(ctx, command, prepass.passed_ids, here)
     # The builder's next briefing: how long this self-check's tests took.
     ctx.set_fact("builder_tests",
                  builder_tests(command, prepass, [*earlier, {"timings": prepass.timings}], root))
@@ -2333,6 +2366,74 @@ def _fixup_self_check(ctx: Any, command: str, check_timeout: int, prev_record: d
                               unparsed="", prev_record=prev_record,
                               saved_base_unavailable=saved_base_unavailable, attempt=attempt,
                               command=command)
+
+
+#: The tests the last self-check passed, by `_self_check_key`: the full check on the
+#: same commit deselects them (`_full_check`).
+SELF_CHECK_PASSED = Path(".refactory") / "self-check-passed.json"
+
+
+def _self_check_key(ctx: Any, command: str) -> str:
+    """What a self-check's passes hold for: the attempt's tree, the check command, and the
+    run's generate and setup. Empty without a worktree or a readable tree."""
+    import hashlib
+
+    found = worktree.recorded(ctx.workdir)
+    if found is None:
+        return ""
+    try:
+        tree = worktree.git(Path(found.path), "rev-parse", f"{found.head}^{{tree}}").strip()
+    except ValueError:
+        return ""
+    return hashlib.sha256(json.dumps({
+        "tree": tree, "commit": found.head, "command": command,
+        "setup": str(ctx.facts.get("setup") or "").strip(),
+        "generate": str(ctx.facts.get("generate") or "").strip(),
+    }, sort_keys=True).encode()).hexdigest()
+
+
+def _record_self_check_passed(ctx: Any, command: str, passed: list[str],
+                              residue: str | None) -> None:
+    """Keep the tests this self-check passed for the full check on the same commit, with
+    what the worktree held beside the commit as they ran (`base_check.residue`). Only the
+    latest commit's are kept; the record lives in the run directory, so it never reaches
+    another run."""
+    path = Path(ctx.workdir) / SELF_CHECK_PASSED
+    key = _self_check_key(ctx, command)
+    if not key:
+        return
+    known = worktree._json(path)
+    same = known.get("key") == key and known.get("residue") == residue
+    ids = list(dict.fromkeys([*known.get("passed", []), *passed])) if same else list(passed)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"key": key, "residue": residue, "passed": ids}, indent=1) + "\n")
+
+
+def self_check_passed(ctx: Any, command: str, residue: str | None) -> list[str]:
+    """The tests a self-check passed on the attempt's current commit, with this command,
+    in a worktree that held ``residue`` beside the commit; none when it held anything else
+    or either could not be read."""
+    known = worktree._json(Path(ctx.workdir) / SELF_CHECK_PASSED)
+    key = _self_check_key(ctx, command)
+    if not key or known.get("key") != key or not residue or known.get("residue") != residue:
+        return []
+    return list(known.get("passed", []))
+
+
+def _mergeable_passes(ctx: Any, command: str, timeout: float) -> list[str]:
+    """The self-check's passes the full check in the check copy may merge in: the copy is
+    prepared first (the check then reuses it as it is) and must hold what the run's
+    worktree held when they ran (`self_check_passed`)."""
+    from refactory_dsh import base_check
+
+    known = worktree._json(Path(ctx.workdir) / SELF_CHECK_PASSED)
+    found = worktree.recorded(ctx.workdir)
+    if not known.get("passed") or found is None or found.head != str(ctx.facts.get("commit")):
+        return []
+    copy, _env, _home, problems, _fail = repo_change._check_copy(ctx, found, timeout)
+    if problems:
+        return []
+    return self_check_passed(ctx, command, base_check.residue(copy))
 
 
 def self_check_selection(root: Path, command: str, touched: list[str], prev_record: dict[str, Any],
