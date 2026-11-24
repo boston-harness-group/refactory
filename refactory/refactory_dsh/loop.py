@@ -6799,11 +6799,10 @@ class Loop(OuterLoop):
             **({"rejected": dict(rejected)} if rejected else {})}
 
         gated = self.selection_mode() or False
-        # The tally of each change tried against the noise (`memory.change_tally_lines`):
-        # one source for this call and, with the note it writes, the proposer's request.
+        # The tally of each change tried against the noise (`memory.change_tally_lines`),
+        # for this call; the proposer reads every change in its own ledger.
         tally = memory.change_tally_lines(tried, val_items=len(self._manifest_val_ids()),
                                           spread=self._rescore_spread(prev.id), gated=gated)
-        self._pending_tally = tally
         lineage = self._lineage_edits(prev, current)
         # The candidates whose edits the changes section shows whole (`memory.changes_lines`).
         section = (memory.changes_heading(rejected.get("noun") if rejected else None)
@@ -6931,9 +6930,7 @@ class Loop(OuterLoop):
                             "generation": record.get("generation"), "prev": record.get("prev"),
                             "curr": record.get("curr"),
                             **({"rejected": dict(record["rejected"])}
-                               if record.get("rejected") else {}),
-                            **({"tally": list(self._pending_tally)}
-                               if getattr(self, "_pending_tally", None) else {})}
+                               if record.get("rejected") else {})}
             record = {**record, "updated": True, "chars": len(note["text"])}
         else:
             self._memory = {**self._memory, "not_updated": {

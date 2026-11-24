@@ -9,8 +9,7 @@
 - **Mutation checks**: each operator's wiring switched off in turn, and its named check
   fails.
 - **The request** (target 5 of the plan): one line and one example per core operator, and
-  every composition example parses, uses only core operators and applies as written on
-  every seed it is rendered for.
+  each example that names this graph's steps applies as written.
 - **Programmatic use**: every operator applies with no text at all; the same operator on
   the same parent makes the same state; each costs about as many characters as a prompt
   patch.
@@ -706,7 +705,7 @@ def test_the_request_explains_each_core_operator_in_one_line_with_one_example():
     # A run that offers a tool step: each operator's line is said whole (without one,
     # its tools clause goes, `core_ops.without_tools`).
     text = _context("fuzz_draft_review", new_node_tools=True).render()
-    section = text.split("## Structural operators", 1)[1].split("Compositions built", 1)[0]
+    section = text.split("### The operations you may use", 1)[1].split("\n### ", 1)[0]
     for name in core_ops.CORE_OPS:
         lines = [line for line in section.splitlines() if line.startswith(f"- `{name}` (")]
         assert len(lines) == 1, (name, lines)
@@ -714,86 +713,12 @@ def test_the_request_explains_each_core_operator_in_one_line_with_one_example():
         assert text.count(core_ops.OPERATORS[name]["line"]) == 1, "said once in the request"
         example = json.loads(lines[0].split(" E.g. ", 1)[1])
         assert example["op"] == name
-    assert "none is the preferred shape; compose your own" in text
-
-
-@pytest.mark.parametrize("seed", sorted(sf.seeds()))
-def test_every_composition_example_uses_only_core_operators_and_applies_as_written(seed):
-    from refactory_dsh import seal
-
-    # A tool step is offered where its tools can run sealed, as the loop offers it.
-    sealed = seal.available()[0]
-    ctx = _context(seed, new_node_tools=sealed)
-    examples = base_mod.composition_examples(
-        ctx.catalogue, ctx.node_states, ctx.edges, protected=list(sf.Applier(
-            sf.seeds()[seed]).protected), code_nodes=CODE, tools=sealed,
-        knob_values={k["name"]: k["value"] for k in ctx.knobs})
-    titles = {title for title, _b in examples}
-    if seed == "fuzz_dataflow":
-        # Only plain ops and a literal prompt read after its anchor: a shape whose new step
-        # no later prompt takes is shown with the edit its refusal's hint names (a rewire
-        # of a later step, or a step taking over the graded output), never unread.
-        assert {"Several attempts and a choice",
-                "Another attempt beside it, sent exactly what it is sent"} <= titles, titles
-    if seed == "fuzz_draft_review":
-        assert {"Several attempts and a choice",
-                "Check a later step and send the work back to an earlier one",
-                "Another attempt beside it, sent exactly what it is sent",
-                "A background pass beside an experiment"} <= titles
-        assert ("A tool step before reasoning" in titles) == sealed, titles
-        # The code-step shapes are offered only where code steps can run (`snippet.available`).
-        code_titles = {"A simulation step, then an analysis of its results",
-                       "Iterative fitting: repeat a step until a code check passes"}
-        assert (code_titles <= titles) if CODE else not code_titles & titles, titles
-    for title, bundle in examples:
-        assert all(edit["op"] in core_ops.CORE_OPS for edit in bundle), title
-        json.loads(json.dumps(bundle))
-        applier = sf.Applier(sf.seeds()[seed])
-        parent = Candidate.from_state(applier.seed_state)
-        proposal = Proposal(edits=tuple(bundle), parent=parent.id)
-        out = applier.optimizer.attempt(proposal, parent, applier.invariants, True, (),
-                                        [parent.id], seed_state=applier.seed_state,
-                                        protected=applier.protected, graders=applier.graders)
-        assert isinstance(out, Candidate), (seed, title, out)
+    assert "Compositions built" not in text  # each operator's own example, nothing more
 
 
 #: The LiveMath modes a live run starts from: S1, whose only agent step ends its data pass,
 #: and S4, a fork of agents between plain ops.
 LIVE_MODES = ("livemath/solver", "livemath/skill_graph")
-
-
-@pytest.mark.parametrize("mode_name", LIVE_MODES)
-def test_every_composition_example_on_a_live_mode_applies_through_an_attempt(mode_name):
-    """The examples a request shows for the live modes' seed states, each applied through
-    the real attempt path with the mode's own protected steps, are accepted; S1 (one agent
-    that ends its pass) gets them too."""
-    import copy
-    from pathlib import Path
-
-    from refactory_dsh import registry
-    from refactory_dsh.optim import Optimizer
-    from refactory_dsh.optim.memory import state_view
-
-    _package, mode = registry.resolve(Path("."), mode_name)
-    state, protected = mode().state_dict(), tuple(mode().edit_protected())
-    view = state_view(state)
-    examples = base_mod.composition_examples(
-        nn_edits.catalogue("broad"), view.node_states, view.edges, protected=protected,
-        code_nodes=True, tools=True, knob_values={k["name"]: k["value"] for k in view.knobs})
-    titles = {title for title, _b in examples}
-    assert {"Several attempts and a choice",
-            "A tool step before reasoning"} <= titles, titles
-    for title, bundle in examples:
-        # A rewire names only steps the graph has or an earlier edit declares by 'id'.
-        declared = set(state["graph"]["nodes"]) | {e["id"] for e in bundle if "id" in e}
-        produced = {n for node in state["graph"]["nodes"].values()
-                    for n in [*(node.get("writes") or ()), *(node.get("produces") or ())]}
-        for edit in (e for e in bundle if e["op"] == "rewire"):
-            assert set(edit["sees"]) <= declared | produced, (title, edit)
-        parent = Candidate.from_state(copy.deepcopy(state))
-        out = Optimizer().attempt(Proposal(edits=tuple(bundle), parent=parent.id), parent, (),
-                                  False, (), protected=protected, record=False)
-        assert isinstance(out, Candidate), (mode_name, title, out)
 
 
 @pytest.mark.parametrize("seed", sorted(sf.seeds()))
@@ -818,20 +743,12 @@ def test_every_operator_example_that_names_this_graphs_steps_applies_as_written(
     assert named >= (6 if seed == "fuzz_draft_review" else 1)
 
 
-def test_the_compositions_rotate_and_name_this_graphs_steps():
-    first = _context("fuzz_draft_review", generation=0).render()
-    second = _context("fuzz_draft_review", generation=1).render()
-    head = lambda text: text.split("compose your own:", 1)[1].split("\n- ", 2)[1]  # noqa: E731
-    assert head(first) != head(second)
-    assert '"steps": ["draft"]' in first
-
-
 def test_the_answer_asks_a_structural_proposal_for_its_reasoning_and_shows_one_line():
     text = base_mod.answer_instructions(nn_edits.catalogue("broad"))
     assert '"addresses"' in text and '"flow_change"' in text
     assert '{"op": "insert", "after": "<existing step id>", "kind": "agent"' in text
     knob_only = base_mod.answer_instructions(nn_edits.catalogue("knob_only"))
-    assert '"addresses"' not in knob_only and "## Structural operators" not in knob_only
+    assert '"addresses"' not in knob_only and base_mod.STRUCTURAL_LEAD not in knob_only
 
 
 def test_a_knob_only_run_sees_no_operator():
@@ -1203,30 +1120,3 @@ def test_a_new_step_s_system_prompt_runs_alike_on_the_walker_and_the_spine(seed,
     _sound(applier, out, spine=True)
 
 
-@pytest.mark.parametrize("parsimony,item_mean,selection", [
-    (None, False, ""), (0.0, False, ""), (0.0, True, ""), (0.01, True, ""),
-    (0.01, False, "validation")])
-def test_the_compute_policy_is_repeated_where_the_operators_are_weighed(parsimony, item_mean,
-                                                                        selection):
-    """The run's compute-policy sentence (`compute_policy`) is said again under "Structural
-    operators", word for word, exactly when the request's top says it -- in the proposer's
-    request and in the analysts' list of changes, which share those lines; a parameter-only
-    run, with no operators, gets nothing new."""
-    from refactory_dsh.optim import analysts
-
-    ctx = _context("fuzz_draft_review", parsimony=parsimony, score_is_item_mean=item_mean,
-                   selection=selection)
-    text = ctx.render()
-    policy = base_mod.compute_policy(parsimony, item_mean=item_mean, gated=selection)
-    top = text.split("## The pipeline you may edit", 1)[0]
-    section = text.split("## Structural operators", 1)[1].split("\n## ", 1)[0]
-    changes = analysts._changes_text(ctx).split("## Structural operators", 1)[1]
-    if policy:
-        assert policy in top and policy in section and policy in changes
-        assert text.count(policy) == 2
-    else:
-        assert "Compute policy" not in text and "Compute policy" not in changes
-    import dataclasses
-
-    knob_only = dataclasses.replace(ctx, catalogue=nn_edits.catalogue("knob_only")).render()
-    assert knob_only.count("Compute policy") == (1 if policy else 0)

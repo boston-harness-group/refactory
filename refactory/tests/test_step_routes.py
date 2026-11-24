@@ -231,9 +231,7 @@ def _request(tmp_path, offered):
     seed.evaluated, seed.score = True, 0.5
     loop.population.append(seed)
     ctx = replace(loop._context(), step_routes=offered)
-    from refactory_dsh.optim import analysts
-
-    return ctx.render(), analysts._changes_text(ctx)
+    return (ctx.render(),)
 
 
 def test_the_request_says_route_once_and_only_when_the_run_offers_one(tmp_path):

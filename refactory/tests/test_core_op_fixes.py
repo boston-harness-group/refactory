@@ -713,17 +713,6 @@ def test_a_map_combine_s_to_is_honoured_and_two_tos_are_refused():
     assert isinstance(both, list) and "name it once" in both[0], both
 
 
-def test_the_s1_table_does_not_list_insert_at_solve_as_applying():
-    from refactory_dsh.optim import base
-    from test_operator_fit import _rows, _section
-
-    rows = _rows(_section(_mode("livemath/solver").state_dict()))
-    # Insert alone is refused there; with the take-over its refusal names, it applies.
-    assert "insert" not in rows["solve"][1].split("; ")[0].split(", "), rows["solve"]
-    assert "+ takes_over solve: insert" in rows["solve"][1], rows["solve"]
-    assert base.OPERATOR_FIT_CHARS == 8000
-
-
 def test_a_map_run_an_edit_removes_is_refused_not_a_crash():
     """Found by the fuzz walk: removing a map's run left its fork naming no node, and V6's
     map check read that node."""

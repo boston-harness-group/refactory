@@ -48,12 +48,11 @@ def test_with_fenced_a_sentence_in_a_fence_and_an_indented_fence_is_found():
     assert repeated_sentences(text) == []
 
 
-def test_the_compute_policy_may_be_said_twice_but_not_three_times():
-    """The compute policy is said at the top and again under "Structural operators"
-    (`request_sizes.INTENDED_TWICE`); a third time is a repeat."""
+def test_the_compute_policy_is_said_once():
+    """The compute policy is said once, at the top: twice is a repeat like any other."""
     from refactory_dsh.optim.base import compute_policy
 
     policy = compute_policy(0.01).rstrip(".")
     assert len(policy) >= 100
-    assert repeated_sentences(f"{policy}.\n\n{policy}.") == []
-    assert repeated_sentences(f"{policy}.\n\n{policy}.\n\n{policy}.") == [policy]
+    assert repeated_sentences(f"{policy}.") == []
+    assert repeated_sentences(f"{policy}.\n\n{policy}.") == [policy]

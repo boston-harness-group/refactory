@@ -30,7 +30,7 @@ import pytest
 from refactory_dsh.optim import ProposalContext, analysts, base, evidence
 from refactory_dsh.optim.random_optimizer import AutoresearchOptimizer
 from test_proposal_trajectories import (_CITING, NODES, _full, _livemath_sized, _ReaderClient,
-                                        _record, _TooLongOnce)
+                                        _TooLongOnce)
 
 TASK = ("Task: total the sales column for each year and write each year's total into the "
         "summary table on the second sheet, leaving every other cell as it is. The table "
@@ -161,21 +161,14 @@ def _shown_without_repeats(prompt: str, settled: frozenset[str] | None) -> list[
 def _views(record: dict[str, Any], settled: frozenset[str]) -> dict[str, tuple[str, Any]]:
     """The item rendered as each reader shows it: the proposer's (`base._trajectory`, its
     settings shown), an analyst's with and without settings (`analysts.item_text`),
-    memory's comparison (`memory._trace`) and the last edit's block (`_moved_block`,
-    against a parent whose replies all differ)."""
+    and memory's comparison (`memory._trace`)."""
     from refactory_dsh.optim import memory
 
-    parent = {**record, "passed": not record.get("passed"), "exchanges": [
-        {**e, "response": "earlier " + e["response"]} for e in record["exchanges"]]}
-    pair = {"child": "c", "parent": "p", "edit": [], "parent_records": [parent],
-            "child_records": [record]}
     return {
         "proposer": (base._trajectory(record, settled=settled), settled),
         "analyst": (analysts.item_text(record, settled=settled), settled),
         "analyst, no settings": (analysts.item_text(record), None),
-        "memory": (memory._trace({"prev": record}, "prev", False, settled), settled),
-        "last edit": ("\n".join(base._edit_change_lines([pair], settled=settled,
-                                                        room=10 ** 7)), settled)}
+        "memory": (memory._trace({"prev": record}, "prev", False, settled), settled)}
 
 
 def _assert_reads_back(record: dict[str, Any], settled: frozenset[str] = frozenset()) -> None:
@@ -479,21 +472,6 @@ def test_a_quote_keeps_its_label_as_written():
     _assert_reads_back(record)
 
 
-def test_the_last_edit_shows_a_looped_step_s_history_once():
-    """"What the last edit changed" renders a moved run the same way: the child's
-    conversation is said once, each later run naming the run that fed it."""
-    parent = {**_looped("a", 12, offset=100), "passed": True, "score": 1.0}
-    child = _looped("a", 12)
-    pair = {"child": "c", "parent": "p", "edit": [], "parent_records": [parent],
-            "child_records": [child]}
-    text = "\n".join(base._edit_change_lines([pair], settled=frozenset(), room=10 ** 7))
-    for k in range(1, 12):
-        assert text.count(f"Attempt {k} gave the wrong total in cell B{k + 1}") == 1, k
-    assert "Sees: solve's prompt (step 11), solve's reply (step 11)" in text
-    assert ("- Assistant: [same as solve's reply (step 11), each line after the first "
-            'prefixed "  "]') in text
-
-
 # -- 2. The request fits its room whatever the items' sizes -----------------------------
 
 
@@ -576,68 +554,6 @@ def test_a_request_refused_as_too_long_with_a_huge_item_is_asked_again_shorter(t
     assert proposals[-1].get("context_retry") is True and not proposals[-1].get("error")
 
 
-def _edit_pair(runs: int = 30, size: int = 20000) -> dict[str, Any]:
-    """The last edit broke an item whose step ran ``runs`` times, every run's reply moved:
-    even at the section's own floors its block is past its ceiling."""
-
-    def rec(passed: bool, side: str) -> dict[str, Any]:
-        return {"id": "a", "passed": passed, "score": float(passed), "prediction": side,
-                "exchanges": [{"node": "solve", "prompt": f"turn {k}",
-                               "response": f"{side} {k} " + f"{side[0]}{k} " * (size // 4)}
-                              for k in range(runs)]}
-
-    return {"child": "c", "parent": "p", "edit": [], "parent_records": [rec(True, "old")],
-            "child_records": [rec(False, "new")]}
-
-
-def test_the_last_edit_s_block_gives_way_when_the_request_would_pass_its_room():
-    """A forced pick past the room at its floors no longer keeps the request past it:
-    every text of the block is cut to one length to fit what the rest leaves, said in the
-    section and recorded; with too little left even at `SHOWN_TEXT_FLOOR` it is listed in
-    one line, saying why."""
-    pair = _edit_pair()
-    unbounded = ProposalContext(nodes=NODES, item_records=[_record("w1")], edit_pairs=[pair],
-                                request_room=0).render()
-    assert len(unbounded) > 300000  # past its own ceiling at the floors
-    room = 150000
-    ctx = ProposalContext(nodes=NODES, item_records=[_record("w1")], edit_pairs=[pair],
-                          request_room=room)
-    text = ctx.render()
-    assert len(text) <= room
-    assert "#### Item a -- broken (child c)" in text
-    said = re.search(r"every text in it cut to at most ([\d,]+) chars \(head and tail, "
-                     r"marked\) so that this request fits", text)
-    assert said and base.SHOWN_TEXT_FLOOR <= int(said.group(1).replace(",", "")) < 8000
-    steps = [o["step"] for o in ctx.omissions]
-    assert "what the last edit changed: cut to the request's room" in steps
-    assert sum(1 for s in steps if s in ("solve", "solve (parent)")) >= 60
-
-    tiny = ProposalContext(nodes=NODES, item_records=[_record("w1")], edit_pairs=[pair],
-                           request_room=len(unbounded) - 300000 - 20000)
-    text = tiny.render()
-    assert "#### Item a" not in text
-    line = next(line for line in text.splitlines() if line.startswith("- Item a -- broken"))
-    assert f"even with every text cut to {base.SHOWN_TEXT_FLOOR} chars its block passes" in line
-    assert "what the last edit changed: named only, past the request's room" in [
-        o["step"] for o in tiny.omissions]
-
-
-def test_items_in_full_and_the_last_edit_share_what_the_rest_leaves():
-    """Both past the room: each gets an even share of what the rest of the request
-    leaves (one that needs less is whole and leaves the rest to the other), so neither
-    takes it all."""
-    assert base._fair_shares([10, 100], 60) == [10, 50]
-    assert base._fair_shares([100, 100], 60) == [30, 30]
-    assert base._fair_shares([10, 20], 100) == [10, 20]
-    assert base._fair_shares([0, 50], 20) == [0, 20]
-    assert base._fair_shares([5, 5], -3) == [0, 0]
-    records = _records_with_huge_first()
-    text = ProposalContext(nodes=NODES, item_records=records, reader_findings=_CITING,
-                           edit_pairs=[_edit_pair()]).render()
-    assert len(text) <= base.PROPOSAL_ROOM
-    assert _full(text) == ["w20"] and "#### Item a -- broken (child c)" in text
-
-
 def test_a_request_within_its_room_is_not_cut():
     """The rule is unchanged when everything fits: items whole, nothing marked."""
     records = [_livemath_sized(f"w{i:02d}") for i in range(4)]
@@ -649,73 +565,15 @@ def test_a_request_within_its_room_is_not_cut():
 
 
 def test_a_request_that_gives_way_still_fills_its_room():
-    """Only what does not fit is cut. The last edit's broken item is the item
-    "Trajectories" shows first: shown whole there, the edit's block names it; once it is
-    cut there, the block shows it itself and grows. The shares are made again from what
+    """Only what does not fit is cut: the room for items in full is made again from what
     each render took, so the request is not cut far below its room (one pass on the
     first render's sizes left a SpreadsheetBench request at 278k of 400k)."""
     records = _records_with_huge_first("w00")
-    child = records[0]
-    parent = {**child, "passed": True, "score": 1.0,
-              "exchanges": [{**e, "response": "old " + e["response"]}
-                            for e in child["exchanges"]]}
     cites = [{"group": 1, "items": [], "success_patterns": [],
               "failure_patterns": [{"pattern": "A", "step": "s", "items": ["w00"],
                                     "evidence": ["qa"]}]}]
-    pair = {"child": "c", "parent": "p", "edit": [], "parent_records": [parent],
-            "child_records": [child]}
-    whole = ProposalContext(nodes=NODES, item_records=records, reader_findings=cites,
-                            edit_pairs=[pair], request_room=0).render()
-    assert "Child's reply: as under \"Trajectories of the candidate being edited\"" in whole
-    ctx = ProposalContext(nodes=NODES, item_records=records, reader_findings=cites,
-                          edit_pairs=[pair])
-    text = ctx.render()
+    text = ProposalContext(nodes=NODES, item_records=records, reader_findings=cites).render()
     assert 0.9 * base.PROPOSAL_ROOM < len(text) <= base.PROPOSAL_ROOM, len(text)
-    assert _full(text) == ["w00"] and "#### Item w00 -- broken (child c)" in text
-    assert "Child's reply: as under" not in text  # cut there, so shown here
-
-
-def test_a_block_named_in_one_line_leaves_its_room_to_the_items():
-    """A broken item whose step ran 700 times does not fit even cut to the floor, so it
-    is named in one line: it asks for no room then, and the items in full have it (the
-    request was 207,873 of 400,000 characters when it kept its share)."""
-    ctx = ProposalContext(nodes=NODES, item_records=_records_with_huge_first(),
-                          reader_findings=_CITING, edit_pairs=[_edit_pair(runs=700)])
-    text = ctx.render()
-    assert 0.9 * base.PROPOSAL_ROOM < len(text) <= base.PROPOSAL_ROOM, len(text)
-    left = [o["room_left"] for o in ctx.omissions if "named only" in o["step"]]
-    assert left and left[0] > 0.25 * base.PROPOSAL_ROOM, left
-    named = next(line for line in text.splitlines() if line.startswith("- Item a -- broken"))
-    assert "not shown whole: even with every text cut to" in named
-    assert _full(text) == ["w20"]
-    # Said with the share it was first named at, not the limit it keeps once named.
-    share = int(re.search(r"passes the ([\d,]+) chars", named).group(1).replace(",", ""))
-    assert share > 0.25 * base.PROPOSAL_ROOM, named
-
-
-def test_an_item_named_leaves_its_room_to_the_last_edit():
-    """The mirror: an item in full too long even cut to the floor is named, and the last
-    edit's block, itself past the room, has the room it leaves."""
-    records = _records_with_huge_first()
-    records[0] = _huge("w20", steps=1500, size=2000)
-    text = ProposalContext(nodes=NODES, item_records=records, reader_findings=_CITING,
-                           edit_pairs=[_edit_pair(runs=60)]).render()
-    assert 0.9 * base.PROPOSAL_ROOM < len(text) <= base.PROPOSAL_ROOM, len(text)
-    assert _full(text) == [] and "#### Item a -- broken (child c)" in text
-
-
-def test_a_request_refused_with_only_an_oversized_last_edit_is_asked_again_shorter(tmp_path):
-    """The larger part of the run's failure: the last edit's block alone past the room.
-    The request fits it, and the retry at half its length is shorter still."""
-    client = _TooLongOnce()
-    optimizer = AutoresearchOptimizer(client)
-    optimizer.trace_path = tmp_path / "optimizer_trace.jsonl"
-    optimizer.propose(ProposalContext(nodes=NODES, item_records=[_record("w1")],
-                                      edit_pairs=[_edit_pair(runs=60)]), 1, [])
-    first, second = client.proposals[-2:]
-    assert len(first) + len(optimizer._system) <= base.PROPOSAL_ROOM  # noqa: SLF001
-    assert len(second) <= len(first) // 2
-    assert "#### Item a -- broken (child c)" in second
 
 
 def test_what_renderings_keep_lasts_one_pass_and_is_bounded():

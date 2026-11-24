@@ -62,7 +62,7 @@ def test_every_sibling_of_the_last_round_is_compared_with_its_parent(tmp_path, m
 
 def test_every_sibling_s_changed_items_are_shown():
     """Two children with three changed items each: every one of each child is named under
-    its own child, and the items shown whole are picked from each child in turn."""
+    its own child, in one line."""
     def record(item: str, passed: bool) -> dict[str, Any]:
         return {"id": item, "passed": passed, "score": float(passed),
                 "exchanges": [{"node": "s", "prompt": "p", "response": "z" * 2000}]}
@@ -76,9 +76,7 @@ def test_every_sibling_s_changed_items_are_shown():
     assert "### Child A of p" in text and "### Child B of p" in text
     for child in "AB":
         for k in range(3):
-            assert (f"#### Item i{k} -- broken (child {child})" in text) != (
-                f"- Item i{k} -- broken (child {child})" in text)
-        assert f"#### Item i0 -- broken (child {child})" in text, "each child's first pick"
+            assert text.count(f"- Item i{k} -- broken (child {child})") == 1
 
 
 # ── a reloop the redone step cannot see, on both runtimes ───────────────────

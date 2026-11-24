@@ -226,6 +226,7 @@ def test_a_finding_names_where_in_the_graph_and_only_its_batchs_items():
                               "knobs": ["style"], "structure": "no check"}
     assert first["items"] == ["t1"] and first["not_in_batch"] == ["v1"] and first["support"] == 1
     assert first["impact"] == "high" and first["source"] == "failure"
+    assert "change" not in first, "an analyst's suggested change is not kept"
     assert analysts.parse_findings({"patterns": []}, "failure", ["t1"]) is None
 
 
@@ -285,9 +286,9 @@ def test_the_final_merge_ranks_and_the_request_shows_the_ranked_list():
     assert ("3 failed item(s) in 2 batch(es) and 1 passed item(s) in 1 batch(es) of up to 2"
             in section)
     assert ('1. [failure; 2 item(s): f0, f1; impact high; from 2 findings] FIRST-RANKED -- '
-            'where: step `final`; edge `draft -> final` -- change: CHANGE-IT -- evidence: "Q1"'
-            in section)
-    assert "2. [success; 1 item(s): s0] SECOND-RANKED -- where: unclear -- keep: KEEP-IT" in section
+            'where: step `final`; edge `draft -> final` -- evidence: "Q1"' in section)
+    assert "2. [success; 1 item(s): s0] SECOND-RANKED -- where: unclear" in section
+    assert "CHANGE-IT" not in section and "KEEP-IT" not in section, "a merge's advice is dropped"
     assert "x1" not in section, "an id no analyst read is dropped"
 
 
@@ -1338,25 +1339,23 @@ def test_context_retries_are_reported():
 # ── the findings are shown whole ───────────────────────────────────────────
 
 
-LONG_CHANGE = "Rewrite the decide prompt:\n## Rules\n- line one\n- line two\n" + "c" * 1400
-#: The D-run shape: a finding and its change past the old 600-character cut, six quotes,
-#: a structure note past the old 200, and both a change and what to keep.
-FULL = {"source": "failure", "finding": "F" * 900, "change": LONG_CHANGE, "preserve": "KEEP-TOO",
+LONG_FINDING = ("F" * 900 + "\nThe decide prompt reads:\n## Rules\n- line one\n- line two\n"
+                + "c" * 1400)
+#: The D-run shape: a finding past the old 600-character cut quoting a prompt of several
+#: lines, six quotes and a structure note past the old 200.
+FULL = {"source": "failure", "finding": LONG_FINDING,
         "where": {"nodes": ["final"], "structure": "S" * 400}, "items": ["f0"],
         "evidence": [f"QUOTE-{k} " + "q" * 300 for k in range(6)]}
 
 
-def test_a_finding_is_shown_whole_with_its_line_breaks_quotes_and_both_actions():
+def test_a_finding_is_shown_whole_with_its_line_breaks_and_quotes():
     section = "\n".join(analysts.section_lines({"findings": [FULL], "batches": []}))
-    quoted = evidence.quoted(LONG_CHANGE)
+    quoted = evidence.quoted(LONG_FINDING)
     assert "F" * 900 in section and quoted in section, "no 600-character cut"
     assert "\n## Rules\n- line one\n- line two\n" in section, "byte-exact, its layout kept"
     assert own_headings(section) == ["## What the analysts found, ranked"], "fenced: no heading"
     assert "S" * 400 in section
     assert all(f"QUOTE-{k} " + "q" * 300 in section for k in range(6)), "every quote, whole"
-    assert f"-- change: {quoted} -- keep: KEEP-TOO" in section, "a failure's keep is kept"
-    success = {**FULL, "source": "success"}
-    assert "-- keep: KEEP-TOO -- change: " in analysts.finding_line(1, success)
     assert "[cut:" not in section
 
 
@@ -1368,17 +1367,6 @@ def test_findings_past_the_sections_room_are_cut_to_fit_and_each_cut_is_said():
     assert len("\n".join(lines)) <= analysts.SECTION_CHARS
     assert all("FINDING-" in line and "… [cut: " in line for line in shown)
     assert "more finding(s) not shown" not in "\n".join(lines)
-
-
-def test_the_op_catalogue_reaches_the_analysts_whole_in_the_proposer_s_rows():
-    long = "Splice a node in after another " + "d" * 300 + " END."
-    ctx = replace(_ctx([_rec("f0", False)]),
-                  catalogue=[{"op": "insert_after", "description": long}])
-    assert "\n".join(base.operation_lines(ctx.catalogue, ctx.node_states, ctx.edges,
-                                           knob_values={k["name"]: k["value"]
-                                                        for k in ctx.knobs})) \
-        == analysts._changes_text(ctx)
-    assert f"| insert_after | null | null |  | {long} |" in analysts._changes_text(ctx)
 
 
 def test_an_errored_items_error_is_said_once():

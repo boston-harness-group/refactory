@@ -37,17 +37,21 @@ def _accepted(run: Run, seed: Candidate, op: str, rng: random.Random) -> Candida
             outcome = run.attempt(Proposal(edit=edit, parent=seed.id), seed, record=False)
             if isinstance(outcome, Candidate):
                 return outcome
-    # An operator whose new steps no later prompt here can take alone (copies of a step
-    # making no fact) is taken in a composition that gives them a reader (E-unread).
-    from refactory_dsh.optim import base
+    # Copies of a step that makes no fact have no reader alone (E-unread): parallel
+    # attempts are taken with a choice that takes over the step's outputs.
+    if op == "parallelize":
+        from refactory_dsh.nn.graph import Graph
 
-    graph = seed.state["graph"]
-    for _title, bundle in base.composition_examples(
-            nn_edits.catalogue("broad"), list(graph["nodes"].values()), list(graph["edges"]),
-            knob_values={k: v["value"] for k, v in seed.state["knobs"].items()}):
-        if bundle[0]["op"] == op:
-            outcome = run.attempt(Proposal(edits=tuple(bundle), parent=seed.id), seed,
-                                  record=False)
+        graph = Graph.from_state(seed.state["graph"])
+        for step in (n for n, node in graph.nodes.items() if node.kind == "agent"):
+            choose = f"{step}_choose"
+            bundle = (
+                {"op": "parallelize", "steps": [step], "copies": 2},
+                {"op": "insert", "after": core_ops.parallel_join_id(graph, step),
+                 "kind": "agent", "id": choose, "text": "pick the best attempt"},
+                {"op": "insert", "after": choose, "kind": "op", "call": core_ops.select_call(),
+                 "takes_over": step})
+            outcome = run.attempt(Proposal(edits=bundle, parent=seed.id), seed, record=False)
             if isinstance(outcome, Candidate):
                 return outcome
     return None

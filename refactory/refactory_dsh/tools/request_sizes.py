@@ -61,12 +61,6 @@ def repeated_share(text: str) -> float:
 REPEAT_SENTENCE = 100
 
 
-#: Sentences a request says twice on purpose, by their opening words: the run's compute
-#: policy (`optim.base.compute_policy`), at the top and again under "Structural
-#: operators", where the options are weighed. Each is a repeat only when said a third time.
-INTENDED_TWICE = ("Compute policy:",)
-
-
 def repeated_sentences(text: str, shortest: int = REPEAT_SENTENCE, *,
                        fenced: bool = False) -> list[str]:
     """Each sentence of ``shortest``+ characters that ``text`` says more than once, read
@@ -80,7 +74,7 @@ def repeated_sentences(text: str, shortest: int = REPEAT_SENTENCE, *,
     settings and again inside an item's prompt are the same sentence, wherever each is
     fenced and however indented. Without it (the default), fenced text is not checked.
     Anything shorter than ``shortest`` is never checked (step names, short table cells
-    and labels repeat by design). A sentence in `INTENDED_TWICE` may be said twice."""
+    and labels repeat by design)."""
     plain = []
     for line in (text.splitlines() if fenced else _outside_fences(text)):
         if fenced and re.match(r"^\s*`{3,}", line):
@@ -95,8 +89,7 @@ def repeated_sentences(text: str, shortest: int = REPEAT_SENTENCE, *,
                 norm = " ".join(part.replace("`", "").replace("**", "").split()).rstrip(".;")
                 if len(norm) >= shortest:
                     counts[norm] += 1
-    return [sentence for sentence, n in counts.items()
-            if n > (2 if sentence.startswith(INTENDED_TWICE) else 1)]
+    return [sentence for sentence, n in counts.items() if n > 1]
 
 
 def sections(text: str) -> list[tuple[str, int]]:

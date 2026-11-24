@@ -1,8 +1,10 @@
 """The memory pass: SkillOpt's optimizer meta skill, for the model proposer, over a graph.
 
 Once per epoch, from epoch 2, before the epoch's proposal, the optimizer's model
-compares two rollouts on the same train items and writes ONE memory note: an
-optimizer-only note on how to analyse, merge and propose changes in this run. It is
+compares two rollouts on the same train items and writes ONE memory note: the run's
+record, facts only -- each change tried, whether it was kept, not kept or refused and
+why, which train items it fixed and broke, what keeps failing, and short observations
+of what the traces show; never advice (`MEMORY_SYSTEM`, `without_advice`). It is
 the loop's cross-round memory, shown to every analyst call, every merge call and the
 proposal request (`format_context`, `request_lines`). It never edits the graph.
 
@@ -32,8 +34,8 @@ SkillOpt's mechanism (``skillopt/optimizer/meta_skill.py``, ``slow_update.py``, 
   evaluated, with its train fixed/broken counts and the gate's word, or refused before it
   ran, with why (`tried_lines`; the facts the proposal request already shows, never a
   validation score), and a tally per change, never per kind -- so a pass with
-  nothing kept still sees what was tried; the previous note with "reflect on whether it
-  improved or harmed" (meta_skill.py:51-60), and the comparison by category
+  nothing kept still sees what was tried; the previous record, to carry its facts
+  forward, and the comparison by category
   (slow_update.py:287-349): a summary, then regressions (highest priority),
   persistent failures, improvements, each item with both outcomes, answers, grader
   reasons and both full traces, then stable successes without traces. SkillOpt never
@@ -46,11 +48,12 @@ SkillOpt's mechanism (``skillopt/optimizer/meta_skill.py``, ``slow_update.py``, 
   (``SYNTHESIS_SYSTEM``). A larger room makes fewer calls; no trace is cut, except a
   pair longer than the room on its own (counted). A call refused as longer than the
   model's context is retried once at half size.
-- **What it writes**: ``{"reasoning", "memory"}`` (``meta_skill_content``), the prompt
-  being SkillOpt's ``meta_skill.md`` for a graph, its "which kinds of edit help" asked
-  instead per change tried: what it was, how it moved the items and why, and what to
-  try next; a kind judged in general only from several different designs that agree. SkillOpt sets no length; its real runs
-  wrote 3.4-5.8k characters, so the note is asked for and kept within ``MEMORY_CHARS``.
+- **What it writes**: ``{"reasoning", "memory"}`` (``meta_skill_content``). Unlike
+  SkillOpt's ``meta_skill.md`` coach note, the note is a factual record with no next
+  steps, priorities, lessons or regression-risk advice, and no claim about what can or
+  cannot work: a later call reads facts, and the proposer alone designs. A section of
+  the answer headed as advice is dropped (`without_advice`). SkillOpt sets no length;
+  its real runs wrote 3.4-5.8k characters, so the note is kept within ``MEMORY_CHARS``.
 - **How it is shown**: SkillOpt's ``format_meta_skill_context`` wording (meta_skill.py
   18-30), to analysts, merges and the proposal request.
 
@@ -65,6 +68,7 @@ from __future__ import annotations
 
 import json
 import random
+import re
 from typing import Any, Mapping, Sequence
 
 from . import evidence
@@ -168,12 +172,10 @@ def counts(entries: Sequence[Mapping[str, Any]]) -> dict[str, int]:
 
 
 MEMORY_SYSTEM = """\
-You are an optimizer-coach for a system that optimizes an AI pipeline: a graph of steps
-(nodes) connected by edges, each step configured by settings (knobs) such as its prompt.
-
-Your job is not to solve tasks directly and not to write instructions for the pipeline.
-Your job is to write a compact OPTIMIZER-SIDE memory that helps future optimizer calls
-produce better changes to the pipeline in this run.
+You keep the record of a run that optimizes an AI pipeline: a graph of steps (nodes)
+connected by edges, each step configured by settings (knobs) such as its prompt. Each
+change the optimizer tried was evaluated on train items and then kept or not kept, or
+it was refused before it ran. Later optimizer calls read your record as facts.
 
 ## What You Receive
 
@@ -183,49 +185,32 @@ produce better changes to the pipeline in this run.
 3. Every change the optimizer tried this epoch: each one evaluated, with what it fixed
    and broke and whether it was kept, and each one refused before it ran, with why.
 4. A longitudinal comparison on the SAME sampled items under those two pipelines.
-5. The previous optimizer memory, if one existed.
+5. The previous record, if one existed.
 
-## Your Goal
+## What The Record Holds
 
-Write a concise memory that improves future optimizer behavior in stages such as
-failure analysis, success analysis, merging findings, and proposing and ranking
-changes.
+- Each change tried, this epoch and as the previous record holds earlier ones: what it
+  was (the step it changed or added, what a new step or judge was told to do or check,
+  where it sits, what it sends back, its limits, what text it changed); whether it was
+  kept, not kept or refused, and why; which train items it fixed and which it broke.
+- What keeps failing: the items, and where in the pipeline the traces show it starts.
+- At most a few short observations of what the traces show happened, each naming its
+  items.
 
-This memory should capture things like:
-- For each change tried: what it was -- the step it changed or added, what a new step
-  or judge was told to do or check, where it sits and where it sends work back, its
-  limits, what text it changed -- how it moved the items (which it fixed, which it
-  broke) and why, from the comparison and the traces.
-- What to try next given that: what to keep, what in a change that hurt to revise (its
-  instructions or criteria, its place, what it sends back, its limit), and what to try
-  instead.
-- What level of detail works best for a change here: a prompt's wording, a new step's
-  job, a judge's criteria, a step's place, its limits.
-- What failure-repair patterns should be prioritized.
-- What regression risks future optimizer calls should guard against.
+## Rules
 
-## Important Constraints
-
-- Address the FUTURE OPTIMIZER directly, not the pipeline.
-- Focus on how to choose and write better changes.
-- Use evidence from the comparison, not generic advice.
-- Write each lesson about the change that was tried, named by what it did (for example
-  "the judge after step X that checks Y sent right answers back, and step X then
-  dropped them"), not about every change of its kind (every loop, every new step,
-  every prompt edit): two changes of one kind differ in what decides their effect.
-- Say something about a kind of change in general only when several different designs
-  of that kind were tried (this epoch, or as the previous memory records) and agree.
-  Never from one design, however large its effect.
+- Facts only, in the past tense, from the evidence in front of you or the previous
+  record. Cite item ids.
+- Write nothing about what to do next: no recommendations, next steps, priorities,
+  lessons, meta-lessons, principles or regression risks to guard against, and nothing
+  a change should, could or must do, keep or avoid.
+- Make no claim about what can or cannot work, be built or be edited, and do not judge
+  a kind of change in general.
 - A result inside the noise the tally gives is weak evidence even about that change:
-  say how it moved its items, not that it failed.
-- Advise only on changes with evidence in front of you: this epoch's tries, or what
-  the previous memory records of earlier ones. Do not advise for or against changes
-  nobody tried, and do not list them.
-- Keep it compact and high-signal. Prefer a few durable principles.
-- Revise or remove parts of the previous memory if they did not help, or if they
-  judge a kind of change from one design.
-- Do not output instructions for the pipeline's own steps.
-- Do not restate the whole pipeline; summarize editing strategy.
+  say its counts, not a verdict.
+- Keep the previous record's facts that still hold; drop what the evidence contradicts.
+- Do not output instructions for the pipeline's own steps, and do not restate the whole
+  pipeline.
 
 You reply with JSON only."""
 
@@ -235,20 +220,21 @@ SYNTHESIS_SYSTEM = MEMORY_SYSTEM.replace(
     "4. A longitudinal comparison on the SAME sampled items under those two pipelines.",
     "4. A longitudinal comparison on the SAME sampled items under those two pipelines,\n"
     "   read in parts by comparison calls: their observations, each citing its items.",
-).replace("- Use evidence from the comparison, not generic advice.",
-          "- Use evidence from the comparison (the observations), not generic advice.")
+).replace("- Facts only, in the past tense, from the evidence in front of you or the previous\n"
+          "  record.",
+          "- Facts only, in the past tense, from the evidence in front of you (the\n"
+          "  observations) or the previous record.")
 
 COMPARE_SYSTEM = """\
-You read evidence for an optimizer-coach in a system that optimizes an AI pipeline: a
+You read evidence for the record keeper of a system that optimizes an AI pipeline: a
 graph of steps (nodes) connected by edges, each step configured by settings (knobs)
 such as its prompt.
 
 Your job is not to solve tasks directly and not to write instructions for the pipeline.
 You read one part of a longitudinal comparison: the SAME sampled items under two
 pipelines (or two rollouts of one pipeline), each item with both full traces. Another
-call reads your observations, with those of the other parts, and writes a compact
-OPTIMIZER-SIDE memory that helps future optimizer calls produce better changes to the
-pipeline in this run.
+call reads your observations, with those of the other parts, and writes the run's
+record: a short factual account of what was tried and what happened.
 
 ## What You Receive
 
@@ -258,15 +244,14 @@ pipeline in this run.
 
 ## Your Goal
 
-Write observations for the future optimizer: what regressed, what improved, what
-persistently fails, and why -- where in the pipeline the traces show it starts (a step,
-a setting, the data passed along an edge, the structure), and whether the change
-between the pipelines explains it.
+Write observations: what regressed, what improved, what persistently fails -- where in
+the pipeline the traces show it starts (a step, a setting, the data passed along an
+edge, the structure), and whether the change between the pipelines explains it.
 
 ## Important Constraints
 
-- Address the FUTURE OPTIMIZER directly, not the pipeline.
-- Use evidence from the traces, not generic advice: cite the items and quote briefly.
+- Report what happened, from the traces: cite the items and quote briefly.
+- Write nothing about what to do next, and make no claim about what can or cannot work.
 - Patterns shared by several items first; say when one holds for a single item.
 - Report what these traces show; leave verdicts on the changes tried to the call that
   weighs each of them against these observations, and judge no kind of change in
@@ -280,7 +265,7 @@ def compare_answer_text() -> str:
     return ("Respond ONLY with a valid JSON object:\n"
             "{\n"
             '  "observations": [{"category": "regressed|persistent_fail|improved|stable_success",\n'
-            '                    "observation": "<what happened and why, for the optimizer>",\n'
+            '                    "observation": "<what happened, from the traces>",\n'
             '                    "items": ["<item id>", ...],\n'
             '                    "evidence": ["<a short verbatim quote from a trace>", ...]}]\n'
             "}\n"
@@ -318,19 +303,54 @@ def parse_observations(payload: Any) -> list[dict[str, Any]] | None:
 def answer_text(chars: int = MEMORY_CHARS) -> str:
     return ("Respond ONLY with a valid JSON object:\n"
             "{\n"
-            '  "reasoning": "<brief reflection on what changes helped or hurt>",\n'
-            '  "memory": "<compact optimizer-side guidance for future analysis, merging '
-            f'and proposals, at most {chars} characters>"\n'
+            '  "reasoning": "<brief: what the evidence shows>",\n'
+            '  "memory": "<the record: facts only, no advice, at most '
+            f'{chars} characters>"\n'
             "}")
 
 
+#: A heading that opens advice rather than record (`without_advice`): next steps,
+#: priorities, recommendations, lessons, principles, regression risks.
+ADVICE_HEADING = re.compile(
+    r"(?i)\b(next|to try|try next|recommend\w*|suggest\w*|priorit\w*|lessons?|"
+    r"meta-?lessons?|principles?|advice|guidance|risks?|should|avoid|strategy|"
+    r"what works best)\b")
+
+
+def without_advice(note: str) -> str:
+    """``note`` without its advice: every Markdown section (a heading line and the lines
+    up to the next heading of the same or a higher level) whose heading names advice
+    (`ADVICE_HEADING`), and every bold-label paragraph that does
+    (``**Key lesson**: ...``). The record keeps facts only; what remains is kept as
+    written."""
+    out: list[str] = []
+    dropping: int | None = None
+    for line in note.splitlines():
+        heading = re.match(r"^(#{1,6})\s+(.*)", line)
+        if heading:
+            level = len(heading.group(1))
+            if dropping is not None and level > dropping:
+                continue
+            dropping = level if ADVICE_HEADING.search(heading.group(2)) else None
+            if dropping is not None:
+                continue
+        elif dropping is not None:
+            continue
+        label = re.match(r"^\s*(?:[-*]\s+)?\*\*([^*]+)\*\*\s*:", line)
+        if label and ADVICE_HEADING.search(label.group(1)):
+            continue
+        out.append(line)
+    return re.sub(r"\n{3,}", "\n\n", "\n".join(out)).strip()
+
+
 def parse_note(payload: Any) -> dict[str, str] | None:
-    """The answer's note within ``MEMORY_CHARS`` (cut with the cut said) and its
-    reasoning, or ``None`` when it carries no note (meta_skill.py:70-75)."""
+    """The answer's note without its advice (`without_advice`), within ``MEMORY_CHARS``
+    (cut with the cut said), and its reasoning, or ``None`` when it carries no note
+    (meta_skill.py:70-75) or nothing but advice."""
     if not isinstance(payload, Mapping):
         return None
     note = payload.get("memory", payload.get("meta_skill_content"))
-    note = str(note).strip() if note not in (None, "") else ""
+    note = without_advice(str(note)) if note not in (None, "") else ""
     if not note:
         return None
     if len(note) > MEMORY_CHARS:
@@ -513,8 +533,8 @@ def _intro(*, epoch: int, mode_name: str, prev: Mapping[str, Any], curr: Mapping
             + pipelines
             + ("\n".join(tried) + "\n\n" if tried else "")
             + "## Previous optimizer memory\n"
-            "The following optimizer memory was available during this epoch. Reflect on "
-            "whether it improved or harmed the quality of the changes.\n\n"
+            "The record as it stood during this epoch: keep its facts that still hold and "
+            "add this epoch's.\n\n"
             f"{note}\n\n")
 
 
@@ -1014,13 +1034,6 @@ def change_tally_lines(tried: Sequence[Mapping[str, Any]], *, val_items: int = 0
     return lines
 
 
-#: What the proposer is told beside the tally; the memory call has it in MEMORY_SYSTEM.
-TALLY_NOISE_RULE = ("Each line is one change: its result is evidence about that change -- "
-                    "its step, what it was told to do or check, where it sends work back, "
-                    "its limits -- not about other changes of its kind. A result inside "
-                    "that noise is weak evidence even about the change itself.")
-
-
 def tried_lines(tried: Sequence[Mapping[str, Any]], refused: Sequence[Mapping[str, Any]], *,
                 round_: int | None, current: str | None, gated: bool | str,
                 chars: int = TRIED_CHARS, tally: Sequence[str] = (),
@@ -1211,23 +1224,19 @@ def state_view(state: Mapping[str, Any]) -> Any:
 
 #: How a reader is told to weigh the note: evidence about the changes it names, never a
 #: rule against a change nobody tried or a different design of one that failed.
-MEMORY_WEIGHT = ("Weigh it as evidence about the changes it names: follow it where the "
-                 "current traces agree or say nothing, let the current traces override it, "
-                 "and do not let it rule out a change nobody has tried, or a different design "
-                 "(other instructions, criteria, place or limit) of a change that failed.")
+MEMORY_WEIGHT = ("It is a record of facts, not advice: where it and the current traces "
+                 "differ, the current traces hold.")
 
 
 def context_block(memory: Mapping[str, Any] | None) -> str:
-    """The note for an analyst or merge call (SkillOpt's ``format_meta_skill_context``,
-    meta_skill.py:18-30, with its "prefer it when the current evidence is ambiguous"
-    replaced by `MEMORY_WEIGHT`, so an early note cannot rule out designs nobody has
-    tried); empty without one."""
+    """The record for an analyst or merge call (where SkillOpt shows its meta skill,
+    ``format_meta_skill_context``, meta_skill.py:18-30); empty without one."""
     text = str((memory or {}).get("text") or "").strip()
     if not text:
         return ""
     return ("## Optimizer memory\n"
-            "This is optimizer-side memory distilled from earlier epochs of this run. Use it "
-            f"to improve how you analyse, merge and rank findings. {MEMORY_WEIGHT}"
+            "The run's record from earlier epochs: what was tried and what happened. "
+            f"{MEMORY_WEIGHT}"
             f"{_stale_text(memory)}\n\n" + "\n".join(exact_block(text)) + "\n\n")
 
 
@@ -1241,9 +1250,10 @@ def _stale_text(memory: Mapping[str, Any] | None) -> str:
 
 
 def request_lines(memory: Mapping[str, Any] | None) -> list[str]:
-    """"Optimizer memory" for the proposal request: the latest note, when it was written
-    and, when a later pass failed (``not_updated``), that it was not updated then and
-    why; nothing before any pass wrote one or failed."""
+    """"Optimizer memory" for the proposal request: the latest record, when it was
+    written and, when a later pass failed (``not_updated``), that it was not updated then
+    and why; nothing before any pass wrote one or failed. The epoch's tally is not
+    repeated: the proposal's ledger ("Every change so far") has every change."""
     memory = memory or {}
     text = str(memory.get("text") or "").strip()
     stale = memory.get("not_updated") or {}
@@ -1257,20 +1267,14 @@ def request_lines(memory: Mapping[str, Any] | None) -> list[str]:
                     "the train items that change moved"
                     if rejected else "the same train items under the pipeline at the start "
                     "of that epoch and after it")
-        lines.append(f"Optimizer-side memory written in epoch {memory.get('epoch', '?')} from a "
-                     f"comparison of {compared}. Use it to improve how you choose and write "
-                     f"changes. {MEMORY_WEIGHT}")
+        lines.append(f"The run's record, written in epoch {memory.get('epoch', '?')} from a "
+                     f"comparison of {compared}. {MEMORY_WEIGHT}")
     if stale:
         lines.append(f"NOT UPDATED in epoch {stale.get('epoch', '?')}: the memory pass failed "
                      f"({_clip(stale.get('why'), 300)})"
                      + ("; this is the earlier note, unchanged." if text
                         else "; there is no note yet."))
-    tally = list(memory.get("tally") or ())
-    if text and tally:
-        lines.append("The note was written from this tally of the epoch's tries, so the note "
-                     "can be weighed against it:")
-    return [*lines, *([*tally, TALLY_NOISE_RULE] if text and tally else []),
-            *(exact_block(text) if text else [])]
+    return [*lines, *(exact_block(text) if text else [])]
 
 
 # ── the journal and the report ──────────────────────────────────────────────

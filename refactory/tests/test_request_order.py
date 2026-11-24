@@ -1,7 +1,8 @@
 """The proposal request, organised: the right things in the right order, without bloat.
 
 The score, then the pipeline once (the view), what this run has tried, what the analysts
-found, the edits it may make, the items, and the reference last, before the answer's form.
+found, the settings, the items, and the one reference last (the operations, how nodes
+compose, every node, the schemas, the rules), before the answer's form.
 Item evidence is chosen rather than cut: a few items in full -- the failures the findings
 cite and passing items beside them, marked as successes -- each step's output fenced with
 its heading lines escaped, so nothing in an item reads as a section. A text that still has to be
@@ -23,12 +24,11 @@ from refactory_dsh.optim import Candidate, ProposalContext, base
 from refactory_dsh.optim.memory import state_view
 
 ORDER = ["## The pipeline you may edit", "## Recent results", "## What this run has already tried",
-         "## What the analysts found, ranked", "## Where the pipeline fails, step by step",
-         "## The operations you may use", "## Structural operators", "## Each step's settings",
+         "## What the analysts found, ranked", "## Each step's settings",
          "## Item results of the candidate being edited",
          "## Trajectories of the candidate being edited", base.REFERENCE_HEADING,
-         "## Each step in full, and the node schema", "## The rules the validator checks",
-         "## Answer"]
+         "### The operations you may use", "### How nodes compose", "### Each node in full",
+         "### Node schemas", "### The rules the validator checks", "## Answer"]
 
 
 def _record(item: str, passed: bool, kind: str = "K1", size: int = 300) -> dict[str, Any]:

@@ -293,7 +293,8 @@ def test_the_request_lists_the_facts_each_node_has_and_how_a_file_becomes_one():
     assert "decide_prompt" not in available["compare"]["facts"]
     text = _render(available=available, code_nodes=True)
     # In the reference at the end, with the nodes and edges.
-    reference = text[text.index(base.REFERENCE_HEADING):].split("\n## ", 1)[0]
+    available_at = "### What each node has before it runs"
+    reference = text[text.index(available_at):].split("\n### ", 1)[0]
     rows = {line.split("|")[1].strip(): line for line in reference.splitlines()
             if line.startswith("| ") and not line.startswith("| node(s)")}
 
@@ -310,7 +311,7 @@ def test_the_request_lists_the_facts_each_node_has_and_how_a_file_becomes_one():
     assert "compare_notes.txt@compare" in seen
     assert "a file's name is not a fact" in reference and "snippet:run" in reference
     plain = _render(available=available, code_nodes=False)
-    plain = plain[plain.index(base.REFERENCE_HEADING):].split("\n## ", 1)[0]
+    plain = plain[plain.index(available_at):].split("\n### ", 1)[0]
     assert "a file's name is not a fact" in plain and "snippet:run" not in plain
     assert "facts available" not in _render()
 

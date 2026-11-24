@@ -547,9 +547,6 @@ def test_the_history_changes_no_item_shown_or_analysed(tmp_path, monkeypatch):
     def ids(rows: list[dict[str, Any]]) -> list[str]:
         return [str(r.get("id")) for r in rows]
 
-    assert ids(base.trajectories_whole(records)) == ids(base.trajectories_whole(plain))
-    assert ids(base.trajectories_whole(records, budget=50)) == ids(
-        base.trajectories_whole(plain, budget=50))
     assert [ids(part) for part in analysts.split(records, SEED)] == [
         ids(part) for part in analysts.split(plain, SEED)]
     with_history = "\n".join(base._trajectories(records, budget=50))
