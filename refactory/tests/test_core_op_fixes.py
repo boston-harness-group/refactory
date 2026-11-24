@@ -293,7 +293,8 @@ def test_a_copy_has_exactly_the_knobs_of_the_step_it_copies():
 
 
 @pytest.mark.parametrize("tools,refused", [(["bash"], False), (False, False), (True, True),
-                                           (["Bash"], True), ("yes", True)])
+                                           (["Bash"], False), (["Read", "bash"], True),
+                                           ("yes", True)])
 def test_tools_is_a_list_from_the_sealed_set_or_false(tools, refused):
     edit = {"op": "insert", "after": "solve", "kind": "agent", "text": "x", "tools": tools}
     reason = nn_edits.precheck(edit, _mode("livemath/solver").state_dict())
