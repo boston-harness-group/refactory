@@ -1501,3 +1501,21 @@ def test_the_smoke_node_of_each_create_mode_consumes_the_split_knobs(mode):
               if getattr(issue, "code", "") == "V7" and getattr(issue, "knob", "") in
               ("profile", "holdout", "parts_manifest")]
     assert not issues, issues
+
+
+@pytest.mark.parametrize("given", [None, 5000.0], ids=["default", "explicit"])
+def test_a_smokes_backstop_never_passes_the_runs_budget(tmp_path, monkeypatch, given):
+    """With a run budget active, the backstop is held to what the budget has left --
+    a caller's explicit backstop (the empty-input run's share of a smoke) included."""
+    from refactory_dsh.budgets import ResourceLimits, RunBudget
+
+    _stage(tmp_path, GOOD)
+    budget = RunBudget.create(tmp_path / "ledger", ResourceLimits(max_elapsed_s=60))
+    seen: dict[str, object] = {}
+    monkeypatch.setattr(sandbox, "run_sandboxed",
+                        lambda code, **kw: seen.update(kw) or sandbox.SandboxResult(ok=True))
+    extra = {} if given is None else {"backstop_s": given}
+    sandbox.smoke(f"{NAME}/counter", tmp_path / "run", project=tmp_path, model=False,
+                  model_context={"budget_ledger": str(budget.path)}, timeout_s=3600, **extra)
+    assert 0 < float(seen["backstop_s"]) <= 60
+    assert float(seen["timeout_s"]) <= 60
