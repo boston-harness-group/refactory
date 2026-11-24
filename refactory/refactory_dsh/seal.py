@@ -68,10 +68,8 @@ import shutil
 import subprocess
 import sys
 import tempfile
-from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
 
 from refactory_dsh import seal_cgroup, seal_reaper, snippet
 
