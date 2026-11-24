@@ -28,6 +28,7 @@ from .policies import (
     IslandsSelector,
     MapElitesSelector,
     ParentSelector,
+    ParetoSelector,
     pipeline_shape,
 )
 from .compose import PickedParent
@@ -57,7 +58,7 @@ def register(cls: type[Optimizer], name: str = "") -> type[Optimizer]:
 
 
 for _cls in (RandomOptimizer, AutoresearchOptimizer, ArchiveSelector, EvolutionarySelector,
-             IslandsSelector, HillClimbSelector, MapElitesSelector):
+             IslandsSelector, HillClimbSelector, MapElitesSelector, ParetoSelector):
     register(_cls)
 del _cls
 

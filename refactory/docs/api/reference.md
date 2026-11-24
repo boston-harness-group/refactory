@@ -314,6 +314,7 @@ Optimizers whose distinguishing choice is *which parent* to breed from.
 | class | `IslandsSelector` | `(*, k: 'int' = 3, seed: 'int' = 0, count: 'int' = 3) -> 'None'` |
 | class | `MapElitesSelector` | `(*, k: 'int' = 3, seed: 'int' = 0, explore: 'float' = 0.3) -> 'None'` |
 | class | `ParentSelector` | `(*, k: 'int' = 3, seed: 'int' = 0) -> 'None'` |
+| class | `ParetoSelector` | `(*, k: 'int' = 3, seed: 'int' = 0) -> 'None'` |
 | function | `pipeline_shape` | `(state: 'dict[str, Any] \| None') -> 'dict[str, Any]'` |
 | function | `shape_label` | `(shape: 'dict[str, Any]') -> 'str'` |
 
@@ -323,6 +324,7 @@ Optimizers whose distinguishing choice is *which parent* to breed from.
 - **`IslandsSelector`** — SRF `openevolve`: sub-populations whose lineages never cross.
 - **`MapElitesSelector`** — SRF's own optimizer (`srf/lab/map_elites.py`): a champion per niche.
 - **`ParentSelector`** — An optimizer that chooses parents by a policy, then samples an edit for each.
+- **`ParetoSelector`** — GEPA's parent selection (Agrawal et al., 2025): a candidate on the per-item
 - **`pipeline_shape`** — What a candidate's graph is made of, independent of its prompts and settings.
 - **`shape_label`** — A shape in a few words, for a request or a report.
 

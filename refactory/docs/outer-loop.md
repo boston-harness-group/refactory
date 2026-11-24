@@ -111,12 +111,32 @@ val score. `selection` says how it selects:
   Parents come from the pool, the incumbent first, and each strategy chooses among
   them by val (a tie by train): `random` takes the best on val, and a model proposer
   may name any pool member as the parent. The population optimizers and pickers
-  (`archive`, `evolutionary`, `islands`, `map_elites`) are handed every judged
-  candidate a person has not rejected instead, and apply their own rule by val: the
-  archive's own limit (12), tournaments, the best of each island, each niche's
-  champion. So a new structure ranked below the pool keeps its niche or island. The incumbent still changes only on a strictly higher val score (a tie
+  (`archive`, `evolutionary`, `islands`, `map_elites`, `pareto`) are handed every
+  judged candidate a person has not rejected instead, and apply their own rule by val:
+  the archive's own limit (12), tournaments, the best of each island, each niche's
+  champion, the per-item frontier (below). So a new structure ranked below the pool keeps its niche or island. The incumbent still changes only on a strictly higher val score (a tie
   goes to the higher train score, then the earlier candidate), and it is the winner. The
   default for every other strategy and for the population optimizers and pickers.
+
+### The per-item frontier picker (`parent_picker: pareto`)
+
+`pareto` is GEPA's parent selection as a core picker
+(`refactory_dsh/optim/policies.py` `ParetoSelector`, frontier code in
+`refactory_dsh/optim/pareto.py`, which the GEPA strategy imports too). It keeps each
+judged candidate's per-item val scores (`ProposalContext.val_item_scores`, keyed by the
+run's HMAC of the item id, never test), builds the frontier (for each val item, the
+candidates with the best score there, ties included), prunes dominated candidates
+(lowest val mean tested first) and draws a parent with probability proportional to the
+number of val items it is best on. A candidate best on a few items stays a parent even
+when its mean is lower than the incumbent's, or the gate rejected it: two specialists
+that each win different items are both bred from, where `hill_climb` breeds only from
+the higher mean. Draws come from the picker's own seeded generator, so a resumed run
+draws the same parents. It runs with `selection: pool` (its default); without per-item
+val scores (no val items, or a task whose items have no scores) it breeds from the best
+by val. Turn it on with `parent_picker: pareto` in a profile, paired with any proposer
+(`autoresearch` or `random`); `--optimizer pareto` alone pairs it with random edits.
+The request names the picker's choice ("on the per-item Pareto frontier of
+validation") but never how many val items a candidate wins.
 
 Strategies under the gate: `reflective` merges the two best of the pool on val and
 chooses prompt or structure from the val gains of past children over their parents
@@ -209,7 +229,7 @@ rollouts, tokens, wall-clock). The SkillOpt strategy keeps its own gate.
   "Recent results" table lists the pool, though, so a `rejected` row there is one that
   scored well on val. Under `pool` the request adds that a parent may be any candidate
   that scored well on val, or with a population parent picker (`archive`,
-  `evolutionary`, `islands`, `map_elites`) any judged candidate, a rejected one
+  `evolutionary`, `islands`, `map_elites`, `pareto`) any judged candidate, a rejected one
   included. The report, `state.json`
   and the log label pool runs in full: `current`, `in pool` (in the pool now), `left
   pool` (in it after the gating that judged it, pushed out since), `rejected` (never in

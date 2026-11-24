@@ -63,7 +63,7 @@ def _ctx(**overrides: object) -> ProposalContext:
 
 # ── every policy is registered, and is an optimizer ────────────────────────
 @pytest.mark.parametrize(
-    "name", ["archive", "evolutionary", "islands", "hill_climb", "map_elites"]
+    "name", ["archive", "evolutionary", "islands", "hill_climb", "map_elites", "pareto"]
 )
 def test_each_policy_is_reachable_by_name(name):
     assert name in optim.names(), f"{name} is not selectable"

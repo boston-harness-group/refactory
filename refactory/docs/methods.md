@@ -30,7 +30,7 @@ evaluation and trace, and any helper it duplicated has been moved to core.
 
 | block | where | what it gives a method |
 |---|---|---|
-| parent pickers: `archive`, `evolutionary`, `islands`, `hill_climb`, `map_elites` | `refactory_dsh/optim/policies.py` (`ParentSelector`) | which candidate to edit next. Write `select` only. Each picker gets `ProposalContext.val_scores` (one val mean per candidate); one that sets `uses_item_scores = True` also gets `ProposalContext.val_item_scores` (each judged candidate's per-item val scores, keyed by the run's HMAC of the item id, never test; a proposer never sees them). It draws from `ParentSelector.rng`, so a resumed run picks again what it picked before |
+| parent pickers: `archive`, `evolutionary`, `islands`, `hill_climb`, `map_elites`, `pareto` (GEPA's per-item frontier; its functions in `refactory_dsh/optim/pareto.py`) | `refactory_dsh/optim/policies.py` (`ParentSelector`) | which candidate to edit next. Write `select` only. Each picker gets `ProposalContext.val_scores` (one val mean per candidate); one that sets `uses_item_scores = True` (as `pareto` does) also gets `ProposalContext.val_item_scores` (each judged candidate's per-item val scores, keyed by the run's HMAC of the item id, never test; a proposer never sees them). It draws from `ParentSelector.rng`, so a resumed run picks again what it picked before |
 | proposers: `autoresearch` (the model proposer), `random` | `refactory_dsh/optim/random_optimizer.py` (`Optimizer`) | the edits. Write `propose`. The base class validates every proposal before it costs an evaluation. A proposer that calls a model gets the run's model through `bind_model` |
 | picker + proposer pairing | `refactory_dsh/optim/compose.py` (`PickedParent`) | a picker chooses the parent and any proposer writes the edits (`parent_picker` setting) |
 | registration | two routes: `optim.register` / `strategies.register` for the library's own table, and `Package.optimizers` / `Package.strategies` (`refactory_dsh/nn/package.py`) for a package, found by `registry.contributed` | selectable by name. `optim.resolve` / `strategies.resolve` look in the library's table, then in the usable packages. A package that reuses a library name or another package's name (or lists a class of the wrong kind) is left out whole, as a package that fails to load is: listings show it under `unavailable_packages` with why, and a run or profile naming one of its pieces is refused with that reason. Profiles validate both, against the project's packages |
@@ -43,11 +43,13 @@ evaluation and trace, and any helper it duplicated has been moved to core.
 
 ## Worked examples
 
-- **GEPA** (`refactory_packages/gepa`): GEPA reflection (its prompt, its
-  instruction extractor, its merge) plus the core blocks: `Run.part_item_scores`
-  for its per-item Pareto frontier, `ValidationGate`, `FinalEvaluation` and
-  `TraceRecorder`. The frontier functions are about to become a core `pareto`
-  parent picker that GEPA also uses, as the next step of this work.
+- **GEPA** (`refactory_packages/gepa`): the core per-item frontier
+  (`refactory_dsh/optim/pareto.py`, the same code as the `pareto` picker) fed by
+  `Run.part_item_scores`, plus GEPA reflection (its prompt, its instruction
+  extractor, its merge), `ValidationGate`, `FinalEvaluation` and `TraceRecorder`. Its
+  package keeps only the program pool and the GEPA-specific steps. It passes its one
+  shared generator to the core frontier functions, so its draws are GEPA's, pinned by
+  `test_fixed_seed_gepa_trace_is_unchanged`.
 - **SkillOpt** (`refactory_packages/skillopt`): its analysts, merge and slow update
   (`SkillOptProposer`), plus `ValidationGate`, `FinalEvaluation`, `TraceRecorder`
   and `Run.evaluate_many`. Its early stop is the `should_stop` hook.
