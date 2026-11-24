@@ -72,16 +72,21 @@ out of the default install.
 
 **CI runs the Python suite in four shards.** Each job runs `--shard I/4`: the suite
 packed by its CI seconds (`refactory/tests/ci_durations.json`), so the four together
-run every test once; `scripts/check-shards.py` (in the fast-checks job) fails if a test
-is in no shard or in two. The pieces are whole files, except a file longer than four
-minutes, whose tests are packed one by one. Within a job a file stays on one worker,
-so a file that long still holds up a worker; splitting it by theme, as the delivery
-and design-worktree tests are (helpers in `_delivery_support.py` and
-`_design_worktree_support.py`), helps more. Refresh the seconds when the shard times
-drift apart: `uv run python scripts/ci-durations.py --latest 5` (the last five green
-main runs; the nightly builds the same file as its `ci-durations` artifact), then open
-a pull request with the file. A new file counts as the median file until then, a new
-test in a long file as that file's median test.
+run every test once. `scripts/check-shards.py` checks the plan in the fast-checks job,
+and after the shards the `shards-ran-the-suite` job checks what they really ran: their
+JUnit ids together must be the whole collection, each once, and every shard's runner
+must have collected the same suite. The pieces are whole files, except a file longer
+than four minutes, whose test functions (each with all its parametrizations) are packed
+one by one. A piece weighs what the durations file says, never what was collected, so
+a case that only some runners collect (the code-node sandbox's) cannot shift the plan.
+Within a job a file stays on one worker, so a file that long still holds up a worker;
+splitting it by theme, as the delivery and design-worktree tests are (helpers in
+`_delivery_support.py` and `_design_worktree_support.py`), helps more. Refresh the
+seconds when the shard times drift apart: `uv run python scripts/ci-durations.py
+--latest 5` (the last five green main pushes; the nightly builds the same file as its
+`ci-durations` artifact), then open a pull request with the file. A new file counts as
+the median file until then, a new function in a long file as that file's median
+function.
 Beside the shards run a fast-checks job (docs, typecheck, ruff for syntax errors and
 undefined names, the boundary and registry tests), the TypeScript job and the macOS
 job; the structure-edit harness's long tier runs nightly (`nightly.yml`).

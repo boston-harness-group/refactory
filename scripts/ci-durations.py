@@ -8,11 +8,12 @@
 Each test's seconds are averaged over the runs that ran it, then credited to the file
 that holds it now (from `pytest --collect-only`), not the file the report names, so a
 test moved between files keeps its time. The file holds one entry per test file (its
-seconds) and, for a file longer than SPLIT_SECONDS, one entry per test as well
-(`file.py::test_name[param]`). `--shard` packs whole files and the tests of those long
-files one by one (tests/conftest.py), so no file holds a shard up on its own. A file
-with no time yet counts as the median file, and a new test in a long file as that
-file's median test.
+seconds) and, for a file longer than SPLIT_SECONDS, one entry per test function as
+well (`file.py::test_name`, every parametrization summed). `--shard` packs whole files
+and the functions of those long files one by one (tests/conftest.py), so no file holds
+a shard up on its own. A file with no time yet counts as the median file, and a new
+function in a long file as that file's median function. Run it where the shards run
+(the code-node sandbox available), so environment-dependent cases are counted.
 """
 
 from __future__ import annotations
@@ -75,6 +76,7 @@ def _home(module: str, name: str, where: dict[str, set[str]]) -> str:
 def durations(run_dirs: list[Path], collected: list[str]) -> dict[str, float]:
     """The durations file's contents for these runs' reports and this collection."""
     current = set(collected)
+    functions = {test.split("[", 1)[0] for test in collected}
     where: dict[str, set[str]] = collections.defaultdict(set)
     for test in collected:
         where[re.sub(r"\[.*", "", test.split("::")[-1])].add(test.split("::")[0])
@@ -98,16 +100,19 @@ def durations(run_dirs: list[Path], collected: list[str]) -> dict[str, float]:
         total = sum(tests.values())
         out[module] = round(total, 1)
         if total > SPLIT_SECONDS:
-            out.update({test: round(value, 1) for test, value in tests.items()
-                        if test in current})
+            per_function: collections.Counter[str] = collections.Counter()
+            for test, value in tests.items():
+                if test.split("[", 1)[0] in functions:
+                    per_function[test.split("[", 1)[0]] += value
+            out.update({key: round(value, 1) for key, value in per_function.items()})
     return dict(sorted(out.items()))
 
 
 def _download(latest: int, into: Path) -> list[Path]:
     """The JUnit reports of the last ``latest`` green CI runs on main."""
     runs = json.loads(subprocess.run(
-        ["gh", "run", "list", "-R", REPO, "-w", "ci.yml", "-b", "main", "-s", "success",
-         "-L", str(latest), "--json", "databaseId"],
+        ["gh", "run", "list", "-R", REPO, "-w", "ci.yml", "-b", "main", "-e", "push",
+         "-s", "success", "-L", str(latest), "--json", "databaseId"],
         capture_output=True, text=True, check=True).stdout)
     dirs = []
     for run in runs:
@@ -121,8 +126,8 @@ def _download(latest: int, into: Path) -> list[Path]:
 def _summary(table: dict[str, float]) -> str:
     files = {k: v for k, v in table.items() if "::" not in k}
     split = sorted(k for k in files if any(t.startswith(k + "::") for t in table))
-    return (f"{len(files)} files, {sum(files.values()) / 60:.1f} min in all; packed test by "
-            f"test: {', '.join(split) or 'none'}; "
+    return (f"{len(files)} files, {sum(files.values()) / 60:.1f} min in all; "
+            f"packed function by function: {', '.join(split) or 'none'}; "
             f"median file {statistics.median(files.values()):.1f}s")
 
 

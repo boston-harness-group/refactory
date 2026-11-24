@@ -68,9 +68,21 @@ jobs:
           uv run python -m pytest -q -rfEs -x --timeout=300
           refactory/tests/test_boundary.py refactory/tests/test_registry.py
           "refactory/tests/test_cli.py::test_the_command_reference_matches_the_command_line"
-      # Five collections, about a minute: the four shards below together collect exactly
-      # the whole suite, no test missed and none in two shards.
+      # The shards' environment (code-node sandbox allowed), so the collection checked
+      # here is the one the shards run.
+      - name: Allow the code-node sandbox
+        run: |
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+          if [ -e /proc/sys/kernel/unprivileged_userns_clone ]; then
+            sudo sysctl -w kernel.unprivileged_userns_clone=1 || true
+          fi
+      # Five collections, about a minute: the four shards' plans together collect exactly
+      # the whole suite, no test missed and none in two shards. `shards-ran-the-suite`
+      # checks what the shard jobs really ran.
       - name: Shards cover the suite exactly once
+        env:
+          REFACTORY_REQUIRE_MIGRATION_TESTS: "1"
+          REFACTORY_REQUIRE_CODE_SANDBOX: "1"
         run: uv run python scripts/check-shards.py 4
 
   # The TypeScript side and the harness pin, once, beside the Python shards.
@@ -143,9 +155,11 @@ jobs:
   # (`refactory/tests/ci_durations.json`, refreshed by `scripts/ci-durations.py` from
   # these jobs' reports; the nightly builds a fresh one as an artifact), each job runs
   # its share on four workers, and the four shards together are the whole suite
-  # (fast-checks proves it). The pieces are whole files, except a file longer than
-  # four minutes, whose tests are packed one by one. Within a job a file stays on one
-  # worker (`loadscope`), and the longest go out first.
+  # (fast-checks checks the plan, `shards-ran-the-suite` what the jobs ran). The pieces
+  # are whole files, except a file longer than four minutes, whose test functions are
+  # packed one by one, each weighed by the durations file so a runner-dependent
+  # parametrization cannot move one. Within a job a file stays on one worker
+  # (`loadscope`), and the longest go out first.
   #
   # Tests that need an external tool or a model credential are marked and skipped
   # with a reason; the toolchain summary at the end of each shard names every one
@@ -203,19 +217,47 @@ jobs:
           REFACTORY_REQUIRE_MIGRATION_TESTS: "1"
           # The sealed-step tests fail, never skip, where the seal cannot run.
           REFACTORY_REQUIRE_CODE_SANDBOX: "1"
-        run: >-
-          uv run python -m pytest refactory/tests -q -rfEs -n 4 --timeout=900
-          --shard ${{ matrix.shard }}/4 --junitxml=python-suite-shard${{ matrix.shard }}.xml
+        # The whole collection first, as this runner sees it, for `shards-ran-the-suite`.
+        run: |
+          uv run python -m pytest refactory/tests --collect-only -q -p no:cacheprovider \
+            > collected-shard${{ matrix.shard }}.txt || true
+          uv run python -m pytest refactory/tests -q -rfEs -n 4 --timeout=900 \
+            --shard ${{ matrix.shard }}/4 --junitxml=python-suite-shard${{ matrix.shard }}.xml
 
       # Each test's time, for `scripts/ci-durations.py` and to compare a test on Linux
-      # with the same test on a Mac (`refactory_dsh.spawn_count`).
+      # with the same test on a Mac (`refactory_dsh.spawn_count`), and this runner's
+      # whole collection.
       - name: Keep the shard's per-test times
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: python-suite-times-shard${{ matrix.shard }}
-          path: python-suite-shard${{ matrix.shard }}.xml
+          path: |
+            python-suite-shard${{ matrix.shard }}.xml
+            collected-shard${{ matrix.shard }}.txt
           if-no-files-found: ignore
+
+  # What the shards really ran: each runner's JUnit test ids together must be the whole
+  # suite as those runners collected it, every test once, and the four runners must have
+  # collected the same suite. A runner whose environment changed its collection (a
+  # sandbox probe that failed) or its plan fails here instead of passing green with a
+  # test unrun. Standard library only, so no install: seconds after the last shard.
+  shards-ran-the-suite:
+    name: Shards ran the whole suite once
+    needs: python
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: python-suite-times-shard*
+          path: shard-reports
+      - name: Compare the shards' tests with the collection
+        run: python3 scripts/check-shards.py --reports shard-reports 4
 
   # macOS is a first-class platform, and the one where a process launch costs most: an
   # endpoint-security agent can make each one 30 ms or more. This job runs the TypeScript
