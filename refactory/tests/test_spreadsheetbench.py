@@ -1073,7 +1073,8 @@ def test_a_state_saved_before_item_files_runs_and_scores_as_it_did(tmp_path, sb_
     with pytest.warns(UserWarning, match="a saved state was upgraded"):
         upgraded = sb_mode.Solver(state=old)
     assert upgraded.state_dict() == sb_mode.Solver().state_dict()
-    assert len(upgraded.state_upgrades) == 5  # item files (4), and the route-bound output cap (1)
+    assert len(upgraded.state_upgrades) == 6  # item files (4), the route-bound output cap (1),
+    # and the frozen system prompt's plain description (1)
     assert sb_mode.Solver(state=sb_mode.Solver().state_dict()).state_upgrades == ()
     runs = {}
     with pytest.warns(UserWarning):
@@ -1087,7 +1088,7 @@ def test_a_state_saved_before_item_files_runs_and_scores_as_it_did(tmp_path, sb_
     assert seen["old"] == seen["new"] and seen["new"][0] == [("v1", True, 1.0, None)], seen
     from refactory_dsh.nn.mode import STATE_UPGRADES
 
-    assert len(json.loads((runs["old"][2] / STATE_UPGRADES).read_text())) == 5
+    assert len(json.loads((runs["old"][2] / STATE_UPGRADES).read_text())) == 6
     assert not (runs["new"][2] / STATE_UPGRADES).exists()
 
 
@@ -1111,7 +1112,7 @@ def test_the_spine_runs_a_state_saved_before_item_files_upgraded(tmp_path, monke
     with pytest.raises(Lowered):
         dsh_runtime.evaluate_on_dsh(sb_mode.Solver(), old, tmp_path)
     assert lowered["state"] == sb_mode.Solver().state_dict()
-    assert len(json.loads((tmp_path / STATE_UPGRADES).read_text())) == 5
+    assert len(json.loads((tmp_path / STATE_UPGRADES).read_text())) == 6
 
 
 def test_a_missing_prediction_gets_one_more_run(tmp_path, sb_env):
@@ -1731,12 +1732,111 @@ def test_startskill_takes_its_reference_as_input(tmp_path):
 
 def test_the_guidance_does_not_rule_out_structural_edits():
     """The author's guidance reaches the proposer (``Loop._context``), so it must say what
-    the surface allows: the graph around the solve loop is editable, and only the
+    the surface allows: the steps other than the protected ones are editable, and the
     protected nodes are not; it once said the skill was the only lever."""
     mode = sb_mode.Solver()
     guidance = mode.guidance()
     assert "only lever" not in guidance
-    assert "graph" in guidance and "protected" in guidance
+    assert "Steps other than the protected" in guidance and "can be edited" in guidance
     assert all(node in guidance for node in mode.protected_nodes())  # stays in sync
     editable = set(mode.build().nodes) - set(mode.protected_nodes())
     assert {"prepare", "frame", "solve", "run_turn", "next_turn", "turn_gate"} <= editable
+
+
+def _sb_modes() -> list:
+    from refactory_packages.spreadsheetbench.agent_mode import Agent
+    from refactory_packages.spreadsheetbench_v2.steps_mode import Steps
+    from refactory_packages.spreadsheetbench_v2.swe_mode import Swe
+
+    return [sb_mode.Solver, Agent, Swe, Steps]
+
+
+_EDITABLE = ("Steps other than the protected {protected} can be edited, and new steps added "
+             "where the validator allows. These knobs are frozen and keep their values: "
+             "{frozen}.")
+_FED = ("`solve`'s prompt is the frozen knob `solve__prompt_template`, so a new step's output "
+        "cannot be added to `solve`'s prompt.")
+_GENERAL = "Every change must be general: it must help on items no rollout saw."
+_NOTES = {
+    "Solver": " ".join([
+        "The `skill` knob is appended to the solver's system prompt for every item.",
+        _EDITABLE.format(protected="`data`, `gold_check` and `finalize`",
+                         frozen="`max_completion_tokens`, `data_parallelism`, `max_turns`, "
+                                "`turn_pause_s` and `solve__system_prompt`"), _GENERAL]),
+    "Agent": " ".join([
+        "The `skill` knob is written to the agent's SKILL.md, which it reads before writing "
+        "solution.py for every item.",
+        _EDITABLE.format(protected="`data` and `finalize`",
+                         frozen="`data_parallelism`, `max_thinking_tokens`, "
+                                "`solve__prompt_template` and `solve__system_prompt`"),
+        _FED, _GENERAL]),
+    "Swe": " ".join([
+        "The `skill` knob is written to the agent's SKILL.md, which the prompt tells it to read "
+        "before it edits the workbook (an empty skill is not mentioned).",
+        _EDITABLE.format(protected="`data` and `finalize`",
+                         frozen="`data_parallelism`, `max_turns`, `bash_timeout_ms`, "
+                                "`bash_output_chars`, `solve__prompt_template` and "
+                                "`solve__system_prompt`"),
+        _FED, _GENERAL]),
+    "Steps": " ".join([
+        "Four sealed steps run in order -- inspect, plan, implement, verify -- each with its "
+        "own prompt (<step>__task) and system prompt (<step>__system_prompt); they hand on "
+        "inspect_notes.md, plan.md and output.xlsx, and the output.xlsx left after the last "
+        "step is graded. The `skill` knob is one SKILL.md every step reads.",
+        _EDITABLE.format(protected="`data` and `finalize`",
+                         frozen="`data_parallelism`, `max_turns`, `bash_timeout_ms` and "
+                                "`bash_output_chars`"), _GENERAL]),
+}
+
+
+@pytest.mark.parametrize("mode_cls", _sb_modes(), ids=lambda m: m.__module__.split(".")[-2]
+                         + "." + m.__name__)
+def test_the_author_note_states_skill_and_graph_as_facts_without_ranking_them(mode_cls):
+    """The author's note reaches the proposer, which gets accurate information and no
+    steering: the skill knob, the protected steps, the frozen knobs and what a frozen
+    prompt rules out are stated as facts, whole (it once put the skill first and the graph
+    as "too", "before and around the solve step", and said every other step was editable
+    on graphs whose solve prompt is frozen). The note is generated from the mode."""
+    from refactory_packages.spreadsheetbench.mode import author_note
+
+    mode = mode_cls()
+    note = mode.guidance()
+    assert note == _NOTES[mode_cls.__name__], note
+    assert author_note(mode, note.split(" Steps other")[0]) == note
+    lowered = note.lower()
+    for steer in (" too", "lever", "before and around", "around the", "only ", "start with",
+                  "secondary", "first"):
+        assert steer not in lowered, (steer, note)
+
+
+def _old_wording_modes() -> list:
+    from refactory_packages.livemath.mode import Solver as LiveMathSolver
+    from refactory_packages.spreadsheetbench.agent_mode import Agent
+    from refactory_packages.spreadsheetbench_v2.swe_mode import Swe
+
+    return [sb_mode.Solver, Agent, Swe, LiveMathSolver]
+
+
+@pytest.mark.parametrize("mode_cls", _old_wording_modes(),
+                         ids=lambda m: m.__module__.split(".")[-2] + "." + m.__name__)
+def test_a_state_saved_with_the_old_frozen_wording_loads_as_this_versions(mode_cls):
+    """A run state saved while frozen knobs said "(frozen; use the skill knob)" loads with
+    "(frozen)", exactly this version's state, one note per knob, so a resumed run's request
+    shows the plain wording too (the knob table reads the loaded state's descriptions)."""
+    import copy
+    import warnings
+
+    fresh = mode_cls().state_dict()
+    old = copy.deepcopy(fresh)
+    frozen = [e for e in old["knobs"].values()
+              if str(e["spec"].get("description", "")).endswith("(frozen)")]
+    assert frozen, "the mode has a frozen knob described as such"
+    for entry in frozen:
+        entry["spec"]["description"] = (entry["spec"]["description"][:-len("(frozen)")]
+                                        + "(frozen; use the skill knob)")
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        loaded = mode_cls(state=old)
+    assert loaded.state_dict() == fresh
+    assert len(loaded.state_upgrades) == len(frozen)
+    assert "use the skill knob" not in json.dumps(loaded.state_dict())

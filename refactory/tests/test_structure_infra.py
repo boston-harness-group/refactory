@@ -643,7 +643,7 @@ def test_a_refused_proposal_is_fixed_by_a_slim_repair_call_that_shows_it(tmp_pat
     assert "The knobs it edits, as they stand now" in slim[0] and "Be careful." in slim[0]
     # No evidence, history or framing: only what fixing the mechanics needs.
     for section in ("## Evidence from the traces", "## What this run has already tried",
-                    "## Recent results", "## What the author says"):
+                    "## Recent results", "## About this mode"):
         assert section in full[0] and section not in slim[0], section
     assert len(slim[0]) < 40000
     line = _optimizer_line(loop)

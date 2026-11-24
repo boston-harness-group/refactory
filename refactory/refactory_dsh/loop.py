@@ -1116,7 +1116,9 @@ class Loop(OuterLoop):
     def _tools_not_offered(self) -> str:
         """Why the request offers no tool step, for the run's start summary and journal; empty
         when it offers one, or when the run permits no operator that adds a step."""
-        if self._tools_offered() or not {"insert", "map"} & set(self.permitted_ops()):
+        from refactory_dsh.optim.base import tool_step_ops
+
+        if self._tools_offered() or not tool_step_ops(self.permitted_ops()):
             return ""
         return str(self.optimizer.sealed_tools[1] or "the seal cannot run here")
 

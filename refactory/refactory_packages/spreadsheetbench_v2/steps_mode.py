@@ -39,7 +39,7 @@ from __future__ import annotations
 from refactory_dsh import nn
 
 from refactory_packages.spreadsheetbench.agent_mode import SOLVE_RETRY
-from refactory_packages.spreadsheetbench.mode import OPS, SKILLOPT_CLAUDE_CODE
+from refactory_packages.spreadsheetbench.mode import OPS, SKILLOPT_CLAUDE_CODE, author_note
 from refactory_packages.spreadsheetbench.tasks import INPUT
 
 from . import steps_port, swe_mode, swe_port
@@ -188,9 +188,9 @@ class Steps(nn.Mode):
         return sum(scores) / len(scores) if scores else 0.0
 
     def guidance(self) -> str:
-        return ("Four sealed steps run in order -- inspect, plan, implement, verify -- each "
-                "with its own prompt (<step>__task) and system prompt (<step>__system_prompt); "
-                "they hand on inspect_notes.md, plan.md and output.xlsx, and the output.xlsx "
-                "left after the last step is graded. The skill is one SKILL.md every step "
-                "reads. The graph can be edited too (only data and finalize are protected). "
-                "Keep every change general -- it must help on items no rollout saw.")
+        return author_note(self, "Four sealed steps run in order -- inspect, plan, "
+                                 "implement, verify -- each with its own prompt (<step>__task) "
+                                 "and system prompt (<step>__system_prompt); they hand on "
+                                 "inspect_notes.md, plan.md and output.xlsx, and the "
+                                 "output.xlsx left after the last step is graded. The `skill` "
+                                 "knob is one SKILL.md every step reads.")

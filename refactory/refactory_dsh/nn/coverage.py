@@ -264,6 +264,14 @@ def entries() -> list[Entry]:
             *_compositions()]
 
 
+def made_by(group: str, name: str) -> tuple[str, ...]:
+    """The operations that create ``name`` of ``group`` (its entry's ``create``), ``()``
+    when a gap: the one list the request names them from (`optim.base.tools_line`), which
+    ``tests/test_dsl_coverage.py`` holds to each one making it."""
+    entry = next(e for e in entries() if (e.group, e.name) == (group, name))
+    return tuple(entry.create) if isinstance(entry.create, tuple) else ()
+
+
 def constructs() -> dict[str, set[str]]:
     """Every construct the map must cover, by group, generated from the code."""
     return {

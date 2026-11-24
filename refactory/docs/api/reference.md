@@ -100,12 +100,14 @@ A mode: a Python class whose architecture and parameters are serializable.
 | class | `StateError` | `` |
 | function | `graph_identity` | `(state: 'dict') -> 'dict'` |
 | function | `record_state_upgrades` | `(workdir: 'Path', notes: 'Any') -> 'None'` |
+| function | `replace_in_knob_descriptions` | `(state: 'Mapping[str, Any]', old: 'str', new: 'str') -> 'tuple[dict[str, Any], list[str]]'` |
 
 - **`Mode`** — Base class for a mode. Subclasses declare knobs, build, score.
 - **`RunResult`** — What one inner run produced: the facts, the score, and how the run went.
 - **`StateError`** — A state dict is not a valid state for this mode.
 - **`graph_identity`** — Strip the steering block from all ``prompt_template`` values for comparison.
 - **`record_state_upgrades`** — Record in ``workdir`` what a saved state's upgrade changed (`Mode.upgrade_state`),
+- **`replace_in_knob_descriptions`** — ``state`` with ``old`` replaced by ``new`` in each knob's description, one note per
 
 
 <a id="refactory_dsh-nn-declarations"></a>

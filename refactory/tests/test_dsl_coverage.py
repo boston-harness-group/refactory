@@ -363,3 +363,216 @@ def test_every_operation_the_map_names_for_route_gives_a_new_step_its_own_route(
     new = [n for k, n in out.state["graph"]["nodes"].items()
            if k not in parent.state["graph"]["nodes"] and n.get("route")]
     assert new and all(n["route"].get("model") == "m-small" for n in new), (op, new)
+
+
+# ── the request names the operations from the map, never by hand ──────────────────
+
+
+def _named_in_tools_line(ops) -> set[str]:
+    """The operations the request's tools bullet names (`optim.base.tools_line`)."""
+    import re
+
+    from refactory_dsh.optim import base
+
+    found = re.search(r"\(made by (.*?): in the edit's own", base.tools_line(ops))
+    return set(re.findall(r"`([a-z_]+)`", found.group(1))) if found else set()
+
+
+_EVERY_OP = [c["op"] for c in nn_edits.catalogue("broad")]
+
+
+@pytest.mark.parametrize("op", _EVERY_OP)
+def test_the_tools_bullet_names_an_operation_exactly_when_it_makes_a_tool_step(op):
+    """[request text] The tools bullet names every operation that can make a new agent step
+    with tools (the map's, each held to making a sealed one above) and nothing else; it once
+    named three when nine could."""
+    assert (op in _named_in_tools_line(_EVERY_OP)) == (op in _created("tools")), op
+
+
+@pytest.mark.parametrize("op", _EVERY_OP)
+def test_an_operation_whose_fields_take_tools_is_one_the_map_says_makes_a_tool_step(op):
+    """An operation's own 'tools' field and the map agree, so the bullet (from the map)
+    never leaves out an operation the operations table offers 'tools' on."""
+    fields = next(c["fields"] for c in nn_edits.catalogue("broad") if c["op"] == op)
+    if "tools" in fields:
+        assert op in _created("tools"), op
+
+
+@pytest.mark.parametrize("preset", ["broad", "structure", "conservative"])
+def test_the_tools_bullet_names_only_the_operations_this_run_offers(preset):
+    offered = {c["op"] for c in nn_edits.catalogue(preset)}
+    assert _named_in_tools_line(offered) == offered & set(_created("tools")), preset
+
+
+@pytest.mark.parametrize("op", _EVERY_OP)
+def test_the_node_reference_names_an_operation_exactly_when_it_takes_a_node(op):
+    """[request text] "Each node in full" says which operations take a copied node: those
+    whose fields have `node`, generated from the catalogue."""
+    import re
+
+    from refactory_dsh.optim import base
+
+    catalogue = nn_edits.catalogue("broad")
+    text = "\n".join(base._node_specs([{"id": "a", "kind": "agent", "prompt_template": "x",
+                                        "writes": ["a.txt"]}], catalogue=catalogue))
+    said = re.search(r"use it as the `node` field of (.*?)\. Knob", text)
+    named = set(re.findall(r"`([a-z_]+)`", said.group(1))) if said else set()
+    fields = next(c["fields"] for c in catalogue if c["op"] == op)
+    assert (op in named) == ("node" in fields), (op, named)
+
+
+# ── the composition examples: one of each shape, each one an attempt takes ────────
+
+
+def _composition_modes():
+    from refactory_packages.livemath import mode as lm_mode, skill_graph
+    from refactory_packages.spreadsheetbench import agent_mode, mode as sb_mode
+    from refactory_packages.spreadsheetbench_v2 import steps_mode, swe_mode
+
+    return {"sb_solver": sb_mode.Solver, "sb_agent": agent_mode.Agent, "sb2_swe": swe_mode.Swe,
+            "sb2_steps": steps_mode.Steps,
+            "livemath_solver": lm_mode.Solver, "livemath_skill_graph": skill_graph.SkillGraph}
+
+
+_GRAPHS = ["sb_solver", "sb_agent", "sb2_swe", "sb2_steps", "livemath_solver",
+           "livemath_skill_graph"]
+
+
+def _composition_lines(mode) -> list[str]:
+    from refactory_dsh.optim import base
+    from refactory_dsh.optim.memory import state_view
+
+    view = state_view(mode.state_dict())
+    return base.composition_section(
+        nn_edits.catalogue("broad"), view.node_states, view.edges, code_nodes=True,
+        tools=True, protected=mode.edit_protected(),
+        knob_values={k["name"]: k["value"] for k in view.knobs},
+        frozen=[k["name"] for k in view.knobs if k.get("frozen")])
+
+
+def _shown_and_refused(lines: list[str]) -> tuple[list[str], list[str]]:
+    from refactory_dsh.optim import base
+
+    shown = []
+    if base.COMPOSITION_LEAD in lines:
+        shown = [line[2:].split(": {", 1)[0]
+                 for line in lines[lines.index(base.COMPOSITION_LEAD) + 1:]
+                 if line.startswith("- ")]
+    said = next((line for line in lines if line.startswith(base.REFUSED_LEAD)), "")
+    refused = [shape for shape in base.COMPOSITION_SHAPES if f"{shape}: " in said]
+    return shown, refused
+
+
+def test_the_composition_leads_are_neutral_facts():
+    from refactory_dsh.optim import base
+
+    assert base.COMPOSITION_LEAD == ("One example of each composition shape, with this graph's "
+                                     "ids (how to write it; none is preferred):")
+    assert base.REFUSED_LEAD == "Shapes not shown here, with the refusal of the forms tried: "
+
+
+@pytest.mark.parametrize("name", _GRAPHS)
+def test_every_composition_shape_is_shown_once_or_said_refused(name):
+    """[request text] Each shape (new agent step, fork and join, verdict loop, route, code op,
+    tool step) is shown once or named among the refused with the refusal, so the list is
+    never read as the full set; titles name the shape, never when to use it."""
+    from refactory_dsh.optim import base
+
+    shown, refused = _shown_and_refused(_composition_lines(_composition_modes()[name]()))
+    assert len(shown) == len(set(shown)) and not set(shown) & set(refused), (shown, refused)
+    assert sorted(shown + refused) == sorted(base.COMPOSITION_SHAPES), (shown, refused)
+    if name in ("sb_solver", "livemath_solver", "livemath_skill_graph"):
+        assert not refused, refused  # graphs that take every shape show each one
+
+
+@pytest.mark.parametrize("name", ["sb2_swe", "sb_agent"])
+def test_a_frozen_prompt_is_said_and_a_tool_step_taking_over_is_shown(name):
+    """On a graph whose solve prompt is frozen, the refusal said is the real one, and the
+    tool step that can write what it takes over is shown, its text saying it writes them."""
+    import json
+
+    from refactory_dsh.optim import base
+
+    lines = _composition_lines(_composition_modes()[name]())
+    said = next(line for line in lines if line.startswith(base.REFUSED_LEAD))
+    assert ("a new agent step: knob 'solve__prompt_template' is frozen and cannot be moved"
+            in said), said
+    assert "nothing reads the output of new step 'solve_next'" in said, said  # every form's
+    assert base.COMPOSITION_SHAPES[5] not in said, said
+    tool = next(l for l in lines if l.startswith(f"- {base.COMPOSITION_SHAPES[5]}: "))
+    edit = json.loads(tool.split(": ", 1)[1])
+    assert edit["takes_over"] == "solve" and edit["tools"]
+    assert "`reply.txt`" in edit["text"] and "the outputs of `solve` it takes over" in edit["text"]
+
+
+def _able_to_write(node: dict, file: str) -> bool:
+    """Whether a new step can produce ``file``: an agent with tools writes any file, one
+    without writes only its reply (its first file), a code op returns text files only."""
+    if node.get("kind") == "agent":
+        return bool(node.get("tools")) or (node.get("writes") or [None])[0] == file
+    return file.endswith((".txt", ".json", ".md"))
+
+
+def _writers(state: dict, files) -> dict[str, set[str]]:
+    nodes = state["graph"]["nodes"]
+    return {f: {k for k, n in nodes.items() if f in (n.get("writes") or ())} for f in files}
+
+
+@pytest.mark.parametrize("name", _GRAPHS)
+@pytest.mark.parametrize("shape", list(range(6)))
+def test_each_composition_example_applies_and_leaves_the_graph_runnable(name, shape):
+    """Each example, exactly as the request shows it, is a valid proposal on that graph:
+    `Optimizer.attempt` takes it, it adds what its shape says, every file the protected
+    steps read is still written by the same steps (no step's outputs are taken over by a
+    step that could not write them), and the code example returns the fact it declares."""
+    import json
+
+    from refactory_dsh.optim import Optimizer, Proposal
+    from refactory_dsh.optim import base
+    from refactory_dsh.workers import StepRoutes
+
+    mode = _composition_modes()[name]()
+    title = base.COMPOSITION_SHAPES[shape]
+    line = next((l for l in _composition_lines(mode) if l.startswith(f"- {title}: ")), None)
+    if line is None:
+        pytest.skip(f"{name} refuses {title} (said in the request)")
+    shown = json.loads(line.split(": ", 1)[1])
+    edits = shown["edits"] if "edits" in shown else [shown]
+    optimizer = Optimizer()
+    optimizer.sealed_tools = (True, "")
+    optimizer.step_routes = StepRoutes(sf.ROUTE_BASE, node_routes=sf.ROUTE_MAPS)
+    parent = Candidate.from_state(mode.state_dict())
+    out = optimizer.attempt(Proposal(edits=edits), parent, mode.invariants(), True, (),
+                            protected=mode.edit_protected(), record=False)
+    assert isinstance(out, Candidate), (title, out)
+    before = parent.state["graph"]["nodes"]
+    new = {k: n for k, n in out.state["graph"]["nodes"].items() if k not in before}
+    kinds = {n.get("kind") for n in new.values()}
+    expected = {0: {"agent"}, 1: {"fork", "join"}, 2: {"gate"}, 3: {"gate"}, 4: {"op"}}
+    assert expected.get(shape, {"agent"}) <= kinds, (title, kinds)
+    read = {f for p in mode.edit_protected() if before.get(p, {}).get("kind") != "data"
+            for f in before[p].get("reads") or ()}
+    after = _writers(out.state, read)
+    for file, writers in after.items():
+        assert writers, (title, file)  # still written
+        for writer in writers - _writers(parent.state, read)[file]:
+            assert _able_to_write(out.state["graph"]["nodes"][writer], file), (title, writer, file)
+    if shape == 4:
+        code = next(n for n in new.values() if n.get("code") or n.get("kind") == "op"
+                    and "snippet" in str(n.get("call")))
+        text = code.get("code") or out.state["knobs"][f"{code['id']}__code"]["value"]
+        scope: dict = {}
+        exec(text, scope)  # the example's own code, run as the step would run it
+        returned = scope["main"]({"facts": {}, "files": {}})
+        assert set(returned["facts"]) == set(code.get("produces") or ()), returned
+    if shape == 5:
+        assert any(n.get("tools") for n in new.values()), new
+
+
+def test_the_architecture_doc_names_the_shapes_the_request_shows():
+    from refactory_dsh.optim import base
+
+    doc = " ".join((Path(__file__).resolve().parent.parent / "docs" / "architecture.md")
+                   .read_text().split())
+    for shape in base.COMPOSITION_SHAPES:
+        assert shape.split(" (")[0] in doc, shape

@@ -724,15 +724,17 @@ def test_the_request_says_new_steps_may_have_tools_whatever_the_existing_steps_r
     assert "an existing step keeps its own tool rules" in line
     assert "no grader files" in line
     assert "in the per-item part, without 'sees', the item's input files too" in line
-    assert "existing step keeps its own tool rules" in base_mod.TOOLS_LINE
-    assert "sealed" in base_mod.TOOLS_LINE and "no network" in base_mod.TOOLS_LINE
-    for text in (line, base_mod.TOOLS_LINE, base_mod.NO_TOOLS_LINE, base_mod.PIPELINE_VIEW_LEAD):
+    tools_line = base_mod.tools_line(nn_edits.names())
+    assert "existing step keeps its own tool rules" in tools_line
+    assert "sealed" in tools_line and "no network" in tools_line
+    for text in (line, tools_line, base_mod.NO_TOOLS_LINE, base_mod.PIPELINE_VIEW_LEAD):
         assert not {"spreadsheet", "xlsx", "workbook", "solve"} & set(
             w.strip(".,;:()`'\"").lower() for w in text.split()), text
+    broad = [c["op"] for c in nn_edits.catalogue("broad")]
     view = _sections(tools=True)
-    assert base_mod.TOOLS_LINE in view and base_mod.NO_TOOLS_LINE not in view
+    assert base_mod.tools_line(broad) in view and base_mod.NO_TOOLS_LINE not in view
     view = _sections(tools=False)
-    assert base_mod.NO_TOOLS_LINE in view and base_mod.TOOLS_LINE not in view
+    assert base_mod.NO_TOOLS_LINE in view and base_mod.tools_line(broad) not in view
 
 
 def _sections(*, tools: bool) -> list[str]:

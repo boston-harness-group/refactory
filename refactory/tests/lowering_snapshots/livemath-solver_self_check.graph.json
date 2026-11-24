@@ -201,7 +201,7 @@
       "enum": [],
       "values": [],
       "frozen": true,
-      "description": "system prompt for solve_draft (frozen; use the skill knob)",
+      "description": "system prompt for solve_draft (frozen)",
       "required": false
     },
     "self_check__system_prompt": {
@@ -212,7 +212,7 @@
       "enum": [],
       "values": [],
       "frozen": true,
-      "description": "system prompt for self_check (frozen; use the skill knob)",
+      "description": "system prompt for self_check (frozen)",
       "required": false
     }
   }
