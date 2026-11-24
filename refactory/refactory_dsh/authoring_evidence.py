@@ -252,7 +252,12 @@ def source_files(root: Path) -> dict[str, str]:
         if any(part in ignored or part.startswith(".env") for part in relative.parts):
             continue
         if path.is_symlink():
-            raise ValueError(f"cannot attest a symlink in the delivered source: {relative}")
+            resolved = path.resolve()
+            if resolved.is_relative_to(root.resolve()):
+                continue  # canonical file visited at its real location by rglob
+            raise ValueError(
+                f"cannot attest a symlink that escapes the root: {relative} -> {resolved}"
+            )
         if path.is_file():
             files[str(relative)] = hashlib.sha256(path.read_bytes()).hexdigest()
     return files

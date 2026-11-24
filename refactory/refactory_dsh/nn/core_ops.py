@@ -87,19 +87,42 @@ MAP_ELEMENT_PROMPT = "Do what the input below says, for the one element it gives
 MAP_ELEMENT_TOOLS_PROMPT = "Do what the file {file} says, for the one element it gives."
 #: A map's elements by default, and at most (one branch each, `MAX_BRANCHES`).
 MAP_MAX = (4, 2, MAX_BRANCHES)
-#: What a judge agent is told about its answer's first word.
-VERDICT_RULE = ("Start your answer with one word, {labels}, alone or followed by why; "
-                "nothing before it.")
+#: What a judge agent is told about its answer's first line: the word alone, with an
+#: example (``{example}``, the last of its labels). A judge that reviews first and never
+#: writes the word is asked again for it (`node_retry.settle_verdict`); this keeps that rare.
+VERDICT_RULE = ("Your answer's first line is one word alone: {labels}. Why goes on the lines "
+                "after it. Nothing comes before that word: no heading, no preamble, no "
+                "\"Verdict:\". For example, a first line \"{example}\", then why, in a "
+                "sentence or two, on the next.")
+#: The rules judges were built with before, still matched in the prompts of states that
+#: carry them (`system_appended`).
+EARLIER_VERDICT_RULES = ("Start your answer with one word, {labels}, alone or followed by "
+                         "why; nothing before it.",)
+
+
+def verdict_rule(labels: Sequence[str]) -> str:
+    """`VERDICT_RULE` for a judge answering one of ``labels``."""
+    return VERDICT_RULE.format(labels=" or ".join(labels), example=list(labels)[-1])
+
+
+def _rule_pattern(rule: str) -> str:
+    """A rule as a pattern that matches it at a text's end, whatever its placeholders hold
+    (each on one line)."""
+    parts = re.split(r"\{(\w+)\}", rule)
+    return "".join(re.escape(part) if index % 2 == 0 else rf"(?P<{part}>.+?)"
+                   for index, part in enumerate(parts)) + r"\s*$"
+
+
 def system_appended(text: str) -> tuple[str, str]:
     """``text`` split into the step's own words and what the system appended to them (the
-    verdict rule a judge's prompt ends with, `VERDICT_RULE`); ``(text, "")`` when nothing
-    was. Our own constant is matched, never the model's words."""
-    head, tail = VERDICT_RULE.split("{labels}")
-    found = re.search(re.escape(head) + r"(?P<labels>.+?)" + re.escape(tail) + r"\s*$",
-                      text or "")
-    if not found:
-        return text, ""
-    return text[:found.start()].rstrip(), text[found.start():].strip()
+    verdict rule a judge's prompt ends with, `VERDICT_RULE`, or an earlier one,
+    `EARLIER_VERDICT_RULES`); ``(text, "")`` when nothing was. Our own constants are
+    matched, never the model's words."""
+    for rule in (VERDICT_RULE, *EARLIER_VERDICT_RULES):
+        found = re.search(_rule_pattern(rule), text or "")
+        if found:
+            return text[:found.start()].rstrip(), text[found.start():].strip()
+    return text, ""
 
 
 #: The loop's default iteration limit and its knob's bounds.
@@ -219,6 +242,12 @@ def _kind_of(node: Node) -> str:
     return node.kind
 
 
+def _sealed(node: Node) -> bool:
+    from refactory_dsh.workspace import is_sealed
+
+    return is_sealed(node)
+
+
 def _uses_tools(node: Node) -> bool:
     return node.kind == "agent" and (node.tool_policy not in TOOL_POLICIES or bool(node.tools))
 
@@ -310,7 +339,11 @@ def _seen(graph: Graph, state: Mapping[str, Any], there: set[tuple[str, str]],
     """What a new (or rewired) step will see: ``default``, or what ``sees`` names, kept
     to what is there before it on every path, facts before files, each sorted."""
     if sees is None:
-        chosen = set(default) & there
+        # A sealed step's session log (`workspace.SEALED_SESSION`) goes with its dispatch
+        # and nothing reads it, so a default never hands it on; 'sees' may still name it.
+        from refactory_dsh.workspace import SEALED_SESSION
+
+        chosen = {key for key in set(default) & there if key != ("file", SEALED_SESSION)}
     else:
         if isinstance(sees, str):
             sees = [sees]
@@ -450,6 +483,10 @@ def _copy_spec(node: Node, state: Mapping[str, Any]) -> dict:
     spec = {"kind": kind, "text": _text_of(node, state), "_like": node.id}
     if kind == "code":
         spec["_copied"] = spec["text"]
+    if kind == "agent" and _sealed(node):
+        # Its sealed tools, in the spec itself, so every check that reads a spec's tools
+        # (a take-over of several files, a fallback's) sees the copy as the tool step it is.
+        spec["tools"] = list(node.tools)
     return spec
 
 
@@ -500,6 +537,10 @@ def _step_nodes(graph: Graph, state: Mapping[str, Any], spec: dict, node_id: str
         text = _strip_unseen(spec["text"] or NEUTRAL_STEP,
                              set(facts) | set(state.get("knobs") or {}))
         tools = spec.get("tools")
+        if not tools and like is not None and _sealed(like):
+            # A copy of a sealed tool step is sealed as it is: its files in its own
+            # workspace (as it reads them), never pasted in as text by a collect step.
+            tools = list(like.tools)
         if files and not tools:
             gather = _fresh(graph, f"{node_id}_inputs", (node_id,))
             out.append(collect_node(gather, files, gather,
@@ -507,7 +548,7 @@ def _step_nodes(graph: Graph, state: Mapping[str, Any], spec: dict, node_id: str
             facts = [*facts, gather]
         text = _with_sections(text, facts)
         if verdict:
-            text = f"{text}\n\n{VERDICT_RULE.format(labels=' or '.join(verdict))}"
+            text = f"{text}\n\n{verdict_rule(verdict)}"
         node: dict[str, Any] = {
             "id": node_id, "kind": "agent", "prompt_template": text,
             "system_prompt_template": spec.get("system") or "You are one step of a pipeline.",
@@ -1062,6 +1103,20 @@ def _owned(graph: Graph, step: str, state: Mapping[str, Any]) -> list[str]:
         if readers <= {step}:
             out.append(helper)
     return out
+
+
+def _inputs_helper(graph: Graph, step: str, state: Mapping[str, Any]) -> str | None:
+    """The ``collect`` step an operator put in front of ``step`` for it alone
+    (`_owned`), which the pipeline view folds into the step; ``None`` when it has none."""
+    helper = f"{step}_inputs"
+    return helper if helper in _owned(graph, step, state) else None
+
+
+def _head(graph: Graph, step: str, state: Mapping[str, Any]) -> str:
+    """Where a way into ``step`` enters: its own collect step when it has one (the view
+    shows the two as one step), else the step itself. An edge to the step that skipped its
+    collect would run it without the files it is handed."""
+    return _inputs_helper(graph, step, state) or step
 
 
 def _upstream(graph: Graph, node_id: str) -> set[str]:
@@ -1794,13 +1849,18 @@ def _expand_remove(edit: dict, state: dict) -> list[dict]:
 # ── parallelize ───────────────────────────────────────────────────────────
 
 
-def _chain_of(graph: Graph, ids: Sequence[str]) -> None:
+def _chain_of(graph: Graph, ids: Sequence[str], state: Mapping[str, Any] | None = None
+              ) -> None:
+    """Refused unless ``ids`` follow each other straight, in run order. With ``state``, a
+    step's own collect step in front of it (`_head`, folded into the step in the view)
+    counts as part of it."""
     for first, second in zip(ids, ids[1:]):
+        head = _head(graph, second, state) if state is not None else second
         out = graph.out_edges(first)
-        if len(out) != 1 or out[0].target != second or out[0].condition is not None:
+        if len(out) != 1 or out[0].target != head or out[0].condition is not None:
             raise _Refused(f"{first!r} does not lead straight to {second!r}; give consecutive "
                            "steps, in run order")
-        if len(graph.in_edges(second)) != 1:
+        if len(graph.in_edges(head)) != 1:
             raise _Refused(f"{second!r} is reached from more than one step")
 
 
@@ -2324,7 +2384,23 @@ def _judge(edit: dict) -> str:
     judge = edit.get("judge", "agent")
     if not isinstance(judge, str) or not (judge in JUDGE_KINDS or ":" in judge):
         raise _Refused(f"'judge' is one of {list(JUDGE_KINDS)} or a 'module:function' callable")
+    if edit.get("tools") and judge != "agent":
+        raise _Refused(f"'tools' are an agent judge's; a {judge!r} judge runs no tools")
     return judge
+
+
+def _judge_spec(edit: Mapping[str, Any], default_text: str) -> dict:
+    """The step spec of a ``loop`` or ``route`` agent judge: its text, and its 'tools' and
+    'sees' as an inserted agent step takes them (`_step_nodes`): with tools it runs sealed,
+    in a fresh workspace holding only the files it sees -- without 'sees', in the per-item
+    part, the item's input files too (`_with_item_files`) -- and its reply is still the
+    verdict its gate reads (`VERDICT_RULE`)."""
+    raw: dict[str, Any] = {"kind": "agent", "text": edit.get("text") or default_text}
+    if edit.get("tools"):
+        raw["tools"] = list(edit["tools"])
+    if edit.get("sees") is not None:
+        raw["sees"] = edit["sees"]
+    return _spec(raw)
 
 
 def is_one_line_loop(edit: Mapping[str, Any]) -> bool:
@@ -2552,8 +2628,7 @@ def _expand_loop_line(edit: dict, state: dict) -> list[dict]:
     steps: list[dict] = [{"op": "add_knob", "name": knob, "spec": knob_spec}]
     if judge == "agent":
         judge_id = _fresh(graph, f"{gate_id}_judge", (gate_id,))
-        nodes = _step_nodes(graph, state, _spec({"kind": "agent",
-                                                 "text": edit.get("text") or NEUTRAL_CHECK}),
+        nodes = _step_nodes(graph, state, _judge_spec(edit, NEUTRAL_CHECK),
                             judge_id, seen, verdict=("proceed", "reloop"),
                             settings_from=node if node.kind == "agent" else None)
         gate = _gate_state(gate_id, judge, "", seen, label="proceed",
@@ -2591,7 +2666,10 @@ def _routes(edit: dict, graph: Graph, anchor: Node,
         succ = _route_next(graph, anchor.id)
         if succ is None:
             raise _Refused(f"{anchor.id!r} has no next step to route to")
-        revise = {"kind": "agent", "text": NEUTRAL_REVIEW}
+        # A copy of an agent step (its role, timeout, route and sealed tools), told to
+        # review; a neutral agent step after anything else.
+        revise = ({**_copy_spec(anchor, state), "text": NEUTRAL_REVIEW}
+                  if anchor.kind == "agent" else {"kind": "agent", "text": NEUTRAL_REVIEW})
         if anchor.kind == "agent":
             try:
                 _route_take_over(graph, state, anchor, _spec({**revise, "takes_over": anchor.id}))
@@ -2611,7 +2689,16 @@ def _pre_route(edit: dict, state: dict) -> str | None:
         raise _Refused(f"{anchor.id!r} is the last step of its pass or run; route after a step "
                        "that has a next step")
     _judge(edit)
-    upstream = _upstream(graph, anchor.id) | {anchor.id}
+    # What runs before the route on a run's way forward: a way to one of those would send
+    # work back. Retry edges are left out (`_forward_flow`), so a route inside a loop (a
+    # step a gate sends back to on reloop) may still lead on to the steps after it.
+    try:
+        flow = _forward_flow(graph)
+    except GraphError:
+        # A cycle no gate reads: the state is refused by name further on (E-state).
+        upstream = _upstream(graph, anchor.id) | {anchor.id}
+    else:
+        upstream = {key for key in graph.nodes if anchor.id in _reach(flow, key)}
     seen_labels: set[str] = set()
     for label, target in _routes(edit, graph, anchor, state).items():
         if not isinstance(label, str) or not _LABEL.fullmatch(label) or label.lower() == "halt":
@@ -2678,9 +2765,9 @@ def _expand_route(edit: dict, state: dict) -> list[dict]:
     taken = [gate_id]
     if judge == "agent":
         judge_id = _fresh(graph, f"{gate_id}_judge", taken)
-        nodes = _step_nodes(graph, state, _spec({"kind": "agent",
-                                                 "text": edit.get("text") or NEUTRAL_ROUTE}),
-                            judge_id, seen, verdict=list(routes))
+        nodes = _step_nodes(graph, state, _judge_spec(edit, NEUTRAL_ROUTE),
+                            judge_id, seen, verdict=list(routes),
+                            settings_from=anchor if anchor.kind == "agent" else None)
         taken += [str(n["id"]) for n in nodes]
         build.add(_at_rejoin(build.graph, anchor.id, nodes) if rejoin
                   else _add_chain(nodes, {"after": anchor.id}))
@@ -2696,6 +2783,8 @@ def _expand_route(edit: dict, state: dict) -> list[dict]:
     new_facts: list[str] = []
     for label, target in routes.items():
         if isinstance(target, str):
+            # Into the step's own collect step, when it has one (`_head`).
+            target = _head(build.graph, target, build.state)
             build.add([{"op": "add_edge", "source": gate_id, "target": target,
                         "condition": label}])
             continue
@@ -2707,8 +2796,11 @@ def _expand_route(edit: dict, state: dict) -> list[dict]:
         way_seen = _seen(graph, state, there, view, spec.get("sees"))
         if over is not None and spec.get("sees") is None:
             # By default it sees what it rewrites, wherever before the route that was made.
-            way_seen = sorted(set(way_seen) | (_readable(graph, state, _outputs(over)) & there),
-                              key=lambda key: (key[0] != "fact", key[1]))
+            from refactory_dsh.workspace import SEALED_SESSION
+
+            # What the step it redoes left, but never its session log (nothing reads it).
+            redone = (_readable(graph, state, _outputs(over)) & there) - {("file", SEALED_SESSION)}
+            way_seen = sorted(set(way_seen) | redone, key=lambda key: (key[0] != "fact", key[1]))
         nodes = _step_nodes(graph, state, spec, node_id, way_seen,
                             settings_from=anchor if anchor.kind == "agent" else None,
                             **({"writes": list(over.writes), "produces": list(over.produces)}
@@ -2865,15 +2957,32 @@ def _expand_map(edit: dict, state: dict) -> list[dict]:
                 _default_wired(copy)
         if anchor.kind == "agent" and anchor.role:
             node["role"] = anchor.role
+        if anchor.kind == "agent" and anchor.timeout_s:
+            # Its timeout too, as any new agent takes its neighbour's (`_step_nodes`).
+            node["timeout_s"] = anchor.timeout_s
         if route:
             node["route"] = dict(route)
         branch.append(node)
     combine = _combine_spec(edit)
     combine_id = combine.get("id") or _fresh(graph, f"{base}_combine", taken)
     taken.append(combine_id)
-    combined = _step_nodes(graph, state, combine, combine_id,
-                           [("fact", base), *seen, *(("file", f"{c}.txt") for c in copies)],
-                           settings_from=anchor if anchor.kind == "agent" else None)
+    results = [f"{c}.txt" for c in copies]
+    if combine["kind"] == "agent" and combine.get("tools"):
+        # A sealed combine declares every file it reads, and a short list leaves some runs'
+        # results unwritten (V6): they reach it as one fact from a collect step in front
+        # (each file optional, as a combine without tools is handed them), and its sealed
+        # workspace holds the other files it sees.
+        gather = _fresh(graph, f"{combine_id}_inputs", taken)
+        taken.append(gather)
+        combined = [collect_node(gather, results, gather,
+                                 notes=f"Hands {combine_id} the map's results."),
+                    *_step_nodes(graph, state, combine, combine_id,
+                                 [("fact", base), ("fact", gather), *seen],
+                                 settings_from=anchor if anchor.kind == "agent" else None)]
+    else:
+        combined = _step_nodes(graph, state, combine, combine_id,
+                               [("fact", base), *seen, *(("file", f) for f in results)],
+                               settings_from=anchor if anchor.kind == "agent" else None)
     build.add(systems)
     build.add([{"op": "add_knob", "name": task,
                 "spec": Knob(text, "str", description=f"what {base} does with one element").spec()},
@@ -3168,6 +3277,14 @@ def _expand_split_line(edit: dict, state: dict) -> list[dict]:
 # ── merge ─────────────────────────────────────────────────────────────────
 
 
+def _merge_tools(edit: Mapping[str, Any], a: Node, b: Node) -> list[str]:
+    """The merged step's tools: the edit's, else those of the sealed steps it merges (a
+    sealed step's tools come along, so the merged step stays sealed)."""
+    if edit.get("tools"):
+        return list(edit["tools"])
+    return list(dict.fromkeys(t for n in (a, b) if _sealed(n) for t in n.tools))
+
+
 def _merge_kind(edit: dict, a: Node, b: Node) -> str:
     return edit.get("kind") or ("agent" if "agent" in (a.kind, b.kind) else "code")
 
@@ -3196,20 +3313,24 @@ def _pre_merge(edit: dict, state: dict) -> str | None:
     if not isinstance(ids, list) or len(ids) != 2 or not all(isinstance(i, str) for i in ids):
         raise _Refused("'steps' names two consecutive steps")
     a, b = (_plain_step(graph, i, "merge") for i in ids)
-    _chain_of(graph, [a.id, b.id])
+    _chain_of(graph, [a.id, b.id], state)
     _sole_out(graph, b.id)
     for node in (a, b):
         if _forks_naming(graph, node.id):
             raise _Refused(f"{node.id!r} is a fork's branch or a join's source")
-        if _uses_tools(node):
-            raise _Refused(f"{node.id!r} uses tools; merge steps that do not")
+        if _uses_tools(node) and not _sealed(node):
+            raise _Refused(f"{node.id!r} uses tools outside a sealed workspace, which a "
+                           "merged step could not keep; merge steps that do not, or sealed ones")
+    # The steps' own collect steps go with them (`_expand_merge`).
+    own = {a.id, b.id} | {h for h in (_inputs_helper(graph, a.id, state),
+                                      _inputs_helper(graph, b.id, state)) if h}
     readers = sorted(n.id for n in graph.nodes.values()
-                     if n.id not in (a.id, b.id) and _consumed(n, state) & (_outputs(a) - _outputs(b)))
+                     if n.id not in own and _consumed(n, state) & (_outputs(a) - _outputs(b)))
     if readers:
         raise _Refused(f"{', '.join(readers)} read(s) what {a.id!r} makes, which a merged step "
                        "would no longer make")
     kind = _merge_kind(edit, a, b)
-    if kind == "agent" and len(b.writes) != 1:
+    if kind == "agent" and len(b.writes) != 1 and not _merge_tools(edit, a, b):
         raise _Refused(f"{b.id!r} writes {list(b.writes) or 'no file'}; a merged agent writes "
                        "one file")
     if (graph.start == a.id or "entry" in _data_ends(graph, a.id)) \
@@ -3235,8 +3356,22 @@ def _expand_merge(edit: dict, state: dict) -> list[dict]:
     text = _merge_text(edit, a, b, kind, state)
     there = set(_available(graph).get(a.id, set()))
     view = _consumed(a, state) | {key for key in _consumed(b, state) if key[1] not in a_made}
+    # Each step's own collect step goes with it: the merged step sees the files it handed
+    # on (made before the merged step), and gets a collect step of its own for them.
+    helpers = [h for h in (_inputs_helper(graph, a.id, state), _inputs_helper(graph, b.id, state))
+               if h is not None]
+    for helper in helpers:
+        view = (view - _outputs(graph.nodes[helper])) | {
+            ("file", name) for name in graph.nodes[helper].reads if name not in a_made}
+        there |= {("file", name) for name in graph.nodes[helper].reads
+                  if ("file", name) in set(_available(graph).get(helper, set()))
+                  and name not in a_made}
+    for helper in helpers:
+        build.add(_bypass(build.state, helper))
+    graph = build.graph
+    tools = _merge_tools(edit, a, b) if kind == "agent" else []
     spec = _spec({**{k: v for k, v in edit.items() if k not in ("op", "steps")},
-                  "kind": kind, "text": text})
+                  "kind": kind, "text": text, **({"tools": tools} if tools else {})})
     node_id = spec.get("id") or _fresh(graph, f"{a.id}_{b.id}")
     nodes = _step_nodes(graph, state, spec, node_id,
                         _seen(graph, state, there, view, spec.get("sees")),
@@ -3424,7 +3559,10 @@ def route_field_line(offered: Mapping[str, Sequence[str]]) -> str:
     """The request's one line for ``route``: where it goes and the run's values for it
     (`workers.StepRoutes.offered`)."""
     values = "; ".join(f"{key} {', '.join(vals)}" for key, vals in offered.items())
-    return (f"- `{ROUTE_FIELD}` on a new agent step (`insert`, `branch`, `merge`, or a step in "
+    # Every operator that takes the field, so the line cannot leave one out.
+    ops = ", ".join(f"`{name}`" for name, entry in OPERATORS.items()
+                    if ROUTE_FIELD in entry["fields"])
+    return (f"- `{ROUTE_FIELD}` on a new agent step ({ops}, or a step in "
             "'into', 'new' or 'to'): its own model, effort or output cap, any of them, each "
             f"one of this run's -- {values}; left out, it runs on its neighbour's. E.g. "
             + json.dumps({ROUTE_FIELD: {key: vals[0] for key, vals in offered.items()}}))
@@ -3438,6 +3576,15 @@ INSERT_TOOLS = ("; 'tools' (an agent): e.g. " + json.dumps(list(SEALED_TOOLS))
                 "files it sees (in the per-item part, without 'sees', the item's input files "
                 "too), no network, no grader files")
 MAP_TOOLS = "; 'tools' as insert's: each run sealed"
+#: What the branch and merge lines say of 'tools'.
+STEP_TOOLS = "; 'tools' as insert's (sealed)"
+#: What the merge line says of 'tools'.
+MERGE_TOOLS = "; 'tools' as insert's (sealed), else a sealed step's own come along"
+#: What the route line says of 'tools', not said twice in one request.
+ROUTE_JUDGE_TOOLS = "; 'tools' as loop's judge"
+#: What the loop line says of 'tools': the agent judge's, as insert's.
+JUDGE_TOOLS = ("; with 'tools' (an agent judge, as insert's) it runs sealed instead, with "
+               "the files it sees in its workspace, and its reply starts with the verdict")
 
 
 #: How a refusal ends that names tools as the other way to write several files (a
@@ -3456,7 +3603,8 @@ def refusal_without_tools(reason: str) -> str:
 def without_tools(description: str, fields: Sequence[str]) -> tuple[str, list[str]]:
     """An operator's request line and fields with no offer of tools: for a run where a new
     step has none (no seal, or ``new_step_tools`` off)."""
-    for clause in (INSERT_TOOLS, MAP_TOOLS):
+    for clause in (INSERT_TOOLS, MAP_TOOLS, JUDGE_TOOLS, ROUTE_JUDGE_TOOLS, MERGE_TOOLS,
+                   STEP_TOOLS):
         description = description.replace(clause, "")
     return description, [f for f in fields if f != "tools"]
 
@@ -3501,11 +3649,12 @@ OPERATORS: dict[str, dict[str, Any]] = {
     },
     "branch": {
         "reads_as": ('parallel',),
-        "fields": ("fork", "kind", "text", "system", "sees", "optional", "id", "to", "route"),
+        "fields": ("fork", "kind", "text", "system", "sees", "optional", "id", "to", "route",
+                   "tools"),
         "line": "a new step as another branch of a fork ('optional': true lets it fail "
                 "without failing the item; 'sees' names its inputs: \"task\", step ids, or "
                 "single fact or file names there before the fork; 'system' as insert's); "
-                + REACHES.format(where="after the join"),
+                + REACHES.format(where="after the join") + STEP_TOOLS,
         "example": {"op": "branch", "fork": "<fork>", "kind": "agent",
                     "text": "<what this branch does>"},
     },
@@ -3521,8 +3670,8 @@ OPERATORS: dict[str, dict[str, Any]] = {
     },
     "loop": {
         "reads_as": ('loop',),
-        "fields": ("step", "back_to", "judge", "text", "sees", "max_iterations", "id", "target",
-                   "gate"),
+        "fields": ("step", "back_to", "judge", "text", "sees", "tools", "max_iterations", "id",
+                   "target", "gate"),
         "line": "a judge after a step that can send it back with its reason -- or, with "
                 "'back_to', send the work back to an earlier agent step, so every step from "
                 "there to the judge runs again (a fork in between whole); 'back_to' is one "
@@ -3530,8 +3679,11 @@ OPERATORS: dict[str, dict[str, Any]] = {
                 "branch: 'judge' agent "
                 "(text = what to check; its answer starts with proceed or reloop, then why), "
                 "code (text = Python returning {'verdict': 'proceed' or 'reloop', 'reason': "
-                "why}) or a callable. The judge sees what the step read and wrote, unless "
-                "'sees' says otherwise. The reason reaches the step sent back, with that "
+                "why}) or a callable. The judge is handed what the step read and wrote, "
+                "unless 'sees' says otherwise, as text (a binary or very long file only "
+                "named)" + JUDGE_TOOLS + ". The reason reaches the "
+                "step sent "
+                "back, with that "
                 "step's own last output; it is sent "
                 "back at most 'max_iterations' times, so it runs at most that many times "
                 f"plus one (default {LOOP_ITERATIONS[0]}: up to {LOOP_ITERATIONS[0] + 1} runs; "
@@ -3543,10 +3695,11 @@ OPERATORS: dict[str, dict[str, Any]] = {
     },
     "route": {
         "reads_as": ('route',),
-        "fields": ("after", "judge", "text", "to", "sees", "id"),
+        "fields": ("after", "judge", "text", "to", "sees", "tools", "id"),
         "line": "a judge after a step chooses one labelled next step ('to': label -> step id "
                 "or a new step, whose 'takes_over' rewrites an earlier step's outputs on that "
-                "way); the branches rejoin; with no 'to', proceed or redo the step in place",
+                "way); the branches rejoin; with no 'to', proceed or redo the step in place"
+                + ROUTE_JUDGE_TOOLS,
         "example": {"op": "route", "after": "<step>", "judge": "agent",
                     "text": "<how to choose>",
                     "to": {"proceed": "<next step>",
@@ -3563,9 +3716,9 @@ OPERATORS: dict[str, dict[str, Any]] = {
     },
     "merge": {
         "reads_as": ('step',),
-        "fields": ("steps", "kind", "text", "system", "id", "route"),
+        "fields": ("steps", "kind", "text", "system", "id", "route", "tools"),
         "line": "two consecutive steps as one, with the first's inputs and the second's "
-                "outputs; 'system' as insert's",
+                "outputs; 'system' as insert's" + MERGE_TOOLS,
         "example": {"op": "merge", "steps": ["<step>", "<next step>"],
                     "text": "<what the merged step does>"},
     },
@@ -3861,11 +4014,17 @@ STEP_FIELDS = ("kind", "text", "system", "sees", "id", "to", "call", "reads", "t
 
 
 def _tools_refusal(tools: Any) -> str | None:
-    """Why ``tools`` is not a list of the tools a new step may use, or ``None``."""
-    if (not isinstance(tools, list) or not tools
-            or any(t not in SEALED_TOOLS for t in tools) or len(set(tools)) != len(tools)):
-        return (f"'tools' lists the tools a new step uses, from {', '.join(SEALED_TOOLS)}; "
-                f"{tools!r} is not such a list")
+    """Why ``tools`` is not a list of the tools a new step may use, or ``None``: DSH's
+    (`SEALED_TOOLS`) or Claude Code's (`seal.CLAUDE_CODE_TOOLS`), never a mix, as a step
+    ``add_node`` writes out may have (`workspace.is_sealed`). Whether this run can run the
+    step on that backend is the attempt's to judge (``E-new-node-tools``)."""
+    from refactory_dsh.seal import CLAUDE_CODE_TOOLS
+
+    if (not isinstance(tools, list) or not tools or len(set(tools)) != len(tools)
+            or not (set(tools) <= set(SEALED_TOOLS) or set(tools) <= set(CLAUDE_CODE_TOOLS))):
+        return (f"'tools' lists the tools a new step uses, from {', '.join(SEALED_TOOLS)} "
+                f"(or Claude Code's {', '.join(CLAUDE_CODE_TOOLS)}); {tools!r} is not such a "
+                "list")
     return None
 
 

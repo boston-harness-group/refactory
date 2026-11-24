@@ -298,7 +298,7 @@ def run_fork(executor: Executor, node: Node, *,
     # A HaltStop inside a branch is recorded as halted, not as a failed fork with an
     # error string.  Re-raise it so the executor's main loop records halted=True.
     if _halt_exc:
-        executor._record(node.id, error=str(_halt_exc[0]), branches=status, schedule=schedule,
+        executor._record(node.id, error=_halt_exc[0].detail(), branches=status, schedule=schedule,
                          outcome="halted")
         raise _halt_exc[0]
     executor._record(node.id if error else barrier, error=error, branches=status, schedule=schedule,

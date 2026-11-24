@@ -1965,14 +1965,28 @@ generic callables in `refactory_dsh.snippet` and one macro close that gap:
   "reason first, verdict last" review. Nothing in between is read: "Do not proceed" names
   no verdict, and neither does "I would not proceed; reloop", nor a last line "reloop if
   unsure". A line that is a list item (`- Halt: no`, `1. proceed`) is never a verdict,
-  first or last, and neither is a code fence (a verdict inside a fenced block). When
+  first or last, and neither is a code fence (a verdict inside a fenced block). Either
+  may carry a `Verdict:` tag before its word (`VERDICT: reloop — row 4 is wrong`); the
+  word after the tag must be an answer, so `Verdict: do not proceed` names none. When
   neither the first word nor the last line is an answer, the node fails with an error
-  naming both and the answers; it never falls back to a default (in an outer-loop run,
-  that item's run fails). So does a text whose first word and last line name different
-  verdicts, alone or with a reason ("Halt? No. ...", then `proceed — nothing to fix`):
-  neither is picked. This is how an agent decides a gate: a reviewer
-  agent writes `proceed` or `reloop`, followed by why, or its review and then the word on
-  the last line.
+  naming both and the answers (in an outer-loop run, that item's run fails). So does a
+  text whose first word and last line name different verdicts, alone or with a reason
+  ("Halt? No. ...", then `proceed — nothing to fix`): neither is picked. This is how an
+  agent decides a gate: a reviewer agent writes `proceed` or `reloop`, followed by why,
+  or its review and then the word on the last line.
+- **An agent's answer that names no verdict is asked again** (`node_retry.settle_verdict`,
+  both runtimes: the walker's agent visit and the spine's worker both deliver through
+  `node_retry.deliver`). When the agent whose first write is a verdict gate's first
+  required read answers with no verdict ("Let me inspect ...", "I found ..."), it gets one
+  fresh call with no tools (a client that cannot drop its tools is not asked), quoting its answer, for the word alone. The word it answers is
+  written first in the file, with a line saying it was asked, above the answer, which stays
+  the reason a reloop hands back. When that names none either, the gate takes its
+  declared way on when its loop cannot settle -- its `proceed`, when `on_exhausted`
+  resolves to `continue` (a `loop`'s gate in a data pass) -- and the file says so;
+  otherwise (`fail_item`, `halt`) the gate fails as above. Each case is a
+  `verdict_reasked` event, and the re-ask is one of the item's model calls. Not asked: an
+  answer naming two verdicts, and an agent two verdict gates read. The judge a `loop`
+  adds is told to put the word alone on its first line, with an example, so this is rare.
 - **Answers a gate may give:** each out-edge condition, and `halt`. V5 refuses a code or
   verdict gate whose out-edge condition is not a single word (`needs work`, `ok.`), so the
   edit is refused instead of every run failing when the gate answers. The
@@ -2199,6 +2213,20 @@ pickers (their proposals all go through `Run.attempt`); a custom strategy's prop
 (the SkillOpt port's) are not smoked. The item history below reaches every strategy that
 builds the default request (`Loop._context`).
 
+**The wiring review** (every strategy's proposals, through `Run.attempt`). A proposal
+that applies and validates, but whose edit adds wiring warnings (`W-unread-output`,
+`W-reloop-target`: its new or changed steps judged against its parent, less what the
+parent already had), is shown them before anything judges, smokes or evaluates its
+candidate (`Loop._wiring_check`): one slim call of the repair call's shape
+(`repair.wiring_request`), whose answer changes the wiring or keeps the change and says
+why. A fix that passes every check a proposal must is the candidate; a refused fix, a kept
+change or an optimizer that asks no model (`Optimizer.review_wiring` returns `None`) keeps
+the candidate as proposed. A warning is never a refusal. Said in a note on the candidate,
+the trace (`wiring_review`, `wiring_outcome`) and the journal (`wiring_review`, so a
+resumed run asks no candidate twice). A text-only edit changes no step's wiring and is
+never asked about. A step another took over (`insert`'s `takes_over`) that still runs
+with its output unread is named so in its warning, with the two ways out.
+
 **The slim repair call.** A proposal refused for how it is written -- a validator rule, a
 precondition, an edit's shape, node text, a binding, a knob, a patch target, lowering,
 `E-gate-kind`, `E-code-run` or `E-smoke` -- goes back to the model proposer with the
@@ -2268,12 +2296,12 @@ for. The proposer writes what kind of step (`agent`, `code`, or `op` with a `cal
 | `remove` | `{"op": "remove", "step": "<step>"}`; on a gate, `"keep": "<verdict>"` | predecessors to successor; a fork's branch leaves the fork's targets and the join's sources, and a fork left with one branch is folded away; an operator's own helper steps (its collect step, a loop's judge) go too, so do the slots it put in other steps' prompts and the knobs only it read; refused with the exact reader when a step still needs what only it makes. On a gate, the kept verdict's path stays and steps only the others reached go |
 | `parallelize` | `{"op": "parallelize", "steps": ["A", "B"]}`, `{"steps": ["A"], "copies": 2}`, or `{"after": "X", "new": [{"kind": ..., "text": ...}, ...]}` | consecutive steps (neither reading the other's output), a step beside copies of itself (agents only), or new steps, between a new fork and join; copies' and new steps' outputs are wired after the join as **Wiring** below says |
 | `serialize` | `{"op": "serialize", "fork": "<fork>"}` | the branches one after another in their declared order; the fork and join go |
-| `branch` | `{"op": "branch", "fork": "<fork>", "kind": ..., "text": ..., "optional": true}` | a new branch: the fork's targets, the join's sources and edges; given `optional`, its first step binds it to a knob of its own (`<step>__optional`), which `set_knob` moves; it sees what the fork's predecessor sees and makes; its output is wired after the join as **Wiring** below says, guarded (`{% if %}`) when `optional` is given |
+| `branch` | `{"op": "branch", "fork": "<fork>", "kind": ..., "text": ..., "optional": true}` | a new branch: the fork's targets, the join's sources and edges; given `optional`, its first step binds it to a knob of its own (`<step>__optional`), which `set_knob` moves; it sees what the fork's predecessor sees and makes; its output is wired after the join as **Wiring** below says, guarded (`{% if %}`) when `optional` is given; `tools` as `insert`'s |
 | `rewire` | `{"op": "rewire", "step": "<step>", "sees": ["task", "<step id>"]}` | what an agent or code step sees: `task` is the task's own input, once, as the model steps receive it (never a step's output or a knob's text: an op's output carries the knobs it declares in `knob_outputs`, else every knob it reads), a step id that step's outputs; slots for what it no longer sees leave its prompt knob, new ones are added; same id, outputs and knobs. With `text` (agents only; without `sees` it keeps what it sees; a slot it would not be given is refused) the step also gets those instructions in place of its prompt, so a fork's branch or a join's source whose whole prompt is another step's output can work from the task alone and stay in its fork (`split` cannot replace one: the new id would have to follow into the fork's targets, the join's sources and the role names its readers resolve by) |
-| `loop` | `{"op": "loop", "step": "<step>", "judge": "agent", "text": "<what to check>"}` (judge `code`, or a `module:function`) | a judge after the step (an agent whose reply a verdict gate reads, a code gate, or an fn gate) that sends it back with the reason; `max_iterations` (optional in the edit, 2, 1-5) is a knob of its own afterwards (`<gate>__max_iterations`); never a gate a person or an agent answers. The written-out form (`target` and a `gate` node) stays |
-| `route` | `{"op": "route", "after": "<step>", "judge": "agent", "text": "...", "to": {"<label>": "<step id>" or {kind, text}}}` | a judge and a gate after the step, one labelled edge per route; new steps rejoin at the step's old successor, their outputs read only when there |
+| `loop` | `{"op": "loop", "step": "<step>", "judge": "agent", "text": "<what to check>"}` (judge `code`, or a `module:function`) | a judge after the step (an agent whose reply a verdict gate reads, a code gate, or an fn gate) that sends it back with the reason; `max_iterations` (optional in the edit, 2, 1-5) is a knob of its own afterwards (`<gate>__max_iterations`); never a gate a person or an agent answers. An agent judge takes `tools` as `insert`'s step does (sealed, with the files it sees -- without `sees`, in the per-item part, the item's input files too -- and the Task's tool environment; `E-new-node-tools` where a step cannot be sealed); its reply still starts with the verdict. A copy of a sealed tool step (a step with no text after one, `parallelize` copies, a route's default `revise` way) stays sealed with its files. The written-out form (`target` and a `gate` node) stays |
+| `route` | `{"op": "route", "after": "<step>", "judge": "agent", "text": "...", "to": {"<label>": "<step id>" or {kind, text}}}` | a judge and a gate after the step, one labelled edge per route; new steps rejoin at the step's old successor, their outputs read only when there; an agent judge takes `tools` as `loop`'s does, and its role, timeout and route from the step (the default `revise` way is a copy of the step). "Leads back" is judged on the run's forward flow, so a route inside a loop (a step a gate sends back to) may lead on; a way to a step enters through its own collect step |
 | `split` | `{"op": "split", "step": "<step>", "into": [{kind, text}, {kind, text}]}`; one entry replaces it | the first takes the step's inputs, the last its outputs (file and fact names), the step and its prompt knobs go, a mode knob it also read moves to the last. The written-out form (`target` and two node objects) stays |
-| `merge` | `{"op": "merge", "steps": ["A", "B"], "text": "..."}` | one step with A's inputs and B's outputs; refused when another step reads what A makes |
+| `merge` | `{"op": "merge", "steps": ["A", "B"], "text": "..."}` | one step with A's inputs and B's outputs; refused when another step reads what A makes. A step's own collect step (folded into it in the view) goes with it; a sealed step's tools come along (a step with tools outside a sealed workspace is refused) |
 
 **What a core operator holds to.** From the 2026-11-17 expressibility audit
 (`audit/easy-dsl-gaps.md` on the lab):
@@ -2783,7 +2811,7 @@ deferred, with why in `coverage.DECISIONS["deferred"]`.
 | node field: `prompt_template` | `add_node`, `insert_after`, `insert_before`, `wrap`, `split`, `parallel`, `loop`, `insert`, `parallelize`, `branch`, `route`, `merge` | `set_knob` | - |
 | node field: `system_prompt_template` | `add_node`, `insert_after`, `insert_before`, `wrap`, `split`, `parallel`, `loop`, `insert`, `parallelize`, `branch`, `route`, `merge` | `set_knob` | - |
 | node field: `role` | `add_node`, `insert_after`, `insert_before`, `wrap`, `split`, `parallel`, `loop`, `insert`, `parallelize`, `branch`, `route`, `merge` | *deferred: the model role among the run's routes* | - |
-| node field: `tools` | `add_node`, `insert_after`, `insert_before`, `wrap`, `split`, `parallel`, `loop`, `insert`, `parallelize`, `branch`, `route`, `merge` | *excluded by decision: tools are not a configure setting* | - |
+| node field: `tools` | `add_node`, `insert_after`, `insert_before`, `wrap`, `split`, `parallel`, `loop`, `insert`, `parallelize`, `branch`, `route`, `merge`, `fallback`, `map` | *excluded by decision: tools are not a configure setting* | - |
 | node field: `max_iterations` | `add_node`, `wrap`, `loop`, `route` | `set_knob` | - |
 | node field: `on_exhausted` | `add_node`, `wrap`, `loop`, `route` | *deferred: a timeout or retry setting as a knob* | - |
 | node field: `notes` | `add_node`, `insert_after`, `insert_before`, `wrap`, `split`, `parallel`, `loop`, `insert`, `parallelize`, `branch`, `route`, `merge` | *infrastructure flag* | - |
@@ -2807,8 +2835,8 @@ deferred, with why in `coverage.DECISIONS["deferred"]`.
 | node field: `retry` | `add_node`, `insert_after`, `insert_before`, `wrap`, `split`, `parallel`, `loop`, `insert`, `parallelize`, `branch`, `route`, `merge` | *deferred: a timeout or retry setting as a knob* | - |
 | node field: `outputs_only` | `add_node`, `insert_after`, `insert_before`, `wrap`, `split`, `parallel`, `loop`, `insert`, `parallelize`, `branch`, `route`, `merge` | *excluded by decision: not a configure setting* | - |
 | node field: `workspace` | `add_node`, `insert_after`, `insert_before`, `wrap`, `split`, `parallel`, `loop`, `insert`, `parallelize`, `branch`, `route`, `merge` | *deferred: the workspace kind* | - |
-| node field: `route` | `add_node`, `insert`, `branch`, `merge`, `split`, `parallelize`, `route` | `split` | - |
-| node field: `tool_policy` | `add_node`, `insert_after`, `insert_before`, `wrap`, `split`, `parallel`, `loop`, `insert`, `parallelize`, `branch`, `route`, `merge` | *excluded by decision: tools are not a configure setting* | - |
+| node field: `route` | `add_node`, `insert`, `branch`, `merge`, `split`, `parallelize`, `route`, `fallback`, `map` | `split` | - |
+| node field: `tool_policy` | `add_node`, `insert_after`, `insert_before`, `wrap`, `split`, `parallel`, `loop`, `insert`, `parallelize`, `branch`, `route`, `merge`, `fallback`, `map` | *excluded by decision: tools are not a configure setting* | - |
 | node field: `keeps_tool_markup` | `add_node`, `insert_after`, `insert_before`, `wrap`, `split`, `parallel`, `loop`, `insert`, `parallelize`, `branch`, `route`, `merge` | *excluded by decision: not a configure setting* | - |
 | node field: `field_bindings` | `add_node`, `insert_after`, `insert_before`, `wrap`, `split`, `parallel`, `loop`, `insert`, `parallelize`, `branch`, `route`, `merge` | *deferred: binding a new setting on an existing step* | - |
 | node field: `code` | `add_node`, `insert_after`, `insert_before`, `wrap`, `split`, `parallel`, `loop`, `insert`, `parallelize`, `branch`, `route`, `merge` | `set_knob` | - |

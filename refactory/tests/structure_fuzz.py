@@ -71,7 +71,7 @@ from refactory_dsh.nn.executor import execute
 from refactory_dsh.nn.graph import Graph
 from refactory_dsh.nn.operators import FILE_TEXT_CALL
 from refactory_dsh.optim import Candidate, Optimizer, Proposal
-from refactory_dsh.workspace import SEALED_TOOLS
+from refactory_dsh.workspace import CLAUDE_CODE_TOOLS, SEALED_TOOLS
 from refactory_dsh.optim.base import (
     MAX_EDITS_PER_PROPOSAL, _dead_edit, _grader_side_knobs, candidate_id, _node_spec,
     proposal_refusal, reason_code,
@@ -1059,7 +1059,9 @@ def check_tools(seed_state: dict[str, Any], state: dict[str, Any]) -> list[Viola
               if n.kind == "agent" and (n.tool_policy != "none" or n.tools)}
 
     def sealed(node: Any) -> bool:
-        return (bool(node.tools) and set(node.tools) <= set(SEALED_TOOLS)
+        # DSH's sealed set or Claude Code's (`workspace.sealed_backend`), never a mix.
+        return (bool(node.tools) and (set(node.tools) <= set(SEALED_TOOLS)
+                                      or set(node.tools) <= set(CLAUDE_CODE_TOOLS))
                 and node.tool_policy is None and bool(node.workspace)
                 and node.workspace["kind"] == "scratch")
 

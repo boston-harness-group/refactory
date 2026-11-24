@@ -208,6 +208,7 @@ def unread_output_warnings(graph: Graph, baseline: Graph | None = None) -> list[
     nothing here can prove the work is lost; it says no declaration shows a reader. A
     step that sets a fact is left alone (a fact may feed the score)."""
     before = {} if baseline is None else {k: n.to_state() for k, n in baseline.nodes.items()}
+    writers = {name: other_id for other_id, other in graph.nodes.items() for name in other.writes}
     out: list[str] = []
     for node_id in sorted(graph.reachable()):
         node = graph.nodes.get(node_id)
@@ -223,12 +224,21 @@ def unread_output_warnings(graph: Graph, baseline: Graph | None = None) -> list[
         if len(unread) < len(node.writes):
             continue
         files = ", ".join(repr(name) for name in unread)
+        # A step another took over (core `insert`'s 'takes_over'): what it wrote in the
+        # baseline another step writes now, and its own output went under a new name.
+        old = baseline.nodes.get(node_id) if baseline is not None else None
+        takers = sorted({writers[name] for name in (old.writes if old is not None else ())
+                         if name not in node.writes and writers.get(name) not in (None, node_id)})
+        taken = (f" Its earlier output is now written by {', '.join(map(repr, takers))}, which "
+                 f"took it over, while {node_id!r} still runs: if the new step replaces it, "
+                 f"remove {node_id!r}; if not, wire {node_id!r}'s output into the step that "
+                 "should act on it." if takers else "")
         out.append(f"W-unread-output [{node_id}]: node {node_id!r} writes {files}, which no node "
                    "declares in its reads, and sets no fact, so nothing is shown to read its "
                    "output and it runs on every item for nothing; wire it into a later step's "
                    "`reads` (an op that builds a prompt reads only the files it declares, so "
                    "a prompt saying \"the notes above\" does not make it read them), make its "
-                   "reply a fact a prompt fills in, or remove the node")
+                   "reply a fact a prompt fills in, or remove the node." + taken)
     return out
 
 

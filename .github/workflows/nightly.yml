@@ -48,6 +48,51 @@ jobs:
           path: structure-fuzz.json
           if-no-files-found: ignore
 
+  # Fresh shard durations from the last five green CI runs on main, as an artifact. It
+  # never commits: a person downloads `ci_durations.json` (or runs the same command)
+  # and opens a pull request with it when the shards have drifted apart.
+  ci-durations:
+    name: Shard durations (artifact)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: pnpm/setup@v3
+        with:
+          runtime: node@24
+          install: false
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          python-version: "3.12"
+      - name: Install (fresh-checkout path)
+        run: ./install.sh
+      # The shards' environment, so the cases that need the code-node sandbox are
+      # collected and keep their seconds.
+      - name: Allow the code-node sandbox
+        run: |
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+          if [ -e /proc/sys/kernel/unprivileged_userns_clone ]; then
+            sudo sysctl -w kernel.unprivileged_userns_clone=1 || true
+          fi
+      - name: Rebuild the durations
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REFACTORY_REQUIRE_MIGRATION_TESTS: "1"
+          REFACTORY_REQUIRE_CODE_SANDBOX: "1"
+        run: |
+          uv run python scripts/ci-durations.py --latest 5
+          git diff --stat -- refactory/tests/ci_durations.json
+      - name: Keep them
+        uses: actions/upload-artifact@v4
+        with:
+          name: ci-durations
+          path: refactory/tests/ci_durations.json
+
   slow-tests:
     name: Slow tests (nightly only)
     runs-on: ubuntu-latest
@@ -80,12 +125,13 @@ jobs:
         run: >-
           uv run python -m pytest refactory/tests -m slow --run-slow -q -rfEs -n 4 --timeout=5400
 
-  # A failed night opens (or comments on) one tracking issue, so the team sees it rather
+  # A failed night opens (or comments on) one tracking issue per job that failed (the long
+  # tier's, else the durations'), so the team sees it rather
   # than only whoever last edited the schedule. Its own job, holding the only token that
   # may write issues, so the test job and the code it runs never see one.
   report-failure:
     name: Report a failed night
-    needs: [structure-fuzz-long, slow-tests]
+    needs: [structure-fuzz-long, ci-durations, slow-tests]
     if: failure()
     runs-on: ubuntu-latest
     permissions:
@@ -97,9 +143,17 @@ jobs:
           GH_REPO: ${{ github.repository }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           SHA: ${{ github.sha }}
+          LONG_TIER: ${{ needs.structure-fuzz-long.result }}
+          DURATIONS: ${{ needs.ci-durations.result }}
+          SLOW: ${{ needs.slow-tests.result }}
         run: |
-          title="Nightly failed"
-          body="A nightly job failed on ${SHA:0:12}: $RUN_URL"
+          title="Nightly: the structure-edit harness's long tier failed"
+          if [ "$LONG_TIER" = success ] && [ "$SLOW" != success ]; then
+            title="Nightly: the slow tests failed"
+          elif [ "$LONG_TIER" = success ]; then
+            title="Nightly: the shard durations job failed"
+          fi
+          body="The nightly failed on ${SHA:0:12} (long tier: $LONG_TIER, shard durations: $DURATIONS, slow tests: $SLOW): $RUN_URL"
           number=$(gh issue list --state open --search "\"$title\" in:title" --json number --jq '.[0].number')
           if [ -n "$number" ]; then
             gh issue comment "$number" --body "$body"

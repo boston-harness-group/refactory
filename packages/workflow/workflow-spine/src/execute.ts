@@ -130,6 +130,16 @@ export function isDeterministic(node: NodeView): boolean {
 }
 
 /**
+ * True when running the node again on what it read before gives what it gave before: a
+ * command (an FnNode, a Study, a fn gate). An AgentNode is never one, even dispatched to
+ * a worker by a command (every agent node on the default worker route is): a model can
+ * answer differently.
+ */
+export function repeatsOnRedo(node: NodeView): boolean {
+  return isDeterministic(node) && node._type !== 'AgentNode'
+}
+
+/**
  * The verdict a gate's evaluator stdout declares: its last non-empty line,
  * lowercased to match how the spine compares edge conditions.
  * @param stdout - the evaluator's captured stdout.

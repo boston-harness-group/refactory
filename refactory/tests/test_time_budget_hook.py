@@ -134,7 +134,8 @@ def test_a_budget_that_is_not_a_positive_number_is_a_usage_error(tmp_path, value
 
 
 def _pytest_commands(workflow: Path) -> list[str]:
-    """Every ``pytest`` invocation in a workflow file, folded scalars joined into one line."""
+    """Every ``pytest`` invocation in a workflow file, as one line: a folded scalar's lines
+    at the same indent, or a shell line continued with a trailing backslash."""
     commands: list[str] = []
     lines = workflow.read_text().splitlines()
     for index, line in enumerate(lines):
@@ -143,7 +144,12 @@ def _pytest_commands(workflow: Path) -> list[str]:
         indent = len(line) - len(line.lstrip())
         parts = [line.strip()]
         for follow in lines[index + 1:]:
-            if not follow.strip() or len(follow) - len(follow.lstrip()) != indent:
+            continued = parts[-1].endswith("\\")
+            if continued:
+                parts[-1] = parts[-1][:-1].strip()
+            elif not follow.strip() or len(follow) - len(follow.lstrip()) != indent:
+                break
+            if "python -m pytest" in follow:
                 break
             parts.append(follow.strip())
         commands.append(" ".join(parts))

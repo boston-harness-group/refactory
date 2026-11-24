@@ -99,6 +99,14 @@ class PickedParent(Optimizer):
     def can_move(self, knob: Any, current: Any) -> bool:
         return self.proposer.can_move(knob, current)
 
+    def review_wiring(self, ctx: ProposalContext, proposal: Any, warnings: Sequence[str],
+                      parent: Candidate) -> Any:
+        """The proposer's (`Optimizer.review_wiring`): it wrote the edit, so it is shown
+        the wiring warnings it adds, whichever parent the picker chose."""
+        fixed = self.proposer.review_wiring(ctx, proposal, warnings, parent)
+        self.last_wiring_answer = str(getattr(self.proposer, "last_wiring_answer", "") or "")
+        return fixed
+
     def choose_parent(
         self, ctx: ProposalContext, parents: Sequence[Candidate]
     ) -> Candidate | None:

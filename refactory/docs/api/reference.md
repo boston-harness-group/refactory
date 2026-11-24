@@ -96,7 +96,7 @@ A mode: a Python class whose architecture and parameters are serializable.
 | kind | name | signature |
 |---|---|---|
 | class | `Mode` | `(state: 'dict[str, Any] \| None' = None) -> 'None'` |
-| class | `RunResult` | `(facts: 'dict[str, Any]' = <factory>, iterations: 'int' = 0, duration_s: 'float' = 0.0, exit_ok: 'bool' = True, error: 'str \| None' = None, workdir: 'Path \| None' = None, score: 'float' = 0.0, model_calls: 'int' = 0, gate_stop: 'str \| None' = None, halted: 'bool' = False, gate_verdicts: 'dict[str, str]' = <factory>, gate_exhausted: 'list[str]' = <factory>, item_records: 'list[dict[str, Any]]' = <factory>) -> None` |
+| class | `RunResult` | `(facts: 'dict[str, Any]' = <factory>, iterations: 'int' = 0, duration_s: 'float' = 0.0, exit_ok: 'bool' = True, error: 'str \| None' = None, workdir: 'Path \| None' = None, score: 'float' = 0.0, model_calls: 'int' = 0, gate_stop: 'str \| None' = None, halted: 'bool' = False, gate_verdicts: 'dict[str, str]' = <factory>, gate_exhausted: 'list[str]' = <factory>, item_records: 'list[dict[str, Any]]' = <factory>, timeout_kind: 'str \| None' = None) -> None` |
 | class | `StateError` | `` |
 | function | `graph_identity` | `(state: 'dict') -> 'dict'` |
 | function | `record_state_upgrades` | `(workdir: 'Path', notes: 'Any') -> 'None'` |
@@ -575,6 +575,7 @@ Lower a mode state to refactory's IR, so DSH can run it.
 |---|---|---|
 | class | `LoweringError` | `` |
 | function | `command_timeout_s` | `(node: 'Any', state: 'dict[str, Any]') -> 'int \| None'` |
+| function | `judge_verdict` | `(graph: 'Graph', node_id: 'str') -> 'dict[str, Any] \| None'` |
 | function | `knob_environment` | `(state: 'dict[str, Any]', *, extra: 'dict[str, str] \| None' = None) -> 'dict[str, str]'` |
 | function | `knob_specs` | `(state: 'dict[str, Any]') -> 'dict[str, Knob]'` |
 | function | `needs_snippet_spec` | `(node: 'Any') -> 'bool'` |
@@ -589,6 +590,7 @@ Lower a mode state to refactory's IR, so DSH can run it.
 
 - **`LoweringError`** — A state cannot be expressed in the IR, and saying why is more useful than a traceback.
 - **`command_timeout_s`** — The per-node command_timeout_s for ops and fn gates, or None.
+- **`judge_verdict`** — The verdict gate that reads an agent's answer, and what settling the answer needs.
 - **`knob_environment`** — The environment a node command runs under: the knobs, and whatever else.
 - **`needs_snippet_spec`** — Whether ``node`` runs a `refactory_dsh.snippet` callable (a code op, a code gate or
 - **`node_declarations`** — Every node's kind and declared reads, writes and facts, keyed by node id.
@@ -714,6 +716,7 @@ Running code we did not write.
 
 | kind | name | signature |
 |---|---|---|
+| class | `SampleRefused` | `` |
 | class | `SandboxError` | `` |
 | class | `SandboxResult` | `(ok: 'bool', payload: 'dict[str, Any]' = <factory>, returncode: 'int' = 0, stdout: 'str' = '', stderr: 'str' = '', timed_out: 'bool' = False, timeout_s: 'int \| None' = None, elapsed_s: 'float \| None' = None, progress: 'dict[str, Any]' = <factory>, prep_failure: 'dict[str, Any] \| None' = None, cwd_outside: 'str \| None' = None, change_caused_prep: 'dict[str, Any] \| None' = None, timeout_kind: 'str \| None' = None, output_bytes: 'int \| None' = None) -> None` |
 | function | `ast_check` | `(name: 'str', project: 'Path \| None' = None) -> 'list[str]'` |
@@ -721,19 +724,24 @@ Running code we did not write.
 | function | `is_secret` | `(name: 'str') -> 'bool'` |
 | function | `is_signal_crash` | `(result: 'SandboxResult') -> 'tuple[bool, str]'` |
 | function | `main` | `(argv: 'list[str] \| None' = None) -> 'int'` |
+| function | `mark_activity` | `(path: 'Path') -> 'None'` |
 | function | `missing_init` | `(root: 'Path') -> 'str'` |
 | function | `model_readiness` | `(workdir: 'Path', *, model_context: 'dict[str, str] \| None' = None, require_ready: 'bool' = True) -> 'dict[str, Any]'` |
 | function | `output_tail` | `(stdout: 'str \| None', stderr: 'str \| None', n: 'int') -> 'str'` |
 | function | `promote` | `(project: 'Path', name: 'str', *, note: 'str' = '') -> 'dict[str, Any]'` |
 | function | `refactory_env` | `(env: 'dict[str, str] \| None' = None) -> 'dict[str, str]'` |
 | function | `run_command` | `(command: 'str', *, workdir: 'Path', timeout_s: 'int' = 180, memory_mb: 'int' = 0, cpu_s: 'int \| None' = None, file_mb: 'int' = 16384, env: 'dict[str, str] \| None' = None, budget: 'Any' = None, home: 'Path \| None' = None, exact_env: 'bool' = False, stdin: 'Any' = None, worktree_root: 'Path \| None' = None) -> 'SandboxResult'` |
-| function | `run_sandboxed` | `(code: 'str', *, workdir: 'Path', timeout_s: 'int' = 180, memory_mb: 'int' = 2048, cpu_s: 'int' = 120, file_mb: 'int' = 16384, env: 'dict[str, str] \| None' = None, forwarded: 'dict[str, str] \| None' = None, address_space: 'bool' = True) -> 'SandboxResult'` |
+| function | `run_sandboxed` | `(code: 'str', *, workdir: 'Path', timeout_s: 'int' = 180, memory_mb: 'int' = 2048, cpu_s: 'int' = 120, file_mb: 'int' = 16384, env: 'dict[str, str] \| None' = None, forwarded: 'dict[str, str] \| None' = None, address_space: 'bool' = True, inactivity: 'bool' = False, backstop_s: 'float \| None' = None, nested_watch: 'bool' = False) -> 'SandboxResult'` |
 | function | `scrub` | `(env: 'dict[str, str] \| None' = None) -> 'dict[str, str]'` |
-| function | `smoke` | `(identifier: 'str', workdir: 'Path', *, project: 'Path \| None' = None, model: 'bool' = False, knobs: 'dict[str, Any] \| None' = None, model_context: 'dict[str, str] \| None' = None, **kwargs: 'Any') -> 'SandboxResult'` |
+| function | `smoke` | `(identifier: 'str', workdir: 'Path', *, project: 'Path \| None' = None, model: 'bool' = False, knobs: 'dict[str, Any] \| None' = None, model_context: 'dict[str, str] \| None' = None, smoke_items: 'int' = 0, holdout: 'float \| None' = None, parts_manifest: 'Path \| str \| None' = None, **kwargs: 'Any') -> 'SandboxResult'` |
+| function | `smoke_backstop_s` | `(timeout_s: 'float') -> 'float'` |
+| function | `smoke_sample` | `(mode: 'Any', workdir: 'Path', items: 'int', *, holdout: 'float \| None' = None, parts_manifest: 'Path \| str \| None' = None) -> 'dict[str, Any]'` |
+| function | `smoke_wall_s` | `(timeout_s: 'float') -> 'float'` |
 | function | `timeout_output` | `(result: 'SandboxResult', n: 'int' = 200) -> 'str'` |
 | function | `usage` | `() -> 'str'` |
 | function | `verify_sandboxed` | `(name: 'str', *, project: 'Path \| None' = None, shared_project: 'Path \| None' = None, requires_data_node: 'bool' = False, requires_task_ref: 'str' = '', requires_task_refs: 'tuple[str, ...]' = (), requires_input: 'tuple[str, ...]' = (), **kwargs: 'Any') -> 'SandboxResult'` |
 
+- **`SampleRefused`** — A smoke's sample cannot be drawn: a Task-bound node has no train item to run.
 - **`SandboxError`** — A sandboxed run could not be carried out.
 - **`SandboxResult`** — What a sandboxed run produced.
 - **`ast_check`** — Everything wrong with a package that can be seen without importing it.
@@ -741,6 +749,7 @@ Running code we did not write.
 - **`is_secret`** — Whether an environment name looks like a credential, which a sandboxed run never sees.
 - **`is_signal_crash`** — Whether a sandbox result is a signal crash that survived run_command's retry.
 - **`main`** — ``python -m refactory_dsh.sandbox --ast <pkg> | --smoke <pkg>/<mode>``.
+- **`mark_activity`** — Leave the mark `_run_watched` reads as work: the time, in ``path``.
 - **`missing_init`** — Why a package root has no `__init__.py`, and what it holds instead.
 - **`model_readiness`** — Check the model path after the same scrub/HOME rewrite as real smoke.
 - **`output_tail`** — The last *n* non-empty lines of each stream, each line labelled with its stream.
@@ -750,6 +759,9 @@ Running code we did not write.
 - **`run_sandboxed`** — Run a snippet in a subprocess with limits, from the workspace, scrubbed.
 - **`scrub`** — The environment a sandboxed run sees: an allowlist, with secrets dropped.
 - **`smoke`** — Run one mode once, in a sandbox, and report what it scored.
+- **`smoke_backstop_s`** — The wall-clock backstop of a smoke whose inactivity limit is ``timeout_s``.
+- **`smoke_sample`** — Cut ``mode`` down to a smoke's sample: ``items`` items of each Task's train part.
+- **`smoke_wall_s`** — The longest one smoke can take: its backstop, then the stop's grace and kill.
 - **`timeout_output`** — The text of ``timeout-output.txt`` for a command stopped before it exited.
 - **`usage`** — The one usage line, printed both for ``--help`` and for misuse.
 - **`verify_sandboxed`** — Everything wrong with a package, checked without importing it here.

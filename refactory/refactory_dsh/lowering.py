@@ -176,8 +176,53 @@ def node_declarations(state: dict[str, Any]) -> dict[str, dict[str, Any]]:
             # What a code or verdict node's callable needs beyond the context (its code,
             # inputs, labels): the runner hands it over as the walker's child does.
             entry["snippet"] = snippet_spec(graph, node, knob_values)
+        judged = judge_verdict(graph, node_id)
+        if judged is not None:
+            # The verdict gate that reads this agent's answer: its worker asks again when
+            # the answer names no verdict (`node_retry.settle_verdict`), as the walker does.
+            entry["verdict"] = judged
         declarations[node_id] = entry
     return declarations
+
+
+def judge_verdict(graph: Graph, node_id: str) -> dict[str, Any] | None:
+    """The verdict gate that reads an agent's answer, and what settling the answer needs.
+
+    For an agent whose answer a verdict gate (`snippet.verdict`) reads its verdict from
+    -- the gate's first ``required_reads`` is the agent's first write -- what settling
+    that answer needs
+    (`node_retry.settle_verdict`): ``{"gate", "labels", "unreadable"}``, the labels being
+    the gate's out-edge conditions and ``unreadable`` the label taken when the answer
+    names none even when asked again: the gate's ``proceed`` when it goes on there when
+    its loop cannot settle (`Graph.on_exhausted` ``continue``, a loop's in a data pass
+    unless it declares otherwise), else empty, and the gate fails as it always has
+    (``fail_item``, ``halt``). ``None`` for any other node, and for an agent two verdict
+    gates read: which gate's answers to ask for is not one question.
+
+    Both runtimes read it here: the walker from the graph, the spine's worker from the
+    declarations."""
+    from refactory_dsh import snippet
+    from refactory_dsh.nn.graph import PROCEED
+
+    node = graph.nodes.get(node_id)
+    if node is None or node.kind != "agent":
+        return None
+    if not node.writes:
+        return None
+    found = []
+    for gate in graph.nodes.values():
+        if gate.kind != "gate" or gate.evaluator != snippet.VERDICT:
+            continue
+        # The file the agent answers in, which `settle_verdict` settles: a gate fed the
+        # agent's fact instead is not matched (its verdict is read as it always was).
+        if not gate.required_reads or gate.required_reads[0] != node.writes[0]:
+            continue
+        labels = sorted({str(edge.condition) for edge in graph.out_edges(gate.id)
+                         if edge.condition})
+        onward = next((label for label in labels if label.lower() == PROCEED), "")
+        found.append({"gate": gate.id, "labels": labels,
+                      "unreadable": onward if graph.on_exhausted(gate.id) == "continue" else ""})
+    return found[0] if len(found) == 1 else None
 
 
 def needs_snippet_spec(node: Any) -> bool:
@@ -576,15 +621,20 @@ def _delivery_envelope_s(state: dict[str, Any]) -> int:
 def _smoke_envelope_s(state: dict[str, Any], runs: int) -> int:
     """The command_timeout_s of a smoke node that makes ``runs`` sandboxed runs.
 
-    Each run is bounded by the smoke budget on a wall clock (`sandbox.run_sandboxed`),
-    so the old ``runs × budget + 600`` still holds for them; a smoke node can also run
-    a command, which is bounded by the backstop instead. The larger of the two.
+    The smoke budget is an inactivity limit, so a smoke that keeps working runs to its
+    backstop and is then given its stop window (`sandbox.smoke_wall_s`); each run is
+    covered for that, plus 600 s, so the node's own timeout never fires before the
+    smoke's stop is reported. A smoke node can also run a command, which is bounded by
+    the backstop. The larger of the two.
     """
+    import math
+
     from refactory_dsh.model import NODE_DISPATCH_OVERHEAD_S
-    from refactory_dsh.sandbox import COMMAND_BACKSTOP_S
+    from refactory_dsh.sandbox import COMMAND_BACKSTOP_S, smoke_wall_s
 
     budget = _smoke_budget(state)
-    return max(runs * budget + 600, COMMAND_BACKSTOP_S + NODE_DISPATCH_OVERHEAD_S)
+    return max(runs * math.ceil(smoke_wall_s(budget)) + 600,
+               COMMAND_BACKSTOP_S + NODE_DISPATCH_OVERHEAD_S)
 
 
 def command_timeout_s(node: Any, state: dict[str, Any]) -> int | None:

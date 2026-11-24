@@ -969,6 +969,13 @@ class AutoresearchOptimizer(Optimizer):
         what fixing its mechanics needs, not the whole request; the fixed proposal."""
         return _repair(self, ctx, proposal, reasons, parent)
 
+    def review_wiring(self, ctx: ProposalContext, proposal: Proposal, warnings: Sequence[str],
+                      parent: Candidate) -> Proposal | None:
+        """One slim call (`repair.wiring_request`): the proposal, the wiring warnings its
+        edit adds and what changing its wiring needs; the proposal with its wiring changed,
+        or ``None`` when it keeps it (or the call fails)."""
+        return _review_wiring(self, ctx, proposal, warnings, parent)
+
     def propose(
         self, ctx: ProposalContext, n: int, parents: Sequence[Candidate]
     ) -> list[Proposal]:
@@ -1104,6 +1111,37 @@ def _repair(optimizer: AutoresearchOptimizer, ctx: ProposalContext, proposal: Pr
         repair.repaired_proposal(payload, proposal)
     optimizer.record_call(**call, attempt=made, reply=reply, error=None if fixed else why,
                           proposals=1 if fixed else 0)
+    return fixed
+
+
+def _review_wiring(optimizer: AutoresearchOptimizer, ctx: ProposalContext, proposal: Proposal,
+                   warnings: Sequence[str], parent: Candidate) -> Proposal | None:
+    """`AutoresearchOptimizer.review_wiring`: one slim call (`repair.wiring_request`),
+    recorded in the trace (kind ``wiring_review``). Its ``why`` is kept in
+    ``last_wiring_answer``; an answer with no edits keeps the change."""
+    from . import repair
+
+    optimizer.last_wiring_answer = ""
+    text = repair.wiring_request(
+        proposal, warnings, parent.state, catalogue=ctx.catalogue, code_nodes=ctx.code_nodes,
+        person_gates=ctx.person_gates, protected=ctx.protected, max_edits=ctx.max_edits)
+    call = {"kind": "wiring_review", "epoch": ctx.epoch, "generation": ctx.generation,
+            "parent": parent.id, "warnings": list(warnings), "system": optimizer._system,
+            "prompt": text}
+    reply, error, _overflow, made = optimizer._complete(call, text, optimizer._system)
+    if reply is None:
+        return None
+    try:
+        payload, malformed = answer_json(reply)
+    except Exception as exc:  # an unreadable answer keeps the change, never fatal
+        payload, malformed = {}, f"{type(exc).__name__}: {exc}"
+    payload = payload if isinstance(payload, dict) else {}
+    optimizer.last_wiring_answer = str(payload.get("why") or "").strip()
+    fixed, why = (None, f"malformed answer: {malformed}") if malformed else \
+        repair.repaired_proposal(payload, proposal)
+    optimizer.record_call(**call, attempt=made, reply=reply,
+                          error=None if fixed or not malformed else why,
+                          kept=fixed is None, proposals=1 if fixed else 0)
     return fixed
 
 

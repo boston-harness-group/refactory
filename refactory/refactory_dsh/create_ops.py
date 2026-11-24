@@ -1493,6 +1493,8 @@ def prepare_create(ctx: Any) -> dict[str, Any]:
     from refactory_dsh import target_guard
 
     project = project_for_writes(workdir=ctx.workdir)
+    # A holdout the smoke could not use is said now, before the first model call.
+    _given_holdout(ctx)
     # First, run the original prepare to get all the standard facts.
     prepared = prepare(ctx)
     name = str(prepared["name"])
@@ -1609,6 +1611,110 @@ def artifact_problems(root: Path) -> list[str]:
     return problems
 
 
+#: Where the smoke keeps its copy of the produced mode's parts manifest, in the run
+#: directory: both smokes (the revision's and its source's) sample the same train ids.
+SMOKE_PARTS = "smoke-parts.json"
+
+
+class SplitRefused(ValueError):
+    """The split a smoke was told to sample cannot be sampled: an unreadable profile or
+    manifest, a manifest with no train ids, or train ids none of the Task's items have.
+    Not a defect in the produced code, so `gate_smoke` stops rather than repairs."""
+
+
+def _given_holdout(ctx: Any) -> float | None:
+    """The ``holdout`` knob as a fraction, or None when it is not given (missing or
+    empty; 0 is given). Anything else than a number from 0 to below 1 is `SplitRefused`,
+    at the run's first node (`prepare_create`) as well as at the smoke."""
+    raw = ctx.knob("holdout", "")
+    text = "" if raw is None else str(raw).strip()
+    if not text:
+        return None
+    try:
+        value = float(text)
+    except ValueError as exc:
+        raise SplitRefused(f"holdout {text!r} is not a number from 0 to below 1") from exc
+    if not 0 <= value < 1:
+        raise SplitRefused(f"holdout {value} must be at least 0 and less than 1")
+    return value
+
+
+def _smoke_split(ctx: Any) -> tuple[dict[str, Any], dict[str, Any]]:
+    """The split the produced mode's real runs use, for `sandbox.smoke`'s sample, and a
+    record of it for ``smoke.json``.
+
+    Each of ``holdout`` and ``parts_manifest`` comes from the knob of that name when it
+    is given, else from the saved optimize profile the ``profile`` knob names (the one
+    source of truth for a mode's runs), else the default: the outer loop's holdout
+    fraction and no manifest. A relative manifest path is the project's
+    (`project_for_nodes`), never the node's working directory, which is the run's. The
+    manifest is read here, outside the smoke's sandbox, and copied into the run
+    directory (`SMOKE_PARTS`). Anything that cannot be sampled is `SplitRefused` before
+    any smoke runs -- falling back to a fraction split would sample items the mode's
+    runs hold out.
+    """
+    from refactory_dsh import profiles
+    from refactory_dsh import task as task_module
+
+    project = project_for_nodes()
+    name = str(ctx.knob("profile", "") or "").strip()
+    settings: dict[str, Any] = {}
+    if name:
+        try:
+            settings = dict(profiles.load(project, name)["settings"])
+        except (profiles.ProfileError, OSError, ValueError, KeyError) as exc:
+            raise SplitRefused(f"profile {name!r} cannot be read from {project}: {exc}") from exc
+    given_holdout = _given_holdout(ctx)
+    if given_holdout is not None:
+        holdout_from, raw = "knobs", given_holdout
+    elif settings.get("holdout") is not None:
+        holdout_from, raw = "profile", settings["holdout"]
+    else:
+        holdout_from, raw = "default", task_module.DEFAULT_HOLDOUT
+    try:
+        holdout = float(raw)
+    except (TypeError, ValueError) as exc:
+        raise SplitRefused(f"holdout {raw!r} is not a number") from exc
+    if not 0 <= holdout < 1:
+        raise SplitRefused(f"holdout {holdout} must be at least 0 and less than 1")
+    given = str(ctx.knob("parts_manifest", "") or "").strip()
+    source, manifest_from = ((given, "knobs") if given else
+                             (str(settings["parts_manifest"]), "profile") if settings.get("parts_manifest")
+                             else ("", None))
+    froms = {holdout_from, manifest_from}
+    record = {"source": "knobs" if "knobs" in froms else "profile" if "profile" in froms else "default",
+              "profile": name or None, "holdout": holdout, "holdout_from": holdout_from,
+              "parts_manifest": source or None, "parts_manifest_from": manifest_from}
+    if not source:
+        return {"holdout": holdout, "parts_manifest": None}, record
+    path = Path(source).expanduser()
+    if not path.is_absolute():
+        path = project / path
+    try:
+        manifest = json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError) as exc:
+        raise SplitRefused(f"parts_manifest {source!r} ({path}) cannot be read as JSON: {exc}") from exc
+    if not isinstance(manifest, dict) or not task_module.manifest_part_ids(manifest, task_module.TRAIN):
+        raise SplitRefused(f"parts_manifest {source!r} names no train ids for the smoke to sample")
+    record["parts_manifest"] = str(path)
+    copy = ctx.workdir / SMOKE_PARTS
+    copy.write_text(json.dumps(manifest, indent=2))
+    return {"holdout": holdout, "parts_manifest": copy.resolve()}, record
+
+
+def _split_warnings(split: dict[str, Any], sample: dict[str, Any]) -> list[str]:
+    """What a person should know about the split a Task-bound smoke sampled: that none
+    was given, so the default fraction may have run val or test items; and any train
+    ids of the manifest a Task does not have (`sandbox.smoke_sample`)."""
+    warnings = [str(warning) for warning in sample.get("warnings") or []]
+    if sample.get("nodes") and split.get("source") == "default":
+        warnings.insert(0, (
+            f"the smoke sampled {', '.join(sample['nodes'])} on the default holdout fraction "
+            f"({split.get('holdout')}): no profile, holdout or parts_manifest was given, so "
+            "it may have run items the mode's real runs keep as val or test"))
+    return warnings
+
+
 def _sample_knobs(raw: Any) -> dict[str, str]:
     """The knob values a validation run should use, as `NAME=VALUE` pairs.
 
@@ -1649,6 +1755,7 @@ def _smoke_timeout_record(result: Any, identifier: str, workdir: Path, *, model:
     """Describe an incomplete pass without claiming a score or model request occurred."""
     return {
         "mode": identifier, "ok": False, "score": None, "timed_out": True,
+        "timeout_kind": result.timeout_kind,
         "returncode": result.returncode, "timeout_s": result.timeout_s,
         "elapsed_s": result.elapsed_s, "progress": result.progress,
         "workdir": str(workdir), "sandboxed": True,
@@ -1669,6 +1776,13 @@ def smoke(ctx: Any) -> dict[str, Any]:
     timeout_s = int(ctx.knob("smoke_timeout_s", sandbox.DEFAULT_MODEL_SMOKE_TIMEOUT_S))
     if not 1 <= timeout_s <= 86400:
         raise ValueError("smoke_timeout_s must be between 1 and 86400 seconds")
+    smoke_items = int(ctx.knob("smoke_items", 3))
+    try:
+        split, split_record = _smoke_split(ctx)
+    except SplitRefused as exc:
+        ctx.write_json("smoke.json", {"ok": False, "score": None, "status": "split_refused",
+                                      "error": str(exc), "sandboxed": False})
+        raise
     described = sandbox.describe_package(name, project=project_for_nodes())
     if not described.ok:
         raise ValueError(f"the package could not be read: {described.problem()}")
@@ -1683,9 +1797,15 @@ def smoke(ctx: Any) -> dict[str, Any]:
     result = sandbox.smoke(
         identifier, workdir, project=project_for_nodes(), model=bool(agent_nodes),
         knobs=samples or None, model_context=context, timeout_s=timeout_s,
+        smoke_items=smoke_items, **split,
     )
     error = result.problem() if not result.ok else str(result.payload.get("error") or "")
-    ok = result.ok and result.payload.get("exit_ok") is not False
+    refused = bool(result.payload.get("sample_refused"))
+    ok = result.ok and result.payload.get("exit_ok") is not False and not refused
+    # Determine timeout_kind: prefer the outer SandboxResult's kind; fall back to payload.
+    _timeout_kind = result.timeout_kind or result.payload.get("timeout_kind") or None
+    sample = result.payload.get("sample") or {}
+    warnings = _split_warnings(split_record, sample) if ok else []
     payload = {
         "mode": identifier, "ok": ok, "score": result.payload.get("score") if ok else None,
         "iterations": result.payload.get("iterations"), "workdir": str(workdir.resolve()),
@@ -1694,11 +1814,23 @@ def smoke(ctx: Any) -> dict[str, Any]:
         "timed_out": result.timed_out, "returncode": result.returncode,
         "stdout": result.stdout, "stderr": result.stderr, "error": error,
         "sample_knobs": samples,
-        "status": "pass" if ok else failure_kind(error, timed_out=result.timed_out, returncode=result.returncode),
+        "timeout_kind": _timeout_kind,
+        "item_limit": result.payload.get("item_limit"),
+        # The split sampled and the items each Task-bound node ran, so a reader can see
+        # that no val or test item ran (`_smoke_split`, `sandbox.smoke_sample`).
+        "split": split_record,
+        "sampled_items": sample.get("per_node"),
+        "warnings": warnings,
+        "status": ("pass" if ok else "split_refused" if refused else
+                   failure_kind(error, timed_out=result.timed_out, returncode=result.returncode)),
     }
     ctx.write_json("smoke.json", payload)
+    for warning in warnings:
+        print(f"refactory: warning: {warning}", file=sys.stderr)
     if budget is not None:
         budget.checkpoint()
+    if refused:
+        raise SplitRefused(error)
     if not ok:
         qualifier = " with a model" if agent_nodes else ""
         raise ValueError(f"the new mode did not finish a run{qualifier}: {error or 'it failed without saying why'}")
@@ -1824,10 +1956,42 @@ def gate_smoke(ctx: Any) -> str:
         detail = f"{type(exc).__name__}: {exc}"
         receipt = ctx.read_json("smoke.json", {})
         kind = receipt.get("status") if receipt.get("status") not in (None, "pass") else evidence.failure_kind(detail)
-        if "revision source" in detail and "did not finish" in detail:
-            kind = "source_unavailable"
+        if isinstance(exc, SplitRefused):
+            # Not the produced code's defect: no repair can make the split samplable.
+            kind = "split_refused"
+        revision_record = ctx.read_json("revision.json", None) or {}
+        source_failed = "revision source" in detail and "did not finish" in detail
+        if source_failed:
+            # A source that was stopped before it finished is as uncertain as a new mode
+            # that was; only one that ended on its own is unavailable.
+            kind = "uncertain" if revision_record.get("timed_out") else "source_unavailable"
+        # Intercept any uncertain outcome: halt instead of raising.
+        if kind == "uncertain":
+            evidence.record(ctx, {"status": kind, "detail": detail,
+                                  "smoke": receipt, "revision": revision_record or None})
+            stopped = revision_record if source_failed else receipt
+            timeout_kind = stopped.get("timeout_kind")
+            if timeout_kind:
+                items_info = ""
+                if stopped.get("item_limit"):
+                    items_info = (f"; a sample of {stopped.get('item_limit')} items "
+                                  "per task-bound data node")
+                which = "the revision source's smoke" if source_failed else "smoke"
+                reason = (f"{which} timed out ({timeout_kind}, limit "
+                          f"{stopped.get('timeout_s', '?')}s{items_info}); "
+                          f"code repair was not attempted")
+            else:
+                reason = (f"smoke outcome uncertain ({detail}); "
+                          f"code repair was not attempted")
+            from refactory_dsh.nn.executor import Verdict
+            return Verdict("halt", reason)
         evidence.record(ctx, {"status": kind, "detail": detail,
                               "smoke": receipt, "revision": ctx.read_json("revision.json", None)})
+        if kind == "split_refused":
+            raise ValueError(
+                f"the smoke split does not match the Task: {exc}. Give a profile or "
+                "parts_manifest whose train ids are items of the Task (and a holdout from 0 "
+                "to below 1), then start a new run; code repair was not attempted")
         evidence.stop_unrepairable(kind, detail)
         from refactory_dsh.fast_ops import _repair
         return (_repair if "repair_attempts" in ctx.knobs else repair)(ctx, [detail])
@@ -1925,7 +2089,11 @@ def _revision(
             knobs=samples or None,
             model_context=_model_context(ctx),
             timeout_s=int(ctx.knob("smoke_timeout_s", sandbox.DEFAULT_MODEL_SMOKE_TIMEOUT_S)),
+            # The same sample the revision ran, so the two scores compare like with like.
+            smoke_items=int(ctx.knob("smoke_items", 3)), **_smoke_split(ctx)[0],
         )
+        if scored.payload.get("sample_refused"):
+            raise SplitRefused(f"the revision source {revision}: {scored.payload.get('error')}")
         if scored.timed_out:
             # Keep the new mode's completed smoke receipt intact. The source pass
             # is incomplete, so neither non-regression nor provenance is established.
@@ -2062,6 +2230,9 @@ def write_result(ctx: Any) -> dict[str, Any]:
         # have to infer that from the package.
         **metadata,
         "mode_contracts": contracts,
+        # The split the smoke sampled and what a person should know about it.
+        "smoke_split": (ctx.read_json("smoke.json", {}) or {}).get("split"),
+        "smoke_warnings": (ctx.read_json("smoke.json", {}) or {}).get("warnings") or [],
         "validation_evidence": ctx.read_json("authoring-evidence.json", None),
         "intent_audit": ctx.read_json("intent-audit.json", None),
     }

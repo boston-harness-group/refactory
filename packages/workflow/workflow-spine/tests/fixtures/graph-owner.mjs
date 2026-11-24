@@ -71,8 +71,11 @@ ctx.on('user-questions/request', request => {
 function run(spec) {
   return new Promise(done => {
     // No startup files: a shell that read the person's profile would rewrite PATH.
+    // Each command in a process group of its own, as DSH's local subprocess runner
+    // spawns it (`detached` off Windows), so nothing reaches it through this owner's.
     const child = spawn('bash', ['--norc', '--noprofile', '-c', spec.command], {
       cwd: spec.workdir, env: { ...process.env, ...spec.env }, stdio: ['ignore', 'pipe', 'pipe'],
+      detached: process.platform !== 'win32',
     })
     const out = []
     const err = []
