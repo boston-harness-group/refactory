@@ -607,6 +607,8 @@ def _step_nodes(graph: Graph, state: Mapping[str, Any], spec: dict, node_id: str
             node["renames"] = renames
         if writes:
             node["writes"] = list(writes)
+        if spec.get("sealed"):
+            node["sealed_script"] = True
         out.append(node)
         return out
     call = spec["call"]
@@ -2590,7 +2592,7 @@ def _iterations_knob(gate_id: str, cap: int = LOOP_ITERATIONS[0]) -> tuple[str, 
 
 def _gate_state(gate_id: str, judge: str, text: str, seen: Sequence[tuple[str, str]], *,
                 label: str, reads: Sequence[str] = (), iterations: bool = False,
-                cap: int = LOOP_ITERATIONS[0]) -> dict[str, Any]:
+                cap: int = LOOP_ITERATIONS[0], sealed: bool = False) -> dict[str, Any]:
     from refactory_dsh import snippet
 
     gate: dict[str, Any] = {"id": gate_id, "kind": "gate"}
@@ -2601,6 +2603,8 @@ def _gate_state(gate_id: str, judge: str, text: str, seen: Sequence[tuple[str, s
         gate.update({"evaluator": snippet.GATE, "code": text or _default_gate_code(label),
                      "inputs": [n for k, n in seen if k == "fact"],
                      "reads": [n for k, n in seen if k == "file"]})
+        if sealed:
+            gate["sealed_script"] = True
     else:
         gate.update({"evaluator": judge, "reads": [n for k, n in seen if k == "file"]})
     if iterations:
@@ -2627,6 +2631,7 @@ def _expand_loop_line(edit: dict, state: dict) -> list[dict]:
     cap = _loop_cap(edit)
     knob, knob_spec = _iterations_knob(gate_id, cap)
     steps: list[dict] = [{"op": "add_knob", "name": knob, "spec": knob_spec}]
+    is_sealed = bool(edit.get("sealed"))
     if judge == "agent":
         judge_id = _fresh(graph, f"{gate_id}_judge", (gate_id,))
         nodes = _step_nodes(graph, state, _judge_spec(edit, NEUTRAL_CHECK),
@@ -2638,7 +2643,7 @@ def _expand_loop_line(edit: dict, state: dict) -> list[dict]:
         steps += _add_chain(nodes, {"before": gate_id})
     else:
         gate = _gate_state(gate_id, judge, edit.get("text") or "", seen, label="proceed",
-                           iterations=True, cap=cap)
+                           iterations=True, cap=cap, sealed=is_sealed)
         steps += edits._loop_steps(graph, node.id, gate, back)
     return steps
 
@@ -2764,6 +2769,7 @@ def _expand_route(edit: dict, state: dict) -> list[dict]:
     seen = _seen(graph, state, there, view, edit.get("sees"))
     gate_id = edit.get("id") or _fresh(graph, f"{anchor.id}_route")
     taken = [gate_id]
+    is_sealed = bool(edit.get("sealed"))
     if judge == "agent":
         judge_id = _fresh(graph, f"{gate_id}_judge", taken)
         nodes = _step_nodes(graph, state, _judge_spec(edit, NEUTRAL_ROUTE),
@@ -2777,7 +2783,7 @@ def _expand_route(edit: dict, state: dict) -> list[dict]:
         build.add([{"op": "add_node", "node": gate, "position": {"after": judge_id}}])
     else:
         gate = _gate_state(gate_id, judge, edit.get("text") or "", seen,
-                           label=next(iter(routes)))
+                           label=next(iter(routes)), sealed=is_sealed)
         build.add(_at_rejoin(build.graph, anchor.id, [gate]) if rejoin else
                   [{"op": "add_node", "node": gate, "position": {"after": anchor.id}}])
     build.add([{"op": "remove_edge", "source": gate_id, "target": succ, "condition": None}])
@@ -3588,6 +3594,16 @@ ROUTE_JUDGE_TOOLS = "; 'tools' as loop's judge"
 JUDGE_TOOLS = ("; with 'tools' (an agent judge, as insert's) it runs sealed instead, with "
                "the files it sees in its workspace, and its reply starts with the verdict")
 
+#: What the insert line says of 'sealed' on a code step, and other operators that accept it.
+SEALED_CODE = ("; 'sealed' true on a code step: its code runs in the Task's tool "
+               "environment (its Python interpreter, its extra commands) sealed -- the files "
+               "it sees read-only, no network, no grader files -- so it may import any "
+               "package the Task provides (openpyxl, pandas, numpy) and read item files; "
+               "the import allowlist does not apply; the Task must declare a tool environment")
+#: The same for a code judge in loop or route.
+SEALED_JUDGE_CODE = ("; with 'sealed' true on a code judge, it runs in the Task's tool "
+                     "environment sealed, as insert's 'sealed' on a code step")
+
 
 #: How a refusal ends that names tools as the other way to write several files (a
 #: take-over's, a fallback's): said only where the run offers a tool step
@@ -3606,9 +3622,9 @@ def without_tools(description: str, fields: Sequence[str]) -> tuple[str, list[st
     """An operator's request line and fields with no offer of tools: for a run where a new
     step has none (no seal, or ``new_step_tools`` off)."""
     for clause in (INSERT_TOOLS, MAP_TOOLS, JUDGE_TOOLS, ROUTE_JUDGE_TOOLS, MERGE_TOOLS,
-                   STEP_TOOLS):
+                   STEP_TOOLS, SEALED_CODE, SEALED_JUDGE_CODE):
         description = description.replace(clause, "")
-    return description, [f for f in fields if f != "tools"]
+    return description, [f for f in fields if f not in ("tools", "sealed")]
 
 
 #: Each operator: its catalogue fields, its one line for the request, and one example
@@ -3617,12 +3633,13 @@ OPERATORS: dict[str, dict[str, Any]] = {
     "insert": {
         "reads_as": ('step',),
         "fields": ("after", "before", "kind", "text", "system", "sees", "to", "id", "call",
-                   "reads", "tools", "takes_over", "route"),
+                   "reads", "tools", "takes_over", "route", "sealed"),
         "line": "a new step after (or before) a step: 'kind' agent (text = its prompt; "
                 "'system' its system prompt), code (text = Python) or op (with 'call' and "
                 "'reads'); it sees what that step sees plus its outputs; "
                 + REACHES.format(where="after it")
                 + INSERT_TOOLS
+                + SEALED_CODE
                 + "; 'takes_over' an earlier step: the new step writes that step's outputs, "
                 "so what read them reads the new step's (a choice among attempts reaching "
                 "what is scored), and that step's own go under new names",
@@ -3673,7 +3690,7 @@ OPERATORS: dict[str, dict[str, Any]] = {
     "loop": {
         "reads_as": ('loop',),
         "fields": ("step", "back_to", "judge", "text", "sees", "tools", "max_iterations", "id",
-                   "target", "gate"),
+                   "target", "gate", "sealed"),
         "line": "a judge after a step that can send it back with its reason -- or, with "
                 "'back_to', send the work back to an earlier agent step, so every step from "
                 "there to the judge runs again (a fork in between whole); 'back_to' is one "
@@ -3683,7 +3700,7 @@ OPERATORS: dict[str, dict[str, Any]] = {
                 "code (text = Python returning {'verdict': 'proceed' or 'reloop', 'reason': "
                 "why}) or a callable. The judge is handed what the step read and wrote, "
                 "unless 'sees' says otherwise, as text (a binary or very long file only "
-                "named)" + JUDGE_TOOLS + ". The reason reaches the "
+                "named)" + JUDGE_TOOLS + SEALED_JUDGE_CODE + ". The reason reaches the "
                 "step sent "
                 "back, with that "
                 "step's own last output; it is sent "
@@ -3697,7 +3714,7 @@ OPERATORS: dict[str, dict[str, Any]] = {
     },
     "route": {
         "reads_as": ('route',),
-        "fields": ("after", "judge", "text", "to", "sees", "tools", "id"),
+        "fields": ("after", "judge", "text", "to", "sees", "tools", "id", "sealed"),
         "line": "a judge after a step chooses one labelled next step ('to': label -> step id "
                 "or a new step, whose 'takes_over' rewrites an earlier step's outputs on that "
                 "way); the branches rejoin; with no 'to', proceed or redo the step in place"

@@ -267,6 +267,7 @@ _NODE_FIELDS = frozenset(
         "knob_outputs",
         "inputs",
         "renames",
+        "sealed_script",
     }
 )
 
@@ -559,6 +560,12 @@ class Node:
     #: carrying it in every output (`operators.carried_knobs`), so a step told to see the
     #: task's own input (``"sees": ["task"]``) never gets another step's instructions.
     knob_outputs: dict[str, tuple[str, ...]] | None = None
+    #: `op` or `gate` code node: when True the code runs sealed — in the Task's tool
+    #: environment (its interpreter, its extra commands) inside the seal sandbox, with the
+    #: node's declared ``reads`` visible read-only, no network, no grader data, the same
+    #: confinement as sealed agent tool steps. The import allowlist (V18) does not apply;
+    #: the node must declare its reads, and the Task must provide a tool environment.
+    sealed_script: bool = False
     #: `op` or `gate`: names the edit layer gave this step's files, so what it runs stays
     #: as written on both runtimes: for a code op, the outputs its code returns that the
     #: run records under another name, ``{"facts": {returned: declared}, "files":
@@ -808,6 +815,7 @@ class Node:
                if self.knob_outputs is not None else {}),
             **({"renames": {key: dict(table) for key, table in self.renames.items()}}
                if self.renames else {}),
+            **({"sealed_script": True} if self.sealed_script else {}),
         }
 
     @classmethod
@@ -868,6 +876,7 @@ class Node:
             inputs=tuple(state.get("inputs") or ()),
             knob_outputs=state.get("knob_outputs"),
             renames=state.get("renames"),
+            sealed_script=bool(state.get("sealed_script", False)),
         )
 
     def bound_knob(self, field_name: str) -> str:
