@@ -286,7 +286,8 @@ def results(ctx: Any, found: dict[str, Any], *,
             draft: dict[str, Any] | None) -> dict[str, tuple[str, str]]:
     """Each selected item's result: (open or resolved, the evidence for it), decided per item.
 
-    - ``change_failure``: resolved only when the run's check passed and every test the
+    - ``change_failure``: resolved only when the run is not a draft (whose reasons include
+      delivery's merged or whole-suite check failing), its check passed and every test the
       item names passed in it: none of them is a failure the base has too, excused.
     - ``qa_finding``, ``unfinished_ask`` (and a judgment call a person selected): resolved
       only when the run delivers ready for review and its QA judge confirmed the item met,
@@ -304,6 +305,15 @@ def results(ctx: Any, found: dict[str, Any], *,
     found_results: dict[str, tuple[str, str]] = {}
     for item in _selected(found):
         kind, named = item.effective_kind, _named(item)
+        if kind == "change_failure" and draft:
+            # A draft (a limit, or delivery's merged or whole-suite check failing, which
+            # `delivery._deliver` lists first among its unresolved items) confirms no test.
+            said = "; ".join(" ".join(str(entry.get("text") or "").split())
+                             for entry in draft.get("unresolved") or [] if isinstance(entry, dict))
+            why = " ".join(str(draft.get("reason") or "the run is a draft").split())
+            found_results[item.id] = ("open", f"{at}: attempted, not confirmed: the run delivered a draft "
+                                              f"({why}{'; ' + said if said else ''})")
+            continue
         if kind == "change_failure":
             failing = [line for line in output.splitlines() if re.search(r"FAIL|ERROR", line)]
             excused = [name for name in named

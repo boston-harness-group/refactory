@@ -411,6 +411,19 @@ def test_a_change_failure_is_resolved_only_when_its_tests_passed(tmp_path, statu
     assert finish.results(_checked(tmp_path, "pass"), _fact(nameless), draft=None)["cf-3"][0] == "open"
 
 
+def test_a_whole_suite_failure_at_delivery_leaves_a_change_failure_open(tmp_path):
+    """The attempt's own check passed, but delivery's whole-suite run failed on the named test
+    and the draft was pushed: the item is attempted, not confirmed, and the failure is named."""
+    ctx = _checked(tmp_path, "pass")
+    draft = {"reason": "delivered as draft", "unresolved": [
+        {"text": "Merged-result check failed: FAILED tests/test_two.py::test_two", "source": "delivery",
+         "rounds": []}]}
+    state, said = finish.results(ctx, _fact(CHANGE), draft=draft)["cf-2"]
+    assert state == "open" and "attempted, not confirmed: the run delivered a draft" in said
+    assert "Merged-result check failed: FAILED tests/test_two.py::test_two" in said
+    assert finish.results(ctx, _fact(CHANGE), draft=None)["cf-2"][0] == "resolved"
+
+
 def test_a_draft_resolves_no_item_the_builder_got(tmp_path):
     ctx = _checked(tmp_path, "pass", confirmed=("qa-1",))
     assert finish.results(ctx, _fact(QA), draft={"reason": "limit"})["qa-1"][0] == "open"
