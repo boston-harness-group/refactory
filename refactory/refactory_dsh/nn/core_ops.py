@@ -87,19 +87,42 @@ MAP_ELEMENT_PROMPT = "Do what the input below says, for the one element it gives
 MAP_ELEMENT_TOOLS_PROMPT = "Do what the file {file} says, for the one element it gives."
 #: A map's elements by default, and at most (one branch each, `MAX_BRANCHES`).
 MAP_MAX = (4, 2, MAX_BRANCHES)
-#: What a judge agent is told about its answer's first word.
-VERDICT_RULE = ("Start your answer with one word, {labels}, alone or followed by why; "
-                "nothing before it.")
+#: What a judge agent is told about its answer's first line: the word alone, with an
+#: example (``{example}``, the last of its labels). A judge that reviews first and never
+#: writes the word is asked again for it (`node_retry.settle_verdict`); this keeps that rare.
+VERDICT_RULE = ("Your answer's first line is one word alone: {labels}. Why goes on the lines "
+                "after it. Nothing comes before that word: no heading, no preamble, no "
+                "\"Verdict:\". For example, a first line \"{example}\", then why, in a "
+                "sentence or two, on the next.")
+#: The rules judges were built with before, still matched in the prompts of states that
+#: carry them (`system_appended`).
+EARLIER_VERDICT_RULES = ("Start your answer with one word, {labels}, alone or followed by "
+                         "why; nothing before it.",)
+
+
+def verdict_rule(labels: Sequence[str]) -> str:
+    """`VERDICT_RULE` for a judge answering one of ``labels``."""
+    return VERDICT_RULE.format(labels=" or ".join(labels), example=list(labels)[-1])
+
+
+def _rule_pattern(rule: str) -> str:
+    """A rule as a pattern that matches it at a text's end, whatever its placeholders hold
+    (each on one line)."""
+    parts = re.split(r"\{(\w+)\}", rule)
+    return "".join(re.escape(part) if index % 2 == 0 else rf"(?P<{part}>.+?)"
+                   for index, part in enumerate(parts)) + r"\s*$"
+
+
 def system_appended(text: str) -> tuple[str, str]:
     """``text`` split into the step's own words and what the system appended to them (the
-    verdict rule a judge's prompt ends with, `VERDICT_RULE`); ``(text, "")`` when nothing
-    was. Our own constant is matched, never the model's words."""
-    head, tail = VERDICT_RULE.split("{labels}")
-    found = re.search(re.escape(head) + r"(?P<labels>.+?)" + re.escape(tail) + r"\s*$",
-                      text or "")
-    if not found:
-        return text, ""
-    return text[:found.start()].rstrip(), text[found.start():].strip()
+    verdict rule a judge's prompt ends with, `VERDICT_RULE`, or an earlier one,
+    `EARLIER_VERDICT_RULES`); ``(text, "")`` when nothing was. Our own constants are
+    matched, never the model's words."""
+    for rule in (VERDICT_RULE, *EARLIER_VERDICT_RULES):
+        found = re.search(_rule_pattern(rule), text or "")
+        if found:
+            return text[:found.start()].rstrip(), text[found.start():].strip()
+    return text, ""
 
 
 #: The loop's default iteration limit and its knob's bounds.
@@ -310,7 +333,11 @@ def _seen(graph: Graph, state: Mapping[str, Any], there: set[tuple[str, str]],
     """What a new (or rewired) step will see: ``default``, or what ``sees`` names, kept
     to what is there before it on every path, facts before files, each sorted."""
     if sees is None:
-        chosen = set(default) & there
+        # A sealed step's session log (`workspace.SEALED_SESSION`) goes with its dispatch
+        # and nothing reads it, so a default never hands it on; 'sees' may still name it.
+        from refactory_dsh.workspace import SEALED_SESSION
+
+        chosen = {key for key in set(default) & there if key != ("file", SEALED_SESSION)}
     else:
         if isinstance(sees, str):
             sees = [sees]
@@ -507,7 +534,7 @@ def _step_nodes(graph: Graph, state: Mapping[str, Any], spec: dict, node_id: str
             facts = [*facts, gather]
         text = _with_sections(text, facts)
         if verdict:
-            text = f"{text}\n\n{VERDICT_RULE.format(labels=' or '.join(verdict))}"
+            text = f"{text}\n\n{verdict_rule(verdict)}"
         node: dict[str, Any] = {
             "id": node_id, "kind": "agent", "prompt_template": text,
             "system_prompt_template": spec.get("system") or "You are one step of a pipeline.",
@@ -2324,7 +2351,23 @@ def _judge(edit: dict) -> str:
     judge = edit.get("judge", "agent")
     if not isinstance(judge, str) or not (judge in JUDGE_KINDS or ":" in judge):
         raise _Refused(f"'judge' is one of {list(JUDGE_KINDS)} or a 'module:function' callable")
+    if edit.get("tools") and judge != "agent":
+        raise _Refused(f"'tools' are an agent judge's; a {judge!r} judge runs no tools")
     return judge
+
+
+def _judge_spec(edit: Mapping[str, Any], default_text: str) -> dict:
+    """The step spec of a ``loop`` or ``route`` agent judge: its text, and its 'tools' and
+    'sees' as an inserted agent step takes them (`_step_nodes`): with tools it runs sealed,
+    in a fresh workspace holding only the files it sees -- without 'sees', in the per-item
+    part, the item's input files too (`_with_item_files`) -- and its reply is still the
+    verdict its gate reads (`VERDICT_RULE`)."""
+    raw: dict[str, Any] = {"kind": "agent", "text": edit.get("text") or default_text}
+    if edit.get("tools"):
+        raw["tools"] = list(edit["tools"])
+    if edit.get("sees") is not None:
+        raw["sees"] = edit["sees"]
+    return _spec(raw)
 
 
 def is_one_line_loop(edit: Mapping[str, Any]) -> bool:
@@ -2552,8 +2595,7 @@ def _expand_loop_line(edit: dict, state: dict) -> list[dict]:
     steps: list[dict] = [{"op": "add_knob", "name": knob, "spec": knob_spec}]
     if judge == "agent":
         judge_id = _fresh(graph, f"{gate_id}_judge", (gate_id,))
-        nodes = _step_nodes(graph, state, _spec({"kind": "agent",
-                                                 "text": edit.get("text") or NEUTRAL_CHECK}),
+        nodes = _step_nodes(graph, state, _judge_spec(edit, NEUTRAL_CHECK),
                             judge_id, seen, verdict=("proceed", "reloop"),
                             settings_from=node if node.kind == "agent" else None)
         gate = _gate_state(gate_id, judge, "", seen, label="proceed",
@@ -2678,8 +2720,7 @@ def _expand_route(edit: dict, state: dict) -> list[dict]:
     taken = [gate_id]
     if judge == "agent":
         judge_id = _fresh(graph, f"{gate_id}_judge", taken)
-        nodes = _step_nodes(graph, state, _spec({"kind": "agent",
-                                                 "text": edit.get("text") or NEUTRAL_ROUTE}),
+        nodes = _step_nodes(graph, state, _judge_spec(edit, NEUTRAL_ROUTE),
                             judge_id, seen, verdict=list(routes))
         taken += [str(n["id"]) for n in nodes]
         build.add(_at_rejoin(build.graph, anchor.id, nodes) if rejoin
@@ -3438,6 +3479,11 @@ INSERT_TOOLS = ("; 'tools' (an agent): e.g. " + json.dumps(list(SEALED_TOOLS))
                 "files it sees (in the per-item part, without 'sees', the item's input files "
                 "too), no network, no grader files")
 MAP_TOOLS = "; 'tools' as insert's: each run sealed"
+#: What the route line says of 'tools', not said twice in one request.
+ROUTE_JUDGE_TOOLS = "; 'tools' as loop's judge"
+#: What the loop line says of 'tools': the agent judge's, as insert's.
+JUDGE_TOOLS = ("; 'tools' (an agent judge) as insert's: it runs sealed, with the files it "
+               "sees, and its reply starts with the verdict")
 
 
 #: How a refusal ends that names tools as the other way to write several files (a
@@ -3456,7 +3502,7 @@ def refusal_without_tools(reason: str) -> str:
 def without_tools(description: str, fields: Sequence[str]) -> tuple[str, list[str]]:
     """An operator's request line and fields with no offer of tools: for a run where a new
     step has none (no seal, or ``new_step_tools`` off)."""
-    for clause in (INSERT_TOOLS, MAP_TOOLS):
+    for clause in (INSERT_TOOLS, MAP_TOOLS, JUDGE_TOOLS, ROUTE_JUDGE_TOOLS):
         description = description.replace(clause, "")
     return description, [f for f in fields if f != "tools"]
 
@@ -3521,8 +3567,8 @@ OPERATORS: dict[str, dict[str, Any]] = {
     },
     "loop": {
         "reads_as": ('loop',),
-        "fields": ("step", "back_to", "judge", "text", "sees", "max_iterations", "id", "target",
-                   "gate"),
+        "fields": ("step", "back_to", "judge", "text", "sees", "tools", "max_iterations", "id",
+                   "target", "gate"),
         "line": "a judge after a step that can send it back with its reason -- or, with "
                 "'back_to', send the work back to an earlier agent step, so every step from "
                 "there to the judge runs again (a fork in between whole); 'back_to' is one "
@@ -3531,7 +3577,8 @@ OPERATORS: dict[str, dict[str, Any]] = {
                 "(text = what to check; its answer starts with proceed or reloop, then why), "
                 "code (text = Python returning {'verdict': 'proceed' or 'reloop', 'reason': "
                 "why}) or a callable. The judge sees what the step read and wrote, unless "
-                "'sees' says otherwise. The reason reaches the step sent back, with that "
+                "'sees' says otherwise" + JUDGE_TOOLS + ". The reason reaches the step sent "
+                "back, with that "
                 "step's own last output; it is sent "
                 "back at most 'max_iterations' times, so it runs at most that many times "
                 f"plus one (default {LOOP_ITERATIONS[0]}: up to {LOOP_ITERATIONS[0] + 1} runs; "
@@ -3543,10 +3590,11 @@ OPERATORS: dict[str, dict[str, Any]] = {
     },
     "route": {
         "reads_as": ('route',),
-        "fields": ("after", "judge", "text", "to", "sees", "id"),
+        "fields": ("after", "judge", "text", "to", "sees", "tools", "id"),
         "line": "a judge after a step chooses one labelled next step ('to': label -> step id "
                 "or a new step, whose 'takes_over' rewrites an earlier step's outputs on that "
-                "way); the branches rejoin; with no 'to', proceed or redo the step in place",
+                "way); the branches rejoin; with no 'to', proceed or redo the step in place"
+                + ROUTE_JUDGE_TOOLS,
         "example": {"op": "route", "after": "<step>", "judge": "agent",
                     "text": "<how to choose>",
                     "to": {"proceed": "<next step>",

@@ -575,6 +575,7 @@ Lower a mode state to refactory's IR, so DSH can run it.
 |---|---|---|
 | class | `LoweringError` | `` |
 | function | `command_timeout_s` | `(node: 'Any', state: 'dict[str, Any]') -> 'int \| None'` |
+| function | `judge_verdict` | `(graph: 'Graph', node_id: 'str') -> 'dict[str, Any] \| None'` |
 | function | `knob_environment` | `(state: 'dict[str, Any]', *, extra: 'dict[str, str] \| None' = None) -> 'dict[str, str]'` |
 | function | `knob_specs` | `(state: 'dict[str, Any]') -> 'dict[str, Knob]'` |
 | function | `needs_snippet_spec` | `(node: 'Any') -> 'bool'` |
@@ -589,6 +590,7 @@ Lower a mode state to refactory's IR, so DSH can run it.
 
 - **`LoweringError`** — A state cannot be expressed in the IR, and saying why is more useful than a traceback.
 - **`command_timeout_s`** — The per-node command_timeout_s for ops and fn gates, or None.
+- **`judge_verdict`** — The verdict gate that reads an agent's answer, and what settling the answer needs.
 - **`knob_environment`** — The environment a node command runs under: the knobs, and whatever else.
 - **`needs_snippet_spec`** — Whether ``node`` runs a `refactory_dsh.snippet` callable (a code op, a code gate or
 - **`node_declarations`** — Every node's kind and declared reads, writes and facts, keyed by node id.
