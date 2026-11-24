@@ -78,7 +78,7 @@ def test_nothing_is_left_planned_each_gap_is_covered_or_excluded_on_purpose():
 
 
 def _apply(seed: str, edit: Any) -> tuple[Graph, Graph]:
-    applier = sf.cached_applier(seed)
+    applier = sf.Applier(sf.seeds()[seed])
     parent = Candidate.from_state(applier.seed_state)
     child = applier.attempt(parent, edit, {parent.id})
     assert isinstance(child, Candidate), (seed, edit, child)

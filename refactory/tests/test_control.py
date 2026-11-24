@@ -69,7 +69,15 @@ def test_a_pause_holds_the_run_until_it_is_resumed(tmp_path):
     control.request("pause")
 
     def release() -> None:
-        time.sleep(0.1)
+        # Resume once the run has said it is paused (a fixed wait raced a slow start).
+        deadline = time.monotonic() + 30
+        while time.monotonic() < deadline:
+            try:
+                if "paused" in [record["step"] for record in _progress(tmp_path)]:
+                    break
+            except (ValueError, KeyError):  # a line still being written
+                pass
+            time.sleep(0.05)
         control.request("resume")
 
     thread = threading.Thread(target=release, daemon=True)

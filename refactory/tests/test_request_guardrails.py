@@ -17,6 +17,7 @@ when it says more; it must not say the same thing twice.
 from __future__ import annotations
 
 import collections
+import json
 import re
 from dataclasses import replace
 from pathlib import Path
@@ -284,6 +285,18 @@ def test_the_history_grows_by_a_line_per_attempt_and_its_size_is_reported(tmp_pa
     loop._train_item_records[seed.id] = records
     history = ("Recent results", "What this run has already tried", "Your earlier reasoning",
                "What the last edit changed")
+    # The operator table is most of a render's time and the same for every round (one
+    # candidate, one state): it is worked out once and handed to each round as it was.
+    fitted: dict[str, list[str]] = {}
+    fit_section = base.operator_fit_section
+
+    def fit_once(*args: Any, **kwargs: Any) -> list[str]:
+        key = json.dumps([args[:4], kwargs], sort_keys=True, default=str)
+        if key not in fitted:
+            fitted[key] = fit_section(*args, **kwargs)
+        return fitted[key]
+
+    monkeypatch.setattr(base, "operator_fit_section", fit_once)
     sizes, text = [], ""
     for rounds in range(1, 11):
         text = replace(loop._context(), item_records=records,
@@ -297,6 +310,7 @@ def test_the_history_grows_by_a_line_per_attempt_and_its_size_is_reported(tmp_pa
     assert max(growth[3:]) <= 2 * max(1, min(growth[3:])), growth  # linear, not compounding
     assert "Round 10.0: because" in text and "Round 3.0: because" not in text
     assert _sections(text)  # the request still parses into its sections
+    assert len(fitted) == 1 and next(iter(fitted.values())), "every round showed one table"
 
 
 #: A claim about where a new step's output goes.

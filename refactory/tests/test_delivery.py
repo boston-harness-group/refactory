@@ -6,16 +6,9 @@ a base with commits nobody pushed, a name already taken on GitHub, and no gh log
 GitHub is `fake_gh.py` over bare repositories on disk, which git reaches through
 `url.<base>.insteadOf`; the model is a fake; the repositories, the worktrees, the
 pushes and the registry are real.
-
-Speed optimizations (d16):
-- The module-scoped golden fixtures from ``_delivery_support`` (``_new_golden``,
-  ``_opened_golden``) share the two most common design runs; each test gets a cheap
-  ``shutil.copytree`` clone instead of a fresh walker run.
 """
 
 from __future__ import annotations
-
-import pytest
 
 from _delivery_support import *  # noqa: F403  (the helpers and fixtures these tests share)
 

@@ -67,7 +67,7 @@ def _reaches(graph: Graph, start: str, goal: str) -> bool:
 
 
 def _seed(name: str) -> Graph:
-    return Graph.from_state(sf.cached_applier(name).seed_state["graph"])
+    return Graph.from_state(sf.Applier(sf.seeds()[name]).seed_state["graph"])
 
 
 # ── each core operator's line, against what it builds ─────────────────────
@@ -450,7 +450,7 @@ def test_a_pointer_in_a_core_operator_s_text_becomes_the_knob_s_text(seed, edit)
     """`nn.edits.KNOB_POINTER` copied from the node reference into an operator's 'text' is
     the knob's current text in the new step's knob, never the pointer itself; a pointer to
     a knob the graph lacks is refused."""
-    state = sf.cached_applier(seed).seed_state
+    state = sf.Applier(sf.seeds()[seed]).seed_state
     name, value = _text_knob(state)
     pointer = nn_edits.KNOB_POINTER.format(knob=name)
     with_text = ({**edit, "into": [{**edit["into"][0], "text": pointer}, edit["into"][1]]}
@@ -474,7 +474,7 @@ def test_only_a_judge_s_prompt_is_split_at_the_system_s_verdict_rule():
     the step review's split."""
     from refactory_dsh.optim import feedback
 
-    state = sf.cached_applier("fuzz_draft_review").seed_state
+    state = sf.Applier(sf.seeds()["fuzz_draft_review"]).seed_state
     state = nn_edits.apply({"op": "loop", "step": "draft", "judge": "agent",
                             "text": "Check the draft."}, state)
     judge = next(n for n in state["graph"]["nodes"] if n.startswith("draft_check_judge"))

@@ -9,10 +9,7 @@ Each holds for any graph and on both runtimes where it runs."""
 
 from __future__ import annotations
 
-import copy as _copy
-import functools as _functools
 import json
-from typing import Any
 
 import pytest
 
@@ -25,20 +22,9 @@ from test_livemath_skill_graph import _StepModel
 from test_pipeline_view import _mode
 
 
-#: Module-level cache: ``_mode().state_dict()`` is expensive (registry resolve +
-#: graph construction).  Each mode's state is built once and deep-copied on reuse.
-@_functools.cache
-def _cached_state(name: str) -> dict[str, Any]:
-    return _mode(name).state_dict()
-
-
-def _fresh_state(name: str) -> dict[str, Any]:
-    return _copy.deepcopy(_cached_state(name))
-
-
 def _solver(*edits: dict) -> tuple[object, dict]:
     mode = _mode("livemath/solver")
-    state = _fresh_state("livemath/solver")
+    state = mode.state_dict()
     for edit in edits:
         state = nn_edits.apply(edit, state)
     assert validate_state(state) == [], validate_state(state)
@@ -69,17 +55,14 @@ ATTEMPTS = {"solve": "<answer>A</answer>", "solve_copy1": "<answer>C</answer>",
             "solve_copy2": "<answer>D</answer>"}
 
 
-def test_the_chosen_attempt_is_what_is_graded_on_the_walker(tmp_path, monkeypatch):
+@pytest.mark.parametrize("pick,label", [("solve_copy1", "C"), ("solve", "A")])
+def test_the_chosen_attempt_is_what_is_graded_on_the_walker(pick, label, tmp_path, monkeypatch):
     mode, state = _solver(*CHOICE)
     nodes = state["graph"]["nodes"]
     assert nodes["solve_choose_next"]["writes"] == ["answer.txt"]
     assert nodes["solve"]["writes"] == ["solve.txt"]
-    # Both picks in one walker run each: the choice is what the judge answers.
-    for pick, label in [("solve_copy1", "C"), ("solve", "A")]:
-        result = _walk(mode, _StepModel({**ATTEMPTS, "solve_choose": pick}),
-                       tmp_path, monkeypatch, name=f"walker-{pick}")
-        assert {r["prediction"] for r in result.item_records} == {label}, \
-            f"pick={pick}: expected {label}"
+    result = _walk(mode, _StepModel({**ATTEMPTS, "solve_choose": pick}), tmp_path, monkeypatch)
+    assert {r["prediction"] for r in result.item_records} == {label}
 
 
 @needs_spine
@@ -98,7 +81,7 @@ def test_the_chosen_attempt_is_what_is_graded_on_the_spine(tmp_path, monkeypatch
 def test_taking_over_renames_the_step_s_outputs_for_the_steps_before_only():
     """Any graph: the step taken over writes under new names, the steps before the new one
     read them there, and the steps after it read the new step's under the old names."""
-    state = sf.cached_applier("fuzz_draft_review").seed_state
+    state = sf.Applier(sf.seeds()["fuzz_draft_review"]).seed_state
     after = nn_edits.apply({"op": "insert", "after": "review", "kind": "code",
                             "id": "pick", "takes_over": "draft"}, state)
     assert validate_state(after) == []
@@ -115,7 +98,7 @@ def test_taking_over_renames_the_step_s_outputs_for_the_steps_before_only():
 
 
 def test_taking_over_a_step_that_runs_after_is_refused():
-    state = sf.cached_applier("fuzz_draft_review").seed_state
+    state = sf.Applier(sf.seeds()["fuzz_draft_review"]).seed_state
     reason = nn_edits.precheck({"op": "insert", "after": "draft", "kind": "code",
                                 "takes_over": "review"}, state)
     assert reason and "does not run before the new step" in reason
@@ -156,7 +139,7 @@ def test_a_copy_is_sent_exactly_what_the_step_is_sent_on_the_spine(tmp_path, mon
 
 def test_a_copy_takes_no_sees():
     reason = nn_edits.precheck({"op": "parallelize", "steps": ["solve"], "copies": 1,
-                                "sees": ["task"]}, _fresh_state("livemath/solver"))
+                                "sees": ["task"]}, _mode("livemath/solver").state_dict())
     assert reason and "a copy is sent exactly what the step is sent" in reason
 
 
@@ -171,7 +154,7 @@ def test_a_copy_takes_no_sees():
      "a new step does not take 'role'"),
 ])
 def test_a_field_an_operator_would_ignore_is_refused(edit, said):
-    reason = nn_edits.precheck(edit, _fresh_state("livemath/solver"))
+    reason = nn_edits.precheck(edit, _mode("livemath/solver").state_dict())
     assert reason and said in reason and "would be ignored" in reason, reason
 
 
@@ -180,7 +163,7 @@ def test_system_is_offered_where_insert_takes_it():
     same source the precondition checks."""
     assert "system" in core_ops.OPERATORS["insert"]["fields"]
     assert nn_edits.precheck({"op": "insert", "after": "solve", "kind": "agent", "text": "x",
-                              "system": "S"}, _fresh_state("livemath/solver")) is None
+                              "system": "S"}, _mode("livemath/solver").state_dict()) is None
 
 
 # ── 5. no edit makes a step run without an input it had ────────────────────
@@ -189,7 +172,7 @@ def test_system_is_offered_where_insert_takes_it():
 def test_a_route_skipping_the_steps_a_later_step_reads_is_refused():
     """The audit's route_skip_existing: on the easy path decide_prompt would run with
     neither fork step's notes and fail every item that takes it."""
-    s4 = _fresh_state("livemath/skill_graph")
+    s4 = _mode("livemath/skill_graph").state_dict()
     with pytest.raises(nn_edits.EditError) as refused:
         nn_edits.apply({"op": "route", "after": "compare", "judge": "agent", "text": "x",
                         "to": {"hard": "notes_prompts", "easy": "decide_prompt"}}, s4)
@@ -198,7 +181,7 @@ def test_a_route_skipping_the_steps_a_later_step_reads_is_refused():
 
 
 def test_routes_that_keep_every_input_and_removals_are_still_taken():
-    s4 = _fresh_state("livemath/skill_graph")
+    s4 = _mode("livemath/skill_graph").state_dict()
     assert nn_edits.apply({"op": "route", "after": "compare", "judge": "agent", "text": "x",
                            "to": {"a": "notes_prompts",
                                   "b": {"kind": "agent", "text": "y"}}}, s4)
@@ -208,7 +191,7 @@ def test_routes_that_keep_every_input_and_removals_are_still_taken():
 def test_the_lost_input_rule_holds_on_any_graph():
     """A skip on a graph with no LiveMath in it: a route from intake straight to finalize
     leaves finalize without what draft and review make."""
-    state = sf.cached_applier("fuzz_draft_review").seed_state
+    state = sf.Applier(sf.seeds()["fuzz_draft_review"]).seed_state
     graph = Graph.from_state(state["graph"])
     assert {"intake", "draft", "review", "finalize"} <= set(graph.nodes)
     with pytest.raises(nn_edits.EditError, match="would run without"):
@@ -220,7 +203,7 @@ def test_the_lost_input_rule_holds_on_any_graph():
 
 
 def _fuzz(name: str) -> dict:
-    return sf.cached_applier(name).seed_state
+    return sf.Applier(sf.seeds()[name]).seed_state
 
 
 def test_a_step_on_a_sibling_branch_cannot_be_taken_over():
@@ -301,7 +284,7 @@ def test_an_agent_cannot_take_over_a_step_writing_two_files():
 
 
 def test_a_copy_has_exactly_the_knobs_of_the_step_it_copies():
-    s4 = _fresh_state("livemath/skill_graph")
+    s4 = _mode("livemath/skill_graph").state_dict()
     nodes = nn_edits.apply({"op": "parallelize", "steps": ["decide"], "copies": 1},
                            s4)["graph"]["nodes"]
     own = [k.replace("decide__", "") for k in nodes["decide"]["knobs"]]
@@ -313,7 +296,7 @@ def test_a_copy_has_exactly_the_knobs_of_the_step_it_copies():
                                            (["Bash"], True), ("yes", True)])
 def test_tools_is_a_list_from_the_sealed_set_or_false(tools, refused):
     edit = {"op": "insert", "after": "solve", "kind": "agent", "text": "x", "tools": tools}
-    reason = nn_edits.precheck(edit, _fresh_state("livemath/solver"))
+    reason = nn_edits.precheck(edit, _mode("livemath/solver").state_dict())
     assert bool(reason and "lists the tools a new step uses, from bash" in reason) == refused, reason
 
 
@@ -383,7 +366,7 @@ def test_as_built_says_a_new_step_no_step_reads():
     no step, and the candidate's As built says so; with the slot kept, it does not."""
     from refactory_dsh.nn import pipeline_view
 
-    parent = _fresh_state("livemath/skill_graph")
+    parent = _mode("livemath/skill_graph").state_dict()
     state = parent
     for edit in [*S4_BUNDLE, {"op": "set_knob", "name": "decide_task", "value": "Decide now."}]:
         state = nn_edits.apply(edit, state)
@@ -409,7 +392,7 @@ def test_a_new_step_ending_the_pass_leaves_its_output_to_the_task():
     """The choice step taking over solve ends the pass; the Task reads what it writes."""
     from refactory_dsh.nn import pipeline_view
 
-    parent = _fresh_state("livemath/solver")
+    parent = _mode("livemath/solver").state_dict()
     _mode_, chosen = _solver(*CHOICE)
     assert not [line for line in pipeline_view.changed_lines(parent, chosen)
                 if "reaches no step" in line]
@@ -493,7 +476,7 @@ def test_a_fact_a_reader_takes_as_feedback_is_refused():
 
 def test_a_copy_keeps_the_step_s_current_text_not_its_default():
     s4 = nn_edits.apply({"op": "set_knob", "name": "decide__system_prompt",
-                         "value": "TUNED SYSTEM PROMPT"}, _fresh_state("livemath/skill_graph"))
+                         "value": "TUNED SYSTEM PROMPT"}, _mode("livemath/skill_graph").state_dict())
     assert s4["knobs"]["decide__system_prompt"]["spec"].get("default") != "TUNED SYSTEM PROMPT"
     after = nn_edits.apply({"op": "parallelize", "steps": ["decide"], "copies": 1}, s4)
     assert after["knobs"]["decide_copy1__system_prompt"]["value"] == "TUNED SYSTEM PROMPT"
@@ -522,7 +505,7 @@ def test_a_judge_is_not_split_into_code_that_cannot_answer_its_verdict():
     verdict gate reading what the default code joins, which never starts with a verdict, so
     every run failed. Refused, saying what to give; code with its own text is taken."""
     state = nn_edits.apply({"op": "loop", "step": "left", "judge": "agent"},
-                           sf.cached_applier("fuzz_fork_join").seed_state)
+                           sf.Applier(sf.seeds()["fuzz_fork_join"]).seed_state)
     edit = {"op": "split", "step": "left_check_judge", "into": [{"kind": "code"}, {"kind": "code"}]}
     assert nn_edits.precheck(edit, state) == (
         "'left_check' reads its verdict from what 'left_check_judge' writes; a code step "
@@ -649,7 +632,7 @@ def test_a_file_named_in_sees_reaches_the_step_and_its_output_decide_on_the_spin
 def test_a_to_inside_a_parallel_or_route_step_is_honoured_never_ignored():
     """'to' is a step field: a step parallelize's 'new' or a route's 'to' adds goes where it
     says, and a 'to' whose reader runs before the step is refused, as insert's is."""
-    applier = sf.cached_applier("livemath_skill_graph")
+    applier = sf.Applier(sf.seeds()["livemath_skill_graph"])
     from refactory_dsh.optim import Candidate
 
     parent = Candidate.from_state(applier.seed_state)
@@ -733,7 +716,7 @@ def test_the_s1_table_does_not_list_insert_at_solve_as_applying():
     from refactory_dsh.optim import base
     from test_operator_fit import _rows, _section
 
-    rows = _rows(_section(_fresh_state("livemath/solver")))
+    rows = _rows(_section(_mode("livemath/solver").state_dict()))
     # Insert alone is refused there; with the take-over its refusal names, it applies.
     assert "insert" not in rows["solve"][1].split("; ")[0].split(", "), rows["solve"]
     assert "+ takes_over solve: insert" in rows["solve"][1], rows["solve"]
@@ -743,7 +726,7 @@ def test_the_s1_table_does_not_list_insert_at_solve_as_applying():
 def test_a_map_run_an_edit_removes_is_refused_not_a_crash():
     """Found by the fuzz walk: removing a map's run left its fork naming no node, and V6's
     map check read that node."""
-    applier = sf.cached_applier("fuzz_file_output")
+    applier = sf.Applier(sf.seeds()["fuzz_file_output"])
     _states, refusal = applier.replay([
         {"op": "insert", "before": "plot"},
         {"op": "map", "after": "plot_prep_inputs", "over": "plot_prep_inputs"},
@@ -790,31 +773,29 @@ def _revise_mode():
 REVISE_ANSWERS = {"decide": "<answer>A</answer>", "rev": "<answer>C</answer>"}
 
 
-def test_a_route_way_rewrites_the_taken_step_s_answer_on_the_walker(tmp_path, monkeypatch):
-    # Both verdicts in one test: each still runs the walker, but mode is built once.
-    for verdict, label in [("revise", "C"), ("proceed", "A")]:
-        mode, _state = _revise_mode()
-        model = _StepModel({**REVISE_ANSWERS, "decide_route_judge": f"{verdict}: because"})
-        result = _walk(mode, model, tmp_path, monkeypatch, name=f"walker-{verdict}")
-        assert {r["prediction"] for r in result.item_records} == {label}, \
-            f"verdict={verdict}: expected {label}"
+@pytest.mark.parametrize("verdict,label", [("revise", "C"), ("proceed", "A")])
+def test_a_route_way_rewrites_the_taken_step_s_answer_on_the_walker(verdict, label, tmp_path,
+                                                                    monkeypatch):
+    mode, _state = _revise_mode()
+    model = _StepModel({**REVISE_ANSWERS, "decide_route_judge": f"{verdict}: because"})
+    result = _walk(mode, model, tmp_path, monkeypatch)
+    assert {r["prediction"] for r in result.item_records} == {label}
 
 
 @needs_spine
-def test_a_route_way_rewrites_the_taken_step_s_answer_on_the_spine(tmp_path, monkeypatch):
+@pytest.mark.parametrize("verdict,label", [("revise", "C"), ("proceed", "A")])
+def test_a_route_way_rewrites_the_taken_step_s_answer_on_the_spine(verdict, label, tmp_path,
+                                                                   monkeypatch):
     from refactory_dsh import lowering
 
-    # Both verdicts in one test: each still runs the spine, but mode is built once.
-    for verdict, label in [("revise", "C"), ("proceed", "A")]:
-        mode, state = _revise_mode()
-        _patch_task(monkeypatch)
-        monkeypatch.setenv(lowering.KNOBS_ENV, lowering.knob_environment(state)[lowering.KNOBS_ENV])
-        spine_dir = tmp_path / f"spine-{verdict}"
-        assert _spine(mode.graph(), spine_dir, tmp_path, mode_state=state, agent_responses={
-            **REVISE_ANSWERS, "decide_route_judge": f"{verdict}: because"}) == 0
-        records = json.loads((spine_dir / "item_records.json").read_text())
-        assert records and {r["prediction"] for r in records} == {label}, \
-            f"verdict={verdict}: expected {label}"
+    mode, state = _revise_mode()
+    _patch_task(monkeypatch)
+    monkeypatch.setenv(lowering.KNOBS_ENV, lowering.knob_environment(state)[lowering.KNOBS_ENV])
+    spine_dir = tmp_path / "spine"
+    assert _spine(mode.graph(), spine_dir, tmp_path, mode_state=state, agent_responses={
+        **REVISE_ANSWERS, "decide_route_judge": f"{verdict}: because"}) == 0
+    records = json.loads((spine_dir / "item_records.json").read_text())
+    assert records and {r["prediction"] for r in records} == {label}
 
 
 def test_a_route_way_takes_over_only_a_step_every_run_passes_before_it():
@@ -846,17 +827,16 @@ def _revised_then_taken():
     return mode, out.state
 
 
-def test_a_take_over_after_a_revise_way_sees_the_way_that_ran_on_the_walker(tmp_path, monkeypatch):
-    # Both verdicts in one test to halve the walker runs.
-    for verdict, seen in [("revise", "<answer>C</answer>"),
-                          ("proceed", "<answer>A</answer>")]:
-        mode, _state = _revised_then_taken()
-        model = _StepModel({**REVISE_ANSWERS, "decide_route_judge": f"{verdict}: because",
-                            "x": "<answer>D</answer>"})
-        _walk(mode, model, tmp_path, monkeypatch, name=f"walker-{verdict}")
-        prompts = [prompt for node, prompt, _s in model.log if node == "x"]
-        assert prompts and all(seen in prompt for prompt in prompts), \
-            f"verdict={verdict}: {prompts[:1]}"
+@pytest.mark.parametrize("verdict,seen", [("revise", "<answer>C</answer>"),
+                                          ("proceed", "<answer>A</answer>")])
+def test_a_take_over_after_a_revise_way_sees_the_way_that_ran_on_the_walker(
+        verdict, seen, tmp_path, monkeypatch):
+    mode, _state = _revised_then_taken()
+    model = _StepModel({**REVISE_ANSWERS, "decide_route_judge": f"{verdict}: because",
+                        "x": "<answer>D</answer>"})
+    _walk(mode, model, tmp_path, monkeypatch)
+    prompts = [prompt for node, prompt, _s in model.log if node == "x"]
+    assert prompts and all(seen in prompt for prompt in prompts), prompts[:1]
 
 
 @needs_spine
@@ -918,36 +898,34 @@ def _rev_taken():
     return mode, out.state
 
 
-def test_a_take_over_of_a_way_s_writer_leaves_the_other_way_s_on_the_walker(tmp_path, monkeypatch):
-    # Both verdicts in one test to halve the walker runs.
-    for verdict, label in [("revise", "D"), ("proceed", "A")]:
-        mode, _state = _rev_taken()
-        model = _StepModel({**REVISE_ANSWERS, "decide_route_judge": f"{verdict}: because",
-                            "y": "<answer>D</answer>"})
-        result = _walk(mode, model, tmp_path, monkeypatch, name=f"walker-{verdict}")
-        assert {r["prediction"] for r in result.item_records} == {label}, \
-            f"verdict={verdict}: expected {label}"
-        if verdict == "revise":
-            prompts = [prompt for node, prompt, _s in model.log if node == "y"]
-            assert prompts and all("<answer>C</answer>" in p for p in prompts)
+@pytest.mark.parametrize("verdict,label", [("revise", "D"), ("proceed", "A")])
+def test_a_take_over_of_a_way_s_writer_leaves_the_other_way_s_on_the_walker(
+        verdict, label, tmp_path, monkeypatch):
+    mode, _state = _rev_taken()
+    model = _StepModel({**REVISE_ANSWERS, "decide_route_judge": f"{verdict}: because",
+                        "y": "<answer>D</answer>"})
+    result = _walk(mode, model, tmp_path, monkeypatch)
+    assert {r["prediction"] for r in result.item_records} == {label}
+    if verdict == "revise":
+        prompts = [prompt for node, prompt, _s in model.log if node == "y"]
+        assert prompts and all("<answer>C</answer>" in p for p in prompts)
 
 
 @needs_spine
-def test_a_take_over_of_a_way_s_writer_leaves_the_other_way_s_on_the_spine(tmp_path, monkeypatch):
+@pytest.mark.parametrize("verdict,label", [("revise", "D"), ("proceed", "A")])
+def test_a_take_over_of_a_way_s_writer_leaves_the_other_way_s_on_the_spine(
+        verdict, label, tmp_path, monkeypatch):
     from refactory_dsh import lowering
 
-    # Both verdicts in one test to halve the spine runs.
-    for verdict, label in [("revise", "D"), ("proceed", "A")]:
-        mode, state = _rev_taken()
-        _patch_task(monkeypatch)
-        monkeypatch.setenv(lowering.KNOBS_ENV, lowering.knob_environment(state)[lowering.KNOBS_ENV])
-        spine_dir = tmp_path / f"spine-{verdict}"
-        assert _spine(mode.graph(), spine_dir, tmp_path, mode_state=state, agent_responses={
-            **REVISE_ANSWERS, "decide_route_judge": f"{verdict}: because",
-            "y": "<answer>D</answer>"}) == 0
-        records = json.loads((spine_dir / "item_records.json").read_text())
-        assert records and {r["prediction"] for r in records} == {label}, \
-            f"verdict={verdict}: expected {label}"
+    mode, state = _rev_taken()
+    _patch_task(monkeypatch)
+    monkeypatch.setenv(lowering.KNOBS_ENV, lowering.knob_environment(state)[lowering.KNOBS_ENV])
+    spine_dir = tmp_path / "spine"
+    assert _spine(mode.graph(), spine_dir, tmp_path, mode_state=state, agent_responses={
+        **REVISE_ANSWERS, "decide_route_judge": f"{verdict}: because",
+        "y": "<answer>D</answer>"}) == 0
+    records = json.loads((spine_dir / "item_records.json").read_text())
+    assert records and {r["prediction"] for r in records} == {label}
 
 
 def test_a_co_writer_whose_callable_names_its_outputs_is_refused():
@@ -1111,7 +1089,7 @@ def test_a_knob_left_reaching_no_step_is_said_and_never_offered():
     assert "hypotheses_task" not in view, view
     # Before the rewire it reached hypotheses only (notes_prompts declares which prompt
     # carries which knob), not precision.
-    assert core_ops.reader_knobs(_fresh_state("livemath/skill_graph"), "prepare") == [
+    assert core_ops.reader_knobs(_mode("livemath/skill_graph").state_dict(), "prepare") == [
         "precision_task", "hypotheses_task", "decide_task"]
 
 
@@ -1155,7 +1133,7 @@ def _shared_decide_task() -> dict:
     through decide_prompt."""
     import copy
 
-    state = _fresh_state("livemath/skill_graph")
+    state = _mode("livemath/skill_graph").state_dict()
     nodes, edges = state["graph"]["nodes"], state["graph"]["edges"]
     copied = copy.deepcopy(nodes["decide_prompt"])
     copied.update(id="decide_prompt2", produces=["decide_prompt2"])
@@ -1237,7 +1215,7 @@ def test_a_tuned_and_rewired_branch_runs(prompts_of, tmp_path, monkeypatch):
 def test_a_rewire_with_text_on_a_step_with_a_mode_prompt_knob_sets_that_knob():
     """L4: fuzz_draft_review's review reads its prompt from the mode's knob review_task:
     the new text lands in that knob, with the slots for what it sees."""
-    applier = sf.cached_applier("fuzz_draft_review")
+    applier = sf.Applier(sf.seeds()["fuzz_draft_review"])
     from refactory_dsh.optim import Candidate
 
     parent = Candidate.from_state(applier.seed_state)

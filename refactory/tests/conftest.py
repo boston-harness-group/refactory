@@ -447,7 +447,7 @@ def pytest_addoption(parser: pytest.Parser) -> None:
         default=None,
         metavar="SECONDS",
         help="fail any test whose call phase exceeds SECONDS unless it is marked @pytest.mark.slow "
-             "(pass --time-budget=10 in PR CI; off by default)",
+             "(off by default; PR CI passes it in .github/workflows/ci.yml)",
     )
     parser.addoption(
         "--toolchain-gate",
@@ -589,7 +589,7 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
         skip_slow = pytest.mark.skip(
             reason="pass --run-slow to run slow tests; they run nightly")
         for item in items:
-            if "slow" in item.keywords:
+            if item.get_closest_marker("slow") is not None:
                 item.add_marker(skip_slow)
     if config.getoption("--run-integration", default=False):
         return
@@ -746,7 +746,7 @@ def pytest_runtest_makereport(item: pytest.Item, call: pytest.CallInfo[None]) ->
     """Fail a test whose call phase exceeds --time-budget unless it carries @pytest.mark.slow.
 
     The budget is off by default: design-run checks, local runs and the nightly job never
-    get it.  Only PR CI passes ``--time-budget=10`` in ``.github/workflows/ci.yml``.
+    get it. Only PR CI passes it, in ``.github/workflows/ci.yml`` (`design.CI_TIME_BUDGET_S`).
     """
     outcome = yield
     report: pytest.TestReport = outcome.get_result()

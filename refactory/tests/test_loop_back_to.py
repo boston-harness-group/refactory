@@ -37,26 +37,12 @@ S4_LOOP = {"op": "loop", "step": "decide", "back_to": "compare", "judge": "agent
            "text": "Is the decision sound?"}
 
 
-import copy as _copy
-import functools as _functools
-
-
-@_functools.cache
-def _state_cached(name: str) -> dict[str, Any]:
+def _state(name: str) -> dict[str, Any]:
     return registry.resolve(Path("."), name)[1]().state_dict()
 
 
-def _state(name: str) -> dict[str, Any]:
-    return _copy.deepcopy(_state_cached(name))
-
-
-@_functools.cache
-def _mode_cached(name: str):
-    return registry.resolve(Path("."), name)[1]
-
-
 def _mode(name: str, state: dict[str, Any]):
-    mode = _mode_cached(name)()
+    mode = registry.resolve(Path("."), name)[1]()
     mode.load_state_dict(state)
     return mode
 
@@ -174,7 +160,7 @@ def test_back_to_not_on_every_path_is_refused_and_names_the_steps_that_are():
                       "route's way passes it by); it names a step every run passes before "
                       "'decide': compare")
     # A route's way: polish is passed by when the route goes to rough.
-    gates = sf.cached_applier("fuzz_gates").seed_state
+    gates = sf.Applier(sf.seeds()["fuzz_gates"]).seed_state
     assert "is not on every path to 'redo'" in _refused(
         {"op": "loop", "step": "redo", "back_to": "polish"}, gates)
 
@@ -201,7 +187,7 @@ def test_back_to_inside_a_branch_from_after_the_join_is_refused():
     it, since a send-back from after the join re-runs the fork whole."""
     import copy
 
-    state = copy.deepcopy(sf.cached_applier("fuzz_fork_join").seed_state)
+    state = copy.deepcopy(sf.Applier(sf.seeds()["fuzz_fork_join"]).seed_state)
     graph = state["graph"]
     graph["nodes"]["split"]["targets"] = ["left"]
     graph["nodes"]["merge"]["sources"] = ["left"]
@@ -218,7 +204,7 @@ def test_back_to_inside_a_branch_from_after_the_join_is_refused():
 
 
 def test_the_written_out_loop_refuses_back_to():
-    state = sf.cached_applier("fuzz_draft_review").seed_state
+    state = sf.Applier(sf.seeds()["fuzz_draft_review"]).seed_state
     edit = {"op": "loop", "target": "review", "back_to": "draft",
             "gate": {"id": "g", "kind": "gate", "evaluator": "structure_fuzz_graphs:proceed"}}
     assert _refused(edit, state) == ("'back_to' goes with the one-line loop ('step' and "
@@ -421,6 +407,8 @@ def test_nested_loops_run_on_the_walker(tmp_path, monkeypatch):
             assert nodes.count(step) == 2, (step, nodes)
 
 
+@pytest.mark.slow(reason="one spine run of S4 with two nested loops, every step a process of its own: "
+                  "~70 s in CI; the walker runs the same graph in PR CI (test_nested_loops_run_on_the_walker)")
 @needs_spine
 def test_nested_loops_run_on_the_spine(tmp_path, monkeypatch):
     _patch_task(monkeypatch)

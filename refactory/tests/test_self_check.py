@@ -79,29 +79,6 @@ PINNED = {
 }
 
 
-#: Module-level cache: the first ``_target(…, PINNED)`` call keeps a copy so the next
-#: 16 clone it instead of repeating ``git init`` + ``git add -A`` + ``git commit``.
-_PINNED_TEMPLATE: Path | None = None
-
-
-def _target_cached(root: Path, files: dict[str, str]) -> Path:
-    """Like ``_target`` but reuses a module-level template for exact ``PINNED`` dicts."""
-    global _PINNED_TEMPLATE
-    if files is PINNED and _PINNED_TEMPLATE is not None:
-        import shutil
-
-        shutil.copytree(_PINNED_TEMPLATE, root)
-        return root
-    repo = _target(root, files)
-    if files is PINNED and _PINNED_TEMPLATE is None:
-        import shutil
-
-        tpl = root.parent / "_pinned_template"
-        shutil.copytree(repo, tpl)
-        _PINNED_TEMPLATE = tpl
-    return repo
-
-
 def _answers(*emits: str) -> list[str]:
     return [RESEARCH_ANSWER, PITFALLS_ANSWER, "perspectives", "one plan",
             DESIGN_DOC_ANSWER, *emits,
@@ -308,7 +285,7 @@ def test_a_stale_generated_file_and_a_pinned_test_are_fixed_inside_the_attempt(t
 
 
 def test_a_clean_emission_goes_straight_on(tmp_path):
-    repo = _target_cached(tmp_path / "repo", PINNED)
+    repo = _target(tmp_path / "repo", PINNED)
     model = FakeModel(_answers(render({"tool.py": "VERSION = 1\nNAME = 'tool'\n"})))
     run = tmp_path / "run"
     result = _design(run, model, repo)
@@ -327,7 +304,7 @@ def test_the_bound_then_the_early_stop_spends_one_attempt(tmp_path, monkeypatch)
     stop, which spends the attempt. No review runs until an attempt passes. The self-checks
     are `_Chunks`' answers, failing the pinned test until the fourth emission."""
     _Chunks(monkeypatch, emissions=[{PIN}, {PIN}, {PIN}, set()])
-    repo = _target_cached(tmp_path / "repo", PINNED)
+    repo = _target(tmp_path / "repo", PINNED)
     still_broken = [render({"tool.py": f"VERSION = {n}\n"}) for n in (2, 3, 4)]
     fixed = render({"tool.py": "VERSION = 5\n",
                     "tests/test_pin.py": "import tool\n\n\ndef test_pin():\n    assert tool.VERSION == 5\n"})
@@ -354,7 +331,7 @@ def test_the_worst_case_ends_in_the_build_loop_stop_not_the_iteration_limit(tmp_
     loop is what is under test."""
     _Chunks(monkeypatch, fails={PIN})
     _unwatched(monkeypatch)
-    repo = _target_cached(tmp_path / "repo", PINNED)
+    repo = _target(tmp_path / "repo", PINNED)
     refused = "===EDIT: tool.py===\n<<<<<<< SEARCH\nnot in the file\n=======\nx\n>>>>>>> REPLACE\n"
     emits = [emission for n in range(9) for emission in (refused, refused,
                                                           render({"tool.py": f"VERSION = {10 + n}\n"}))]
@@ -594,7 +571,7 @@ def test_on_the_spine_the_fixups_carry_across_processes_and_the_bound_spends_the
     each fix-up is amended into the attempt, and at the bound the attempt is spent. The
     pinned test's failure is `_Chunks`' answer."""
     _Chunks(monkeypatch, fails={PIN})
-    repo = _target_cached(tmp_path / "repo", PINNED)
+    repo = _target(tmp_path / "repo", PINNED)
     run = _spine_run(repo, tmp_path, monkeypatch, "abcdef500006", check_attempts=2)
     for number in (1, 2):
         _emit(run, render({"tool.py": f"VERSION = {number + 1}\n"}), monkeypatch)
@@ -629,7 +606,7 @@ def test_on_the_spine_the_fixups_carry_across_processes_and_the_bound_spends_the
 def test_the_run_cap_on_fixups_ends_them_for_the_run(tmp_path, monkeypatch):
     """Fix-ups are bounded per run too: self_check_fixups x check_attempts."""
     _Chunks(monkeypatch, fails={PIN})
-    repo = _target_cached(tmp_path / "repo", PINNED)
+    repo = _target(tmp_path / "repo", PINNED)
     run = _spine_run(repo, tmp_path, monkeypatch, "abcdef500007", check_attempts=3)
     _emit(run, render({"tool.py": "VERSION = 2\n"}), monkeypatch)
     facts = _facts(run)
@@ -645,7 +622,7 @@ def test_the_run_cap_on_fixups_ends_them_for_the_run(tmp_path, monkeypatch):
 
 
 def test_a_fixup_is_amended_through_the_one_amend_path_with_the_attempts_guards(tmp_path, monkeypatch):
-    repo = _target_cached(tmp_path / "repo", PINNED)
+    repo = _target(tmp_path / "repo", PINNED)
     run = tmp_path / "run"
     worktree.create(repo, "HEAD", "abcdef500008", run)
     worktree.commit_attempt(run, {Path("tool.py"): "VERSION = 2\n"}, f"{NAME}: attempt 1")
@@ -668,7 +645,7 @@ def test_a_fixup_is_amended_through_the_one_amend_path_with_the_attempts_guards(
 
 
 def test_an_amendment_that_died_before_its_record_is_dropped(tmp_path):
-    repo = _target_cached(tmp_path / "repo", PINNED)
+    repo = _target(tmp_path / "repo", PINNED)
     run = tmp_path / "run"
     worktree.create(repo, "HEAD", "abcdef500009", run)
     found = worktree.commit_attempt(run, {Path("tool.py"): "VERSION = 2\n"}, f"{NAME}: attempt 1")
@@ -715,7 +692,7 @@ def test_design_fast_and_the_sequential_check_keep_the_dm128_prepass(tmp_path, m
     assert not (tmp_path / "fast" / SELF_CHECK_RECORD).exists()
 
     (tmp_path / "spy.prepass.jsonl").unlink()
-    repo = _target_cached(tmp_path / "repo", PINNED)
+    repo = _target(tmp_path / "repo", PINNED)
     run = _spine_run(repo, tmp_path, monkeypatch, "abcdef500010")
     _emit(run, render({"tool.py": "VERSION = 2\n"}), monkeypatch)
     _node(run, f"{design_ops.__name__}:check_artifact", "check", "op", monkeypatch)
@@ -742,7 +719,7 @@ def test_a_fixup_that_undoes_the_whole_attempt_is_refused_not_a_crash(tmp_path, 
     The self-checks are `_Chunks`' answers: the first applied emission fails the pinned
     test, the second passes."""
     _Chunks(monkeypatch, emissions=[{PIN}, set()])
-    repo = _target_cached(tmp_path / "repo", PINNED)
+    repo = _target(tmp_path / "repo", PINNED)
     # The builder works in a clone of the attempt, which keeps the refused round's revert
     # (`clones.prepare`: a head that did not move keeps the clone as the agent left it), so
     # its next round puts the change back and fixes the test, as the refusal asks.
@@ -815,7 +792,7 @@ def test_an_empty_diff_on_second_attempt_is_detected(tmp_path, monkeypatch):
 
 def test_on_the_spine_a_fixup_that_undoes_the_attempt_is_a_counted_refusal(tmp_path, monkeypatch):
     _Chunks(monkeypatch, fails={PIN})
-    repo = _target_cached(tmp_path / "repo", PINNED)
+    repo = _target(tmp_path / "repo", PINNED)
     run = _spine_run(repo, tmp_path, monkeypatch, "abcdef500012")
     _emit(run, BREAKS, monkeypatch)
     assert "self-check fix-up 1 of 2" in _prepare(run, monkeypatch)[1]
@@ -879,7 +856,7 @@ def test_the_builder_is_told_to_run_the_self_checks_tests_and_how_long_they_took
     self-check. Its briefing, the first dispatch's too, names ``refactory-targeted-tests``,
     which runs the self-check's selection with the check's options kept (so `-n 4` stays);
     a fix-up's adds the seconds the self-check measured, and the first has no time to name."""
-    repo = _target_cached(tmp_path / "repo", PINNED)
+    repo = _target(tmp_path / "repo", PINNED)
     check = "python -m pytest -q -n 4 tests"
     breaks = render({"tool.py": "VERSION = 2\n"})
     fixes = render({"tests/test_pin.py": "import tool\n\n\ndef test_pin():\n    assert tool.VERSION == 2\n"})
@@ -928,7 +905,7 @@ def test_the_builder_is_told_a_time_only_when_the_run_measured_one(tmp_path):
 
 def test_a_fixup_runs_the_last_self_checks_failures_first(tmp_path, monkeypatch):
     _Chunks(monkeypatch, fails={PIN})
-    repo = _target_cached(tmp_path / "repo", PINNED)
+    repo = _target(tmp_path / "repo", PINNED)
     run = _spine_run(repo, tmp_path, monkeypatch, "abcdef500015")
     _emit(run, BREAKS, monkeypatch)
     _prepare(run, monkeypatch)
@@ -1413,7 +1390,7 @@ def test_what_was_learned_on_another_base_is_not_reused(tmp_path, monkeypatch):
     from refactory_dsh import base_check
 
     _Chunks(monkeypatch, fails={PIN})
-    repo = _target_cached(tmp_path / "repo", PINNED)
+    repo = _target(tmp_path / "repo", PINNED)
     run = _spine_run(repo, tmp_path, monkeypatch, "abcdef500020")
     _emit(run, BREAKS, monkeypatch)
     stale = base_check.cache_key("0" * 40, "", "", CHECK)
@@ -1472,7 +1449,7 @@ def test_the_base_is_prepared_once_for_its_key(tmp_path, monkeypatch):
 def test_an_amendment_puts_the_worktree_back_first(tmp_path):
     """What a check or reviewer changed in the worktree is put back before a fix-up is
     amended in, so the amendment holds only the emission."""
-    repo = _target_cached(tmp_path / "repo", PINNED)
+    repo = _target(tmp_path / "repo", PINNED)
     run = tmp_path / "run"
     worktree.create(repo, "HEAD", "abcdef500023", run)
     found = worktree.commit_attempt(run, {Path("tool.py"): "VERSION = 2\n"}, f"{NAME}: attempt 1")
@@ -1500,6 +1477,9 @@ def test_prepare_checks_limit_follows_the_knobs_to_their_bounds():
     assert capped.graph().nodes["prepare_check"].max_iterations == (20 + 25 + 1) * 2 + 25 + 20 + 1
 
 
+@pytest.mark.slow(reason="89 reloops of a whole design run at the knobs' bounds, each step a "
+                  "process of its own: ~80 s in CI; the same loop at smaller knobs runs in PR CI "
+                  "(test_the_worst_case_ends_in_the_build_loop_stop_not_the_iteration_limit)")
 def test_the_worst_case_at_the_knobs_bounds_still_ends_in_the_stop(tmp_path, monkeypatch):
     """Five attempts of five fix-ups each, two refusals before every applied emission: 89
     reloops of prepare_check, under its limit of 102 and twice the old fixed 45. The pinned
@@ -1507,7 +1487,7 @@ def test_the_worst_case_at_the_knobs_bounds_still_ends_in_the_stop(tmp_path, mon
     loop is what is under test."""
     _Chunks(monkeypatch, fails={PIN})
     _unwatched(monkeypatch)
-    repo = _target_cached(tmp_path / "repo", PINNED)
+    repo = _target(tmp_path / "repo", PINNED)
     refused = "===EDIT: tool.py===\n<<<<<<< SEARCH\nnot in the file\n=======\nx\n>>>>>>> REPLACE\n"
     emits = [emission for n in range(30) for emission in (refused, refused,
                                                           render({"tool.py": f"VERSION = {10 + n}\n"}))]
@@ -1995,7 +1975,7 @@ def test_a_real_pytest_chunk_records_its_tests_seconds_from_junit_outside_the_wo
     would reach the last step, which need not be pytest."""
     from refactory_dsh.sandbox import SandboxResult
 
-    repo = _target_cached(tmp_path / "repo", PINNED)
+    repo = _target(tmp_path / "repo", PINNED)
     run = _spine_run(repo, tmp_path, monkeypatch, "abcdef500060")
     sent = []
     real = repo_change.run_check
@@ -2119,7 +2099,7 @@ def test_empty_diff_check_skipped_when_head_equals_base(tmp_path, monkeypatch):
     would falsely trigger ``empty_diff_fixup``.  With the guard, head == base
     so the comparison is skipped and the normal flow (``nothing selected``)
     proceeds.  Removing the guard fails this test."""
-    repo = _target_cached(tmp_path / "repo", PINNED)
+    repo = _target(tmp_path / "repo", PINNED)
     # Add an empty commit so tree(HEAD) == tree(HEAD~1).
     git(repo, "commit", "--allow-empty", "-m", "empty")
     run = _spine_run(repo, tmp_path, monkeypatch, "abcdef500063")

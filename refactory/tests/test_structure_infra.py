@@ -308,7 +308,7 @@ def test_a_slot_naming_a_file_gets_the_files_whole_text_and_runs_on_both_runtime
     """``{{raw}}`` names the file raw.txt: a file_text op before the new step sets the fact
     ``raw`` to the file's whole text, the candidate says so, and the state is sound on the
     walker and (with the workspace installed) on the spine beside it."""
-    applier = sf.cached_applier("fuzz_dataflow")
+    applier = sf.Applier(sf.seeds()["fuzz_dataflow"])
     applier.optimizer.answered_gates = False
     seed = Candidate.from_state(applier.seed_state)
     critic = fg.agent("critic", "Critique the raw notes:\n{{raw}}", writes="critic.txt").to_state()

@@ -1,14 +1,6 @@
-"""Delivery: conflicts with a moved main, merge reloops and redos.
-
-Speed optimizations (d16):
-- The module-scoped golden fixtures from ``_delivery_support`` (``_new_golden``,
-  ``_opened_golden``) share the two most common design runs; each test gets a cheap
-  ``shutil.copytree`` clone instead of a fresh walker run.
-"""
+"""Delivery: conflicts with a moved main, merge reloops and redos."""
 
 from __future__ import annotations
-
-import pytest
 
 from _delivery_support import *  # noqa: F403  (the helpers and fixtures these tests share)
 

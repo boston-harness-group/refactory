@@ -12,16 +12,10 @@ item, so a check-and-retry loop or a parallel fork could not recover it. Now:
 
 Each runtime runs the same graph against a scripted ``dsh`` through the real model
 client: the walker (`nn.executor`) in process, the spine through its real drain, whose
-dispatched workers (`worker_node`) run the retry (``node_retry.deliver``).
-
-Speed optimizations (d16):
-- Both runtimes (walker + spine) are kept for every feature, as RUNTIMES ensures.
-- Graph constructors ``_straight``, ``_looped``, ``_forked`` and ``_unpassed`` are
-  cached at module level (they are deterministic for given arguments).
+dispatched workers (`worker_node`) run the retry (`node_retry.deliver`).
 """
 from __future__ import annotations
 
-import functools
 import json
 import os
 import shutil
@@ -130,27 +124,16 @@ def _data(entry: str, exit_: str) -> nn.Node:
                    writes=(CURRENT_ITEM,), produces=("item_scores",), task_ref=TASK)
 
 
-#: Module-level cache: graph construction is deterministic and each graph is
-#: immutable after construction, so the default straight/looped/forked/unpassed
-#: configurations are built once and shared across tests.
-_GRAPH_CACHE: dict[str, nn.Graph] = {}
-
-
 def _straight(**solver: Any) -> nn.Graph:
     """data -> [solve] -> report: the solver is the whole pass."""
-    key = f"straight:{sorted(solver.items())}"
-    if key in _GRAPH_CACHE:
-        return _GRAPH_CACHE[key]
     graph = nn.Graph()
     graph.add(_data("solve", "solve"))
     graph.add(_solver(**solver))
     graph.add(nn.Node("report", "op", call="loop_ops:noop"))
     graph.connect("data", "report")
-    _GRAPH_CACHE[key] = graph
     return graph
 
 
-@functools.cache
 def _looped() -> nn.Graph:
     """data -> [solve -> check (reloop solve | proceed score)] -> report."""
     graph = nn.Graph()
@@ -168,7 +151,6 @@ def _looped() -> nn.Graph:
     return graph
 
 
-@functools.cache
 def _forked(pick: str = "crash_ops:pick", reads: tuple[str, ...] = ()) -> nn.Graph:
     """data -> [entry -> fork (a, b) -> join -> pick] -> report: two attempts, one pick."""
     graph = nn.Graph()
@@ -510,7 +492,6 @@ def test_outside_a_data_pass_a_crash_is_not_retried(tmp_path, runtime):
     assert not (run / "reviews/solve-missing.txt").exists()
 
 
-@functools.cache
 def _unpassed() -> nn.Graph:
     graph = nn.Graph()
     graph.add(_solver())

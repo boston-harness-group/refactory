@@ -54,17 +54,8 @@ OPTIONS = ("import json\n"
            "                                             for c in item['choices']])}}\n")
 
 
-import copy as _copy
-import functools as _functools
-
-
-@_functools.cache
-def _state_cached(name: str) -> dict[str, Any]:
-    return registry.resolve(Path("."), name)[1]().state_dict()
-
-
 def _state(name: str) -> dict[str, Any]:
-    return _copy.deepcopy(_state_cached(name))
+    return registry.resolve(Path("."), name)[1]().state_dict()
 
 
 def _mode(name: str, state: dict[str, Any]):
@@ -150,7 +141,7 @@ def test_the_view_reads_as_exactly_the_graph_s_edges():
 
     states = [_s1(), _s4()]
     for name in ("fuzz_draft_review", "fuzz_data_pass", "fuzz_fork_join"):
-        seed = sf.cached_applier(name).seed_state
+        seed = sf.Applier(sf.seeds()[name]).seed_state
         for step in sorted(_graph(seed).nodes):
             edit = {"op": "map", "after": step, "over": step}
             if nn_edits.precheck(edit, seed) is None:
@@ -258,12 +249,11 @@ class _Model:
         return "<answer>B</answer>"
 
 
-def _walk(name: str, state: dict, tmp_path: Path, monkeypatch,
-          *, walker_id: str = "walker") -> tuple[Any, list]:
+def _walk(name: str, state: dict, tmp_path: Path, monkeypatch) -> tuple[Any, list]:
     _patch_task(monkeypatch)
     log: list = []
-    run = tmp_path / walker_id
-    run.mkdir(parents=True, exist_ok=True)
+    run = tmp_path / "walker"
+    run.mkdir()
     return _mode(name, state).run(run, model=_Model(log)), log
 
 
@@ -386,8 +376,8 @@ def test_spine_records_every_visit_and_call_of_a_map(tmp_path):
         _every_visit_and_call_recorded(records, 8)
 
 
-def _dispatched(name: str, state: dict, plan: dict, tmp_path: Path, *, ok: bool = True,
-                spine_id: str = "spine") -> tuple[list, Scripted]:
+def _dispatched(name: str, state: dict, plan: dict, tmp_path: Path, *, ok: bool = True
+                ) -> tuple[list, Scripted]:
     """The mode state on the spine drain, its agents dispatched to workers (`worker_node`,
     which refuses a run whose element was not written) against a scripted dsh."""
     import os
@@ -396,18 +386,17 @@ def _dispatched(name: str, state: dict, plan: dict, tmp_path: Path, *, ok: bool 
     from refactory_dsh import workers
     from test_livemath_blocks import DRAIN_AGENT, FIXTURE_DIR, NODE, PYTHON_BIN, REPO_ROOT
 
-    dsh = Scripted(tmp_path / f"dsh-{spine_id}", plan)
-    run = tmp_path / spine_id
+    dsh = Scripted(tmp_path / "dsh", plan)
+    run = tmp_path / "spine"
 
     def dispatched(workflow: Any) -> Any:
-        return workers.lower_workflow(workflow, tmp_path / f"specs-{spine_id}",
-                                      dsh.client().context(),
+        return workers.lower_workflow(workflow, tmp_path / "specs", dsh.client().context(),
                                       lowering.node_declarations(state))
 
-    run.mkdir(parents=True, exist_ok=True)
+    run.mkdir()
     lowering.write_declarations(state, run)
-    graph_path, _ = lowering.write_mode_graph(state, tmp_path / f"graphs-{spine_id}",
-                                              name="map", transform=dispatched)
+    graph_path, _ = lowering.write_mode_graph(state, tmp_path / "graphs", name="map",
+                                              transform=dispatched)
     env = {key: value for key, value in os.environ.items() if key != "REFACTORY_WORKER_CONTEXT"}
     env.update(REFACTORY_WORKDIR=str(run), PYTHONPATH=str(Path(__file__).resolve().parent),
                LIVEMATH_DATA_PATH=str(FIXTURE_DIR), PATH=f"{PYTHON_BIN}:{env.get('PATH', '')}")
@@ -803,7 +792,7 @@ def _driven(cap: int) -> dict[str, Any]:
     import structure_fuzz as sf
 
     edit = {"op": "map", "after": "draft", "over": "draft", "max": cap}
-    return nn_edits.apply(edit, sf.cached_applier("fuzz_draft_review").seed_state)
+    return nn_edits.apply(edit, sf.Applier(sf.seeds()["fuzz_draft_review"]).seed_state)
 
 
 def _driven_run(runtime: str, state: dict, draft: str, tmp_path: Path, monkeypatch
@@ -873,7 +862,7 @@ def test_the_fuzz_s_map_over_a_draft_runs_alike_on_the_walker_and_the_spine():
     file") when it handed the second run, which had no element, to the driver."""
     import structure_fuzz as sf
 
-    applier = sf.cached_applier("fuzz_draft_review")
+    applier = sf.Applier(sf.seeds()["fuzz_draft_review"])
     state = nn_edits.apply({"op": "map", "after": "draft", "over": "draft"},
                            applier.seed_state)
     assert sf.check_state(applier, state, walker=True, spine=True) == []

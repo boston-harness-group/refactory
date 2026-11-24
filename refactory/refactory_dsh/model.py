@@ -114,7 +114,7 @@ def _etime_seconds(text: str) -> float:
     return seconds + (float(days) * 86400 if days else 0.0)
 
 
-def tool_command_running_since(root_pid: int, since: float, _wall_clock: Callable[[], float] = time.time) -> bool:
+def tool_command_running_since(root_pid: int, since: float) -> bool:
     """Whether a process beneath ``root_pid`` started at or after ``since`` (epoch seconds).
 
     The session's tool commands are its descendants, and a long test run starts after the
@@ -126,7 +126,7 @@ def tool_command_running_since(root_pid: int, since: float, _wall_clock: Callabl
                                text=True, timeout=10).stdout
     except (OSError, subprocess.SubprocessError):
         return False
-    now = _wall_clock()
+    now = time.time()
     children: dict[int, list[tuple[int, float]]] = {}
     for line in table.splitlines():
         fields = line.split()
@@ -799,10 +799,6 @@ class DshModelClient:
     #: ``nn.data_parallel.is_shareable_model``; a custom client opts in the same way.
     thread_safe: ClassVar[bool] = True
 
-    #: Injected clocks: defaulted at class level so ``__new__`` clients work;
-    #: ``__init__`` overrides them when a caller passes a fake.
-    _monotonic: Callable[[], float] = staticmethod(time.monotonic)  # type: ignore[assignment]
-    _wall_clock: Callable[[], float] = staticmethod(time.time)  # type: ignore[assignment]
 
     def __init__(
         self,
@@ -838,8 +834,6 @@ class DshModelClient:
         max_turns: str = "",
         bash_timeout_ms: str = "",
         bash_output_chars: str = "",
-        _monotonic: Callable[[], float] | None = None,
-        _wall_clock: Callable[[], float] | None = None,
     ) -> None:
         from refactory_dsh.workers import session_store_choice, validate_route
         inherited = json.loads(os.environ.get("REFACTORY_WORKER_CONTEXT") or "{}")
@@ -894,8 +888,6 @@ class DshModelClient:
         #: Likewise: set only when a caller chose it; otherwise `DEFAULT_BACKSTOP_S`.
         backstop_s = backstop_s if backstop_s is not None else inherited.get("backstop_s")
         self._backstop_s = int(backstop_s) if backstop_s is not None else None
-        self._monotonic = _monotonic or time.monotonic
-        self._wall_clock = _wall_clock or time.time
         self._worker_backend = worker_backend or os.environ.get("REFACTORY_WORKER_BACKEND", "dsh")
         self._effort = effort or (os.environ.get("REFACTORY_MODEL_EFFORT", "") if self._worker_backend == "dsh" and not routes_resolved else "")
         # Both ride `context()`, so a dispatched worker rebuilt from it (`worker_node`)
@@ -1538,7 +1530,7 @@ class DshModelClient:
             total_s = wall
             if wall < cap_s or getattr(self, "_node_wall_exact", False):
                 cap_s = wall
-        started = self._monotonic()
+        started = time.monotonic()
         stop_at = started + total_s if total_s is not None else None
         delays = (retry_delays(self._attempts, self._retry_window_s) if self._backoff_s is None
                   else [self._backoff_s * 2 ** index for index in range(self._attempts - 1)])
@@ -1552,7 +1544,7 @@ class DshModelClient:
             while True:
                 self._raise_if_cancelled()
                 self._checkpoint()
-                now = self._monotonic()
+                now = time.monotonic()
                 if stop_at is not None and attempt > 1 and stop_at - now <= 0:
                     # The wait before this retry used up the node's time: an attempt now
                     # would time out at once. It failed on the wire, and says so -- not a
@@ -1579,7 +1571,7 @@ class DshModelClient:
                     detail = f"; {unconfirmed}" if unconfirmed else ""
                     # The call's own time up to its deadline, across attempts: a transport
                     # retry's ``budget_s`` is only what was left of it.
-                    elapsed_s = int(round(min(self._monotonic(), attempt_stop) - started))
+                    elapsed_s = int(round(min(time.monotonic(), attempt_stop) - started))
                     quiet_s = getattr(exc, "stream_quiet_s", None)
                     inactivity_s = self._inactivity_limit()
                     error: RuntimeError
@@ -1653,7 +1645,7 @@ class DshModelClient:
                         if outage is None:
                             outage = self._begin_outage(run_dir, wire_cause)
                         self._wait_for_network(run_dir, outage, wire_cause, state=network,
-                                               attempt_s=self._monotonic() - now, stop_at=stop_at)
+                                               attempt_s=time.monotonic() - now, stop_at=stop_at)
                         continue
                     # An answer of any kind shows the network is up.
                     NETWORK_GIVEN_UP.clear()
@@ -1682,10 +1674,10 @@ class DshModelClient:
                 if not self._cancellations:
                     time.sleep(delay)
                 else:
-                    deadline = self._monotonic() + delay
+                    deadline = time.monotonic() + delay
                     while True:
                         self._raise_if_cancelled()
-                        remaining = deadline - self._monotonic()
+                        remaining = deadline - time.monotonic()
                         if remaining <= 0:
                             break
                         # The innermost event wakes immediately; inherited scopes
@@ -1790,7 +1782,7 @@ class DshModelClient:
             NETWORK_GIVEN_UP.set()
             give_up("gave_up", f"it waited {int(state['spent'])}s for the network to come back, "
                                f"the most one call waits ({int(NETWORK_WAIT_S)}s)")
-        if stop_at is not None and stop_at - self._monotonic() - wait < NETWORK_WAIT_CAP_S:
+        if stop_at is not None and stop_at - time.monotonic() - wait < NETWORK_WAIT_CAP_S:
             give_up("gave_up", f"it waited {int(state['spent'])}s for the network to come back "
                                "until the node's time ran out")
         if outage["logged_at"] is None or state["spent"] - outage["logged_at"] >= NETWORK_LOG_EVERY_S:
@@ -1892,9 +1884,9 @@ class DshModelClient:
         (``refused``) may run a read-only command (``sleep``, say), which counts."""
         written = self._last_frame(started_epoch)
         if (getattr(self, "_tool_policy", "") != "none"
-                and tool_command_running_since(pid, written, _wall_clock=self._wall_clock)):
+                and tool_command_running_since(pid, written)):
             return now
-        return now - max(0.0, self._wall_clock() - written)
+        return now - max(0.0, time.time() - written)
 
     def _run_completion(
         self, cmd: list[str], run_dir: Path, stop_at: float | None = None, budget_s: int | None = None,
@@ -1932,20 +1924,20 @@ class DshModelClient:
                     # shutdown request: DSH escalates a second signal to immediate exit.
                     start_new_session=os.name == "posix",
                 )
-                started_epoch = self._wall_clock()
+                started_epoch = time.time()
                 try:
-                    deadline = stop_at if stop_at is not None else self._monotonic() + self._timeout_s
-                    last_activity = self._monotonic()
+                    deadline = stop_at if stop_at is not None else time.monotonic() + self._timeout_s
+                    last_activity = time.monotonic()
                     next_look = last_activity
                     look_every = min(ACTIVITY_POLL_S, inactivity_s / 4) if inactivity_s else 0.0
                     while True:
                         self._raise_if_cancelled()
                         self._checkpoint()
-                        remaining = deadline - self._monotonic()
+                        remaining = deadline - time.monotonic()
                         if remaining <= 0:
                             raise subprocess.TimeoutExpired(cmd, timeout_s)
                         if inactivity_s:
-                            now = self._monotonic()
+                            now = time.monotonic()
                             if now >= next_look:
                                 next_look = now + look_every
                                 last_activity = max(last_activity, self._last_activity(
@@ -1960,7 +1952,7 @@ class DshModelClient:
                         except subprocess.TimeoutExpired:
                             # communicate retains its output across bounded waits. There
                             # is no stdin input to resend, and the deadline never resets.
-                            if self._monotonic() >= deadline:
+                            if time.monotonic() >= deadline:
                                 raise
                 except BaseException as error:
                     if os.name == "posix":
@@ -1976,7 +1968,7 @@ class DshModelClient:
                         # whatever tools ran: at the backstop that tells a streaming
                         # session (an incident) from a quiet one (`_complete`).
                         error.stream_quiet_s = max(  # type: ignore[attr-defined]
-                            0.0, self._wall_clock() - self._last_frame(started_epoch))
+                            0.0, time.time() - self._last_frame(started_epoch))
                     # Direct interruption or the fork's cooperative event both use the
                     # runtime-owned cleanup before propagating failure.
                     try:

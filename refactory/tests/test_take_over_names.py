@@ -24,6 +24,7 @@ depends on the names it reads (`nn.names_matter`: select): those are refused.
 """
 from __future__ import annotations
 
+import functools
 import json
 import random
 import tempfile
@@ -49,7 +50,7 @@ PLAIN_CODE = "def main(inp):\n    return {'facts': {'%s': 'rewritten'}}\n"
 
 
 def _applier(name: str = S4) -> sf.Applier:
-    return sf.cached_applier(name)
+    return sf.Applier(sf.seeds()[name])
 
 
 def _accepted(applier: sf.Applier, edits: list[dict]) -> dict:
@@ -396,32 +397,52 @@ def _shape(generator: sf.EditGenerator, state: dict, rng: random.Random) -> dict
     return generator.core_op(state, op, rng.choice(sorted(graph.nodes)))
 
 
-def test_taking_over_mixed_with_every_shape_keeps_every_invariant():
+#: The walks are checked in this many tests, each a fixed share of them, so none runs long.
+WALK_SHARES = 4
+
+
+@functools.cache
+def _walk(walk: int) -> tuple[sf.Applier, list[dict], dict]:
+    """Walk number ``walk``: its seed's applier, the edits it accepted, and its last state."""
     names = sorted(sf.seeds())
-    taken, bad = 0, []
-    for walk in range(WALKS):
-        rng = random.Random(f"takes_over:{walk}")
-        generator = sf.EditGenerator(rng, code_nodes=False)
-        applier = _applier(names[walk % len(names)])
-        current = Candidate.from_state(applier.seed_state)
-        edits: list[dict] = []
-        for step in rng.choice((("s", "t"), ("s", "s", "t"), ("t", "s"), ("s", "t", "s"))):
-            edit = (_shape if step == "s" else _take_over)(generator, current.state, rng)
-            if edit is None:
-                continue
-            outcome = applier.attempt(current, edit, {current.id})
-            if isinstance(outcome, list):
-                continue
-            edits.append(edit)
-            current = outcome
-        if not any(e.get("takes_over") for e in edits):
+    rng = random.Random(f"takes_over:{walk}")
+    generator = sf.EditGenerator(rng, code_nodes=False)
+    applier = _applier(names[walk % len(names)])
+    current = Candidate.from_state(applier.seed_state)
+    edits: list[dict] = []
+    for step in rng.choice((("s", "t"), ("s", "s", "t"), ("t", "s"), ("s", "t", "s"))):
+        edit = (_shape if step == "s" else _take_over)(generator, current.state, rng)
+        if edit is None:
             continue
-        taken += 1
-        found = sf.check_state(applier, current.state, walker=True, only=CHECKED)
-        found += [f"unresolved: {problem}" for problem in _unresolved(current.state)]
+        outcome = applier.attempt(current, edit, {current.id})
+        if isinstance(outcome, list):
+            continue
+        edits.append(edit)
+        current = outcome
+    return applier, edits, current.state
+
+
+def _takes_over(edits: list[dict]) -> bool:
+    return any(e.get("takes_over") for e in edits)
+
+
+def test_taking_over_mixed_with_every_shape_is_reached_often():
+    """Over a third of the walks accept a take over (the tests below check each one)."""
+    taken = sum(_takes_over(_walk(walk)[1]) for walk in range(WALKS))
+    assert taken > WALKS // 3, taken
+
+
+@pytest.mark.parametrize("share", range(WALK_SHARES))
+def test_taking_over_mixed_with_every_shape_keeps_every_invariant(share):
+    bad = []
+    for walk in range(share, WALKS, WALK_SHARES):
+        applier, edits, state = _walk(walk)
+        if not _takes_over(edits):
+            continue
+        found = sf.check_state(applier, state, walker=True, only=CHECKED)
+        found += [f"unresolved: {problem}" for problem in _unresolved(state)]
         if found:
             bad.append((applier.seed.name, edits, [str(v) for v in found]))
-    assert taken > WALKS // 3, taken
     assert not bad, bad[:3]
 
 
@@ -453,20 +474,16 @@ def _fallbacks_and_loops(state: dict) -> list[dict]:
 
 #: How many of the states each direction reaches are run (a seeded sample).
 RUN_PAIRS = 20
+#: The sample is run in this many tests per direction, so none runs long.
+RUN_SHARES = 2
 
 
-def _sound(applier: sf.Applier, accepted: list[tuple[list[dict], dict]]) -> None:
-    rng = random.Random(applier.seed.name)
-    for edits, state in rng.sample(accepted, min(RUN_PAIRS, len(accepted))):
-        found = sf.check_state(applier, state, walker=True, only=CHECKED)
-        assert found == [], (edits, [str(v) for v in found])
-
-
-@pytest.mark.parametrize("name", [S4, "fuzz_data_pass"])
-def test_taking_over_with_a_fallback_or_a_loop_back_keeps_every_invariant(name):
+@functools.cache
+def _both_directions(name: str) -> tuple[sf.Applier, list[tuple[list[dict], dict]],
+                                         list[tuple[list[dict], dict]]]:
     """Every fallback and 'back_to' loop a seed takes, then every take over the result
-    takes; and every take over, then every fallback and loop back (each direction's
-    accepted states statically, a seeded sample of them on the walker too)."""
+    takes (shape first); and every take over, then every fallback and loop back (take
+    over first): the accepted states, with the edits that reached them."""
     applier = _applier(name)
     seed = Candidate.from_state(applier.seed_state)
     shape_first: list[tuple[list[dict], dict]] = []
@@ -493,12 +510,31 @@ def test_taking_over_with_a_fallback_or_a_loop_back_keeps_every_invariant(name):
                 shaped = applier.attempt(taken, shape, {taken.id})
                 if not isinstance(shaped, list):
                     take_first.append(([edit, shape], shaped.state))
+    return applier, shape_first, take_first
+
+
+@pytest.mark.parametrize("name", [S4, "fuzz_data_pass"])
+def test_taking_over_with_a_fallback_or_a_loop_back_keeps_every_invariant(name):
+    """Each direction's accepted states keep every invariant statically; a seeded sample of
+    them runs on the walker (the test below)."""
+    applier, shape_first, take_first = _both_directions(name)
     assert shape_first and take_first
     for edits, state in shape_first + take_first:
         found = sf.check_state(applier, state, walker=False, only=CHECKED)
         assert found == [], (edits, [str(v) for v in found])
-    _sound(applier, shape_first)
-    _sound(applier, take_first)
+
+
+@pytest.mark.parametrize("share", range(RUN_SHARES))
+@pytest.mark.parametrize("direction", ["shape first", "take over first"])
+@pytest.mark.parametrize("name", [S4, "fuzz_data_pass"])
+def test_a_seeded_sample_of_those_states_runs_on_the_walker(name, direction, share):
+    applier, shape_first, take_first = _both_directions(name)
+    accepted = shape_first if direction == "shape first" else take_first
+    rng = random.Random(applier.seed.name)
+    sample = rng.sample(accepted, min(RUN_PAIRS, len(accepted)))
+    for edits, state in sample[share::RUN_SHARES]:
+        found = sf.check_state(applier, state, walker=True, only=CHECKED)
+        assert found == [], (edits, [str(v) for v in found])
 
 
 def test_a_rename_then_a_removal_reached_by_an_accepted_graph_runs_on_the_walker():

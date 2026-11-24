@@ -22,6 +22,8 @@ from pathlib import Path
 
 import pytest
 
+from refactory_dsh.design import CI_TIME_BUDGET_S
+
 _TESTS_DIR = Path(__file__).resolve().parent
 _REPO = _TESTS_DIR.parent.parent
 _WORKFLOWS = _REPO / ".github" / "workflows"
@@ -152,7 +154,7 @@ def test_only_the_pr_ci_python_suite_passes_the_budget():
     ci = _pytest_commands(_WORKFLOWS / "ci.yml")
     suite = [command for command in ci if "--shard" in command]
     assert len(suite) == 1, ci
-    assert "--time-budget=10" in suite[0].split(), suite[0]
+    assert f"--time-budget={CI_TIME_BUDGET_S}" in suite[0].split(), suite[0]
     assert "--run-slow" not in suite[0], suite[0]
     others = [command for command in ci if command not in suite]
     assert others and not any("--time-budget" in command for command in others), others

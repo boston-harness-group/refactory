@@ -202,6 +202,8 @@ def test_a_target_that_cannot_be_resolved_is_reported(tmp_path):
 # ── it is a mode, so a loop can be pointed at it ────────────────────────────
 
 
+@pytest.mark.slow(reason="an outer loop of six evaluations, each a whole inner loop: ~55 s in CI; "
+                  "the inner loop and its knobs run in PR CI (test_the_loops_own_knobs_are_a_real_lever)")
 def test_an_outer_loop_can_search_the_loop_itself(tmp_path):
     """The point of the exercise: the loop's own knobs become a search surface.
 

@@ -47,26 +47,12 @@ S1_FALLBACK = {"op": "fallback", "step": "solve", "kind": "agent", "text": SIMPL
 S4_FALLBACK = {"op": "fallback", "step": "decide", "kind": "agent", "text": SIMPLE}
 
 
-import copy as _copy
-import functools as _functools
-
-
-@_functools.cache
-def _state_cached(name: str) -> dict[str, Any]:
+def _state(name: str) -> dict[str, Any]:
     return registry.resolve(Path("."), name)[1]().state_dict()
 
 
-def _state(name: str) -> dict[str, Any]:
-    return _copy.deepcopy(_state_cached(name))
-
-
-@_functools.cache
-def _mode_cached(name: str):
-    return registry.resolve(Path("."), name)[1]
-
-
 def _mode(name: str, state: dict[str, Any]):
-    mode = _mode_cached(name)()
+    mode = registry.resolve(Path("."), name)[1]()
     mode.load_state_dict(state)
     return mode
 
@@ -153,7 +139,7 @@ def test_the_view_reads_as_exactly_the_graph_s_edges():
 
     states = [_s1(), _s4()]
     for name in ("fuzz_data_pass", "livemath_skill_graph"):
-        seed = sf.cached_applier(name).seed_state
+        seed = sf.Applier(sf.seeds()[name]).seed_state
         graph = _graph(seed)
         for step in sorted(graph.nodes):
             edit = {"op": "fallback", "step": step}
@@ -691,7 +677,7 @@ def test_removing_the_step_takes_its_fallback_with_it():
     removes it as with no fallback."""
     import structure_fuzz as sf
 
-    seed = sf.cached_applier("fuzz_data_pass").seed_state
+    seed = sf.Applier(sf.seeds()["fuzz_data_pass"]).seed_state
     graph = _graph(seed)
     tried = 0
     for step in sorted(graph.nodes):

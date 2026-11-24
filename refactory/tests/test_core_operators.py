@@ -42,7 +42,7 @@ needs_code = pytest.mark.skipif(not CODE, reason="no code-node sandbox on this m
 
 
 def _apply(seed: str, edit: Any, state: dict | None = None) -> tuple[sf.Applier, Candidate | list[str]]:
-    applier = sf.cached_applier(seed)
+    applier = sf.Applier(sf.seeds()[seed])
     parent = Candidate.from_state(state or applier.seed_state)
     return applier, applier.attempt(parent, edit, {parent.id})
 
@@ -401,7 +401,7 @@ def test_route_chooses_among_labelled_steps_that_rejoin():
 @needs_spine
 @pytest.mark.parametrize("parallelism", [1, 3])
 def test_route_to_three_branches_inside_a_data_pass_runs_alike_on_both_runtimes(parallelism):
-    applier = sf.cached_applier("fuzz_data_pass")
+    applier = sf.Applier(sf.seeds()["fuzz_data_pass"])
     applier.seed_state = _parallel(applier.seed_state, parallelism)
     parent = Candidate.from_state(applier.seed_state)
     refused = applier.attempt(parent, ROUTE, {parent.id})
@@ -510,7 +510,7 @@ def test_a_removed_steps_own_knobs_are_not_news():
 
 
 def test_splitting_a_step_that_uses_tools_says_its_tools_went():
-    applier = sf.cached_applier("fuzz_draft_review")
+    applier = sf.Applier(sf.seeds()["fuzz_draft_review"])
     state = json.loads(json.dumps(applier.seed_state))
     state["graph"]["nodes"]["review"].pop("tool_policy", None)  # the default: tools
     edit = {"op": "split", "step": "review", "into": [{"kind": "agent", "text": "Review {{draft}}."}]}
@@ -544,14 +544,14 @@ def test_a_copy_of_a_tool_step_keeps_its_tools_in_a_fresh_workspace_of_its_own()
 
 
 def test_a_new_tool_step_outside_a_fresh_workspace_is_still_refused():
-    state = sf.cached_applier("fuzz_tool_step").seed_state
+    state = sf.Applier(sf.seeds()["fuzz_tool_step"]).seed_state
     after = nn_edits.apply({"op": "parallelize", "steps": ["gather"], "copies": 1}, state)
     after["graph"]["nodes"]["gather_copy1"].pop("workspace")
     assert base_mod._new_node_tools(state, after)
 
 
 def test_a_tool_step_working_in_the_run_directory_is_not_copied_beside_itself():
-    applier = sf.cached_applier("fuzz_tool_step")
+    applier = sf.Applier(sf.seeds()["fuzz_tool_step"])
     state = json.loads(json.dumps(applier.seed_state))
     state["graph"]["nodes"]["gather"].pop("workspace")
     _a, out = _apply("fuzz_tool_step", {"op": "parallelize", "steps": ["gather"], "copies": 1},
@@ -613,7 +613,7 @@ def _breaks(monkeypatch, target: str, replacement: Any, seed: str, edit: dict | 
     edits = edit if isinstance(edit, list) else [edit]
 
     def run() -> tuple[sf.Applier, Candidate | list[str]]:
-        applier = sf.cached_applier(seed)
+        applier = sf.Applier(sf.seeds()[seed])
         current = Candidate.from_state(applier.seed_state)
         for step in edits:
             outcome = applier.attempt(current, step, {current.id})
@@ -748,7 +748,7 @@ def test_every_composition_example_uses_only_core_operators_and_applies_as_writt
     for title, bundle in examples:
         assert all(edit["op"] in core_ops.CORE_OPS for edit in bundle), title
         json.loads(json.dumps(bundle))
-        applier = sf.cached_applier(seed)
+        applier = sf.Applier(sf.seeds()[seed])
         parent = Candidate.from_state(applier.seed_state)
         proposal = Proposal(edits=tuple(bundle), parent=parent.id)
         out = applier.optimizer.attempt(proposal, parent, applier.invariants, True, (),
@@ -801,7 +801,7 @@ def test_every_operator_example_that_names_this_graphs_steps_applies_as_written(
     """An operator's example names this graph's own steps only where the operator applies to
     them (else it keeps its placeholders), so a proposer copying it gets a valid edit."""
     ctx = _context(seed)
-    applier = sf.cached_applier(seed)
+    applier = sf.Applier(sf.seeds()[seed])
     lines = base_mod.operator_lines(ctx.catalogue, ctx.node_states, ctx.edges,
                                     protected=applier.protected,
                                     knob_values={k["name"]: k["value"] for k in ctx.knobs})
@@ -1032,7 +1032,7 @@ GATELESS_CYCLE = {"fuzz_fork_join": {"op": "add_edge", "source": "merge", "targe
 
 
 def _gateless(seed: str) -> dict:
-    state = sf.cached_applier(seed).seed_state
+    state = sf.Applier(sf.seeds()[seed]).seed_state
     edge = GATELESS_CYCLE[seed]
     if edge is None:  # close the cycle inside the data pass's body
         graph = Graph.from_state(state["graph"])
@@ -1091,7 +1091,7 @@ def test_a_macro_that_breaks_a_readable_graph_still_raises(monkeypatch):
 
     monkeypatch.setitem(nn_edits._MACROS, "route",
                         dataclasses.replace(spec, expand=broken))
-    state = sf.cached_applier("fuzz_fork_join").seed_state
+    state = sf.Applier(sf.seeds()["fuzz_fork_join"]).seed_state
     with pytest.raises(GraphError, match="own bug"):
         nn_edits.apply({"op": "route", "after": "decide", "judge": "agent"}, state)
     monkeypatch.setitem(nn_edits._MACROS, "route",
@@ -1190,7 +1190,7 @@ def test_a_map_s_system_prompt_is_every_run_s():
 ], ids=["code insert", "code branch", "not text"])
 def test_a_system_prompt_where_no_agent_reads_it_is_refused(edit):
     seed = "fuzz_fork_join" if edit["op"] == "branch" else "fuzz_draft_review"
-    reason = nn_edits.precheck(edit, sf.cached_applier(seed).seed_state)
+    reason = nn_edits.precheck(edit, sf.Applier(sf.seeds()[seed]).seed_state)
     assert reason and "'system'" in reason, reason
 
 
