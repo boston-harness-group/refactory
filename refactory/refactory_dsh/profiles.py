@@ -110,7 +110,11 @@ def _check_types(settings: dict[str, Any]) -> None:
             raise ProfileError(f"{field.name} must be {problem}, not {settings[field.name]!r}")
 
 
-def normalize(settings: dict[str, Any]) -> dict[str, Any]:
+def normalize(settings: dict[str, Any], project: Path | None = None) -> dict[str, Any]:
+    """Validate and complete ``settings``. Strategy, optimizer and parent picker names
+    are looked up in ``project``'s usable packages too (``registry.usable_packages``:
+    its package folder and the installed ones, a package switched off left out), as
+    the run that uses them does; without a project, in the installed packages only."""
     from refactory_dsh import optim, strategies
     from refactory_dsh.nn.edits import PRESETS, catalogue, removed
 
@@ -220,17 +224,35 @@ def normalize(settings: dict[str, Any]) -> dict[str, Any]:
     # A package-contributed strategy (``Package.strategies``) is looked up only
     # when the name is not one of the library's, so the common case imports nothing.
     strategy_choices = (strategies.names() if result["strategy"] in strategies.STRATEGIES
-                        else strategies.available())
-    for key, choices in (("optimizer", optim.names()), ("strategy", strategy_choices),
+                        else strategies.available(project))
+    # Likewise a package-contributed optimizer (``Package.optimizers``).
+    optimizer_choices = (optim.names() if result["optimizer"] in optim.REGISTRY
+                         else optim.available(project))
+    from refactory_dsh.nn.package import PackageError
+    for key, resolver in (("optimizer", optim.resolve), ("strategy", strategies.resolve)):
+        # A name a refused package lists (a clash, a class of the wrong kind) is
+        # refused with why; an unknown one falls to the check below.
+        try:
+            resolver(result[key], project)
+        except PackageError as error:
+            raise ProfileError(str(error)) from error
+        except ValueError:
+            pass
+    for key, choices in (("optimizer", optimizer_choices), ("strategy", strategy_choices),
                          ("evaluator", ("walker", "dsh")), ("edit_preset", PRESETS),
                          ("worker_backend", ("dsh", "codex", "claude_code"))):
         if result[key] not in choices:
             raise ProfileError(f"unknown {key}: {result[key]}")
     picker = result.get("parent_picker") or ""
     if picker:
-        if picker not in optim.picker_names():
-            raise ProfileError(f"unknown parent_picker: {picker}; known: {', '.join(optim.picker_names())}")
-        if result["optimizer"] in optim.picker_names():
+        try:
+            is_picker = optim.is_picker(picker, project)
+        except PackageError as error:
+            raise ProfileError(str(error)) from error
+        if not is_picker:
+            raise ProfileError(f"unknown parent_picker: {picker}; known: "
+                               f"{', '.join(optim.picker_names(project))}")
+        if optim.is_picker(result["optimizer"], project):
             raise ProfileError(
                 f"the {result['optimizer']} optimizer picks parents itself; pair the "
                 f"{picker} parent picker with a proposer (autoresearch or random)")
@@ -247,7 +269,7 @@ def normalize(settings: dict[str, Any]) -> dict[str, Any]:
         if not isinstance(result[key], dict):
             raise ProfileError(f"{key} must be an object")
     try:
-        strategies.check_options(result["strategy"], result["strategy_options"])
+        strategies.check_options(result["strategy"], result["strategy_options"], project)
     except ValueError as error:
         raise ProfileError(str(error)) from error
     from refactory_dsh.worker_config import validate_provider_config
@@ -281,7 +303,8 @@ def normalize(settings: dict[str, Any]) -> dict[str, Any]:
     if outside:
         # The selected strategy's own required ops are permitted with any preset,
         # as ``Loop.permitted_ops`` adds them (#493 G34).
-        outside -= set(getattr(strategies.resolve(result["strategy"]), "required_ops", ()))
+        outside -= set(getattr(strategies.resolve(result["strategy"], project),
+                               "required_ops", ()))
     if outside:
         raise ProfileError("allowed_ops must belong to the selected edit preset "
                            "or the selected strategy's required ops")
@@ -338,7 +361,7 @@ def save(project: Path, name: str, spec: dict[str, Any]) -> dict[str, Any]:
     supplied = spec.get("settings") or {}
     routing = resolve_workers(project, supplied)
     profile = {"schema_version": SCHEMA_VERSION, "name": name, "version": 0,
-               "settings": normalize({**supplied, **routing["settings"]}),
+               "settings": normalize({**supplied, **routing["settings"]}, project),
                "contract": {"objective": str(contract.get("objective") or "Maximize the mode's immutable score"),
                             "required_artifacts": required, "selection_rule": SELECTION_RULE}}
     # Only a spec that validated creates the profile's directory, and a version is
@@ -383,7 +406,7 @@ def resolve(project: Path, mode_id: str, *, name: str = "", version: int | None 
         routing = resolve_workers(project, {key: value for key, value in (overrides or {}).items() if key in FIELDS},
                                   profile={key: value for key, value in profile["settings"].items() if key in FIELDS})
         chosen.update(routing["settings"])
-    settings = normalize(chosen) if validate_settings else {**defaults(), **chosen}
+    settings = normalize(chosen, project) if validate_settings else {**defaults(), **chosen}
     _package, klass = registry.resolve(project, mode_id)
     mode = klass()
     state = mode.state_dict()
@@ -519,8 +542,9 @@ SETTING_HELP = {
     "claude_executable": "claude_code workers only: the Claude Code executable they run, an "
                          "absolute path (default: the one bundled with the Agent SDK)",
     "parent_picker": "pair a parent picker (archive, evolutionary, islands, hill_climb, "
-                     "map_elites) with --optimizer: the picker chooses the candidate each "
-                     "step edits, the optimizer writes the edits (default: none)",
+                     "map_elites, or one a package contributes) with --optimizer: the "
+                     "picker chooses the candidate each step edits, the optimizer writes "
+                     "the edits (default: none)",
     "selection": "with val items (the validation gate): checkpoint applies every change "
                  "whose graph is not broken, scores each applied one on val once and picks "
                  "the best of them; pool keeps the --pool-size best candidates on validation "
@@ -606,7 +630,8 @@ CLI_SETTINGS: dict[str, str] = {
     "batch_size": "candidates proposed per epoch (default: 4)",
     "max_evaluations": "a hard ceiling on evaluated candidates (default: 64)",
     "optimizer": "how candidates are proposed: random, hill_climb, evolutionary, archive, "
-                 "islands, map_elites or autoresearch (default: autoresearch)",
+                 "islands, map_elites, autoresearch or one a package contributes "
+                 "(default: autoresearch)",
     "edit_preset": "which edits are allowed: broad, structure, conservative or knob_only "
                    "(default: broad)",
     "evaluator": "which runtime scores a candidate: walker (fast) or dsh (the spine) "

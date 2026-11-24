@@ -176,7 +176,7 @@ def help_contract(project: Path, topic: str = '') -> dict[str, Any]:
                            for key, value in ops.items()},
             'modes': [{key: mode.get(key) for key in ('id', 'description', 'scored', 'action', 'interactive', 'coverage_warnings')}
                       for mode in modes],
-            'strategies': level_two(), 'worker_capabilities': {backend: capabilities(backend) for backend in BACKENDS},
+            'strategies': level_two(project), 'worker_capabilities': {backend: capabilities(backend) for backend in BACKENDS},
             'documentation': {'index': 'docs', 'search': {'action': 'docs', 'query': 'worker routing'},
                               'read': {'action': 'docs', 'page': 'refactory/docs/ceo-guide.md'}},
             'next': 'Read help with topic=<operation or mode ID> for full arguments/examples and docs for bounded current-build pages.'}

@@ -1229,13 +1229,23 @@ def _first_line(cls: Any) -> str:
     return text.split("\n", 1)[0].strip()
 
 
-def level_two() -> dict[str, Any]:
+def _unavailable(project: Path | None) -> list[dict[str, str]]:
+    """The packages whose strategies or optimizers are left out (``registry.survey``),
+    each with why."""
+    from refactory_dsh import registry
+
+    refused = registry.survey("optimizers", project)[1]
+    return [{"package": name, "reason": reason} for name, reason in sorted(refused.items())]
+
+
+def level_two(project: Path | None = None) -> dict[str, Any]:
     """The three level-2 seams by name, each with what it says it is.
 
     The named choice a GUI needs: a person picks an outer loop, an optimizer or an
     evaluator from a catalogue with descriptions rather than typing a name they have
-    to already know. Read from the registries, so a new implementation appears here
-    the moment it registers.
+    to already know. Read from the registries and from ``project``'s usable packages
+    (``Package.strategies``, ``Package.optimizers``), so a new implementation appears
+    here the moment it registers or a package lists it.
     """
     from refactory_dsh import evaluators, optim, strategies
 
@@ -1246,8 +1256,12 @@ def level_two() -> dict[str, Any]:
         ]
 
     return {
-        "outer_loops": entries(strategies.STRATEGIES),
-        "optimizers": entries(optim.REGISTRY),
+        "outer_loops": entries({**strategies.package_strategies(project),
+                                **strategies.STRATEGIES}),
+        "optimizers": entries({**optim.package_optimizers(project), **optim.REGISTRY}),
+        # A package left out for a clash or a wrong class, with why, as the package
+        # listing reports one that fails to load: the rest are listed as usual.
+        "unavailable_packages": _unavailable(project),
         "evaluators": entries(evaluators.REGISTRY),
     }
 
@@ -1924,7 +1938,7 @@ def main(argv: list[str] | None = None) -> int:
         elif args.verb == "modes":
             payload = catalogue(project=project)
         elif args.verb == "strategies":
-            payload = level_two()
+            payload = level_two(project)
         elif args.verb == "runs":
             payload = runs(project=project, runs_root=args.runs_root)
         elif args.verb == "profiles":
