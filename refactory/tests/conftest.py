@@ -402,6 +402,18 @@ def sealed_environment(_real_gh_shim: tuple[Path, Path]) -> Any:
     return sealed
 
 
+def _positive_seconds(value: str) -> float:
+    """``--time-budget``'s type: a positive number of seconds."""
+    import argparse
+    try:
+        seconds = float(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"not a number of seconds: {value!r}") from None
+    if not seconds > 0:
+        raise argparse.ArgumentTypeError(f"must be more than 0 seconds: {value!r}")
+    return seconds
+
+
 def pytest_addoption(parser: pytest.Parser) -> None:
     parser.addoption(
         "--run-integration",
@@ -431,7 +443,7 @@ def pytest_addoption(parser: pytest.Parser) -> None:
     )
     parser.addoption(
         "--time-budget",
-        type=int,
+        type=_positive_seconds,
         default=None,
         metavar="SECONDS",
         help="fail any test whose call phase exceeds SECONDS unless it is marked @pytest.mark.slow "
@@ -748,6 +760,6 @@ def pytest_runtest_makereport(item: pytest.Item, call: pytest.CallInfo[None]) ->
     if report.duration > budget:
         report.outcome = "failed"
         report.longrepr = (
-            f"Test took {report.duration:.1f}s, exceeding the {budget}s budget. "
+            f"Test took {report.duration:.1f}s, exceeding the {budget:g}s budget. "
             "Mark it @pytest.mark.slow or speed it up."
         )

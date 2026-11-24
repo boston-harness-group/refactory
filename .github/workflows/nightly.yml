@@ -66,9 +66,19 @@ jobs:
           python-version: "3.12"
       - name: Install (fresh-checkout path)
         run: ./install.sh
+      # As the PR suite's shards run them (ci.yml's `python` job), minus `--time-budget`.
+      - name: Allow the code-node sandbox
+        run: |
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+          if [ -e /proc/sys/kernel/unprivileged_userns_clone ]; then
+            sudo sysctl -w kernel.unprivileged_userns_clone=1 || true
+          fi
       - name: Slow tests
+        env:
+          REFACTORY_REQUIRE_MIGRATION_TESTS: "1"
+          REFACTORY_REQUIRE_CODE_SANDBOX: "1"
         run: >-
-          uv run python -m pytest refactory/tests -m slow --run-slow -q -rfEs --timeout=5400
+          uv run python -m pytest refactory/tests -m slow --run-slow -q -rfEs -n 4 --timeout=5400
 
   # A failed night opens (or comments on) one tracking issue, so the team sees it rather
   # than only whoever last edited the schedule. Its own job, holding the only token that
