@@ -416,6 +416,21 @@ def tool_path(python: str, bin_dir: Path, *, workspace: Path, runs=(), hidden=()
                     tmp=str(tmp) if tmp is not None else "")
 
 
+def tool_path_from_environment(environment: Any, bin_dir: Path, *,
+                               workspace: Path, runs: Sequence = (),
+                               tmp_dir: Path | None = None,
+                               workdir: Path | None = None) -> ToolPath:
+    """Unpack a `task.ToolEnvironment` and call `tool_path`: the shared path for sealed
+    agent steps (`workspace._tool_path`) and sealed script steps (`snippet.sealed_execute`)."""
+    python = environment.python()
+    hidden = list(environment.hidden(workdir)) if environment.hidden is not None else []
+    commands = dict(environment.commands()) if environment.commands is not None else {}
+    reads = list(environment.reads()) if environment.reads is not None else []
+    return tool_path(python, bin_dir, workspace=workspace, runs=runs, hidden=hidden,
+                     commands=commands, reads=reads,
+                     tmp=(tmp_dir if environment.private_tmp else None))
+
+
 def runner_command(workspace: Path, cap: StepCap | None = None,
                    tools: ToolPath | None = None) -> list[str]:
     """The runner argv DSH's local sandbox provider puts in front of each command of a

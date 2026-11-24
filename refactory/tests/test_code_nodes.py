@@ -1214,6 +1214,98 @@ def test_sealed_script_cannot_open_network_socket(tmp_path):
                                workdir=pass_dir, node_id="net", reads=[])
 
 
+@needs_sandbox
+@linux_only
+def test_sealed_script_cannot_read_home(tmp_path):
+    """The sealed script cannot read personal files in the home directory. The seal's new
+    root has only the directory tree leading to the interpreter (empty scaffold
+    directories), not dotfiles like ``.bashrc``, ``.ssh``, ``.config``."""
+    pass_dir = _sealed_pass(tmp_path)
+    real_home = os.path.realpath(Path.home())
+    real_dotfiles = {e for e in os.listdir(real_home) if e.startswith(".")}
+    assert real_dotfiles, "setup: test expects the real home to have dotfiles"
+    code = (f"import os, json\n"
+            f"def main(inp):\n"
+            f"    try:\n"
+            f"        entries = os.listdir({real_home!r})\n"
+            f"    except FileNotFoundError:\n"
+            f"        entries = []\n"
+            f"    return {{'facts': {{'entries': json.dumps(entries)}}}}\n")
+    result = snippet.sealed_execute(code, {"files": {}, "facts": {}},
+                                    workdir=pass_dir, node_id="home", reads=[])
+    sealed_entries = set(json.loads(result["facts"]["entries"]))
+    leaked = sealed_entries & real_dotfiles
+    assert not leaked, f"home dotfiles visible inside the seal: {sorted(leaked)}"
+
+
+@needs_sandbox
+def test_sealed_script_timeout_surfaces_as_explicit_error(tmp_path, monkeypatch):
+    """A sealed script exceeding its wall-clock limit is killed and the error names the
+    limit, not a silent failure."""
+    pass_dir = _sealed_pass(tmp_path)
+    code = ("def main(inp):\n"
+            "    while True:\n        pass\n")
+    with pytest.raises(snippet.SnippetError, match="over its 2 s limit"):
+        snippet.sealed_execute(code, {"files": {}, "facts": {}},
+                               workdir=pass_dir, node_id="spin", reads=[],
+                               timeout_s=2)
+
+
+@needs_sandbox
+@linux_only
+def test_sealed_script_timeout_leaves_no_process_behind(tmp_path):
+    """A sealed script that starts a sleeping child and then spins is killed at its wall
+    clock, and its child goes with it (PID namespace, process group)."""
+    pass_dir = _sealed_pass(tmp_path)
+    marker = _marker()
+    code = ("import subprocess\n"
+            "def main(inp):\n"
+            f"    subprocess.Popen(['/bin/sleep', '{marker}'], start_new_session=True)\n"
+            "    while True:\n        pass\n")
+    with pytest.raises(snippet.SnippetError, match="over its 2 s limit"):
+        snippet.sealed_execute(code, {"files": {}, "facts": {}},
+                               workdir=pass_dir, node_id="spin", reads=[],
+                               timeout_s=2)
+    assert _host_processes(f"sleep {marker}") == []
+
+
+@needs_sandbox
+@linux_only
+def test_sealed_script_memory_limit_surfaces_as_explicit_error(tmp_path, monkeypatch):
+    """A sealed script that exceeds the memory cap is killed and surfaces as a
+    SnippetError, not a silent failure. Uses a tight per-process limit (256 MB)."""
+    from refactory_dsh import seal
+    monkeypatch.setattr(seal, "LINUX_LIMITS_UNSCOPED", "-u 128 -v 262144")
+    monkeypatch.setattr(seal, "LINUX_LIMITS", "-u 512 -v 262144")
+    pass_dir = _sealed_pass(tmp_path)
+    code = ("def main(inp):\n"
+            "    blocks = []\n"
+            "    while True:\n"
+            "        blocks.append(bytearray(64 * 1024 * 1024))\n")
+    with pytest.raises(snippet.SnippetError, match="MemoryError|did not finish"):
+        snippet.sealed_execute(code, {"files": {}, "facts": {}},
+                               workdir=pass_dir, node_id="oom", reads=[],
+                               timeout_s=30)
+
+
+def test_sealed_execute_and_workspace_share_tool_path_from_environment():
+    """Both the sealed script path (snippet.sealed_execute) and the sealed agent step path
+    (workspace._tool_path) go through seal.tool_path_from_environment, not their own
+    unpacking of ToolEnvironment."""
+    from refactory_dsh import seal, workspace as ws_mod
+    import inspect
+
+    src_snippet = inspect.getsource(snippet.sealed_execute)
+    src_workspace = inspect.getsource(ws_mod._tool_path)
+    assert "tool_path_from_environment" in src_snippet, \
+        "snippet.sealed_execute should call seal.tool_path_from_environment"
+    assert "tool_path_from_environment" in src_workspace, \
+        "workspace._tool_path should call seal.tool_path_from_environment"
+    for src in (src_snippet, src_workspace):
+        assert "environment.python()" not in src, \
+            "should not unpack ToolEnvironment directly"
+
+
 def _skip_no_libreoffice():
     if ifo._find_libreoffice() is None:
         pytest.skip("LibreOffice not found anywhere on PATH")

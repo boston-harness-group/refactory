@@ -845,13 +845,9 @@ def sealed_execute(code: str, inp: Any, *, workdir: Path, node_id: str,
                 else:
                     shutil.copy2(src, dst)
         (ws / SEALED_PAYLOAD).write_text(payload)
-        python = environment.python()
-        hidden = list(environment.hidden(workdir)) if environment.hidden is not None else []
-        commands = dict(environment.commands()) if environment.commands is not None else {}
-        env_reads = list(environment.reads()) if environment.reads is not None else []
-        tools = seal.tool_path(python, bin_dir, workspace=ws, runs=runs, hidden=hidden,
-                               commands=commands, reads=env_reads,
-                               tmp=(root / "seal-tmp" if environment.private_tmp else None))
+        tools = seal.tool_path_from_environment(
+            environment, bin_dir, workspace=ws, runs=runs,
+            tmp_dir=root / "seal-tmp", workdir=workdir)
         cap = seal.step_cap(ws)
         runner = seal.runner_command(ws, cap=cap, tools=tools)
         argv = [*runner, "--", "python3", "-I", "-c", _SEALED_DRIVER]
