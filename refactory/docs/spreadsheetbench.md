@@ -659,8 +659,12 @@ pass after the last step is graded as swe's is, and none fails the item
   a file they may leave out, is optional for a sealed Claude Code reader
   (`workspace.optional_reads`, on both runtimes): a step stopped at its cap before it wrote
   its notes leaves the next step to run without them, and verify runs without an
-  `output.xlsx` implement did not write (and may write one). Every other read is still
-  required.
+  `output.xlsx` implement did not write (and may write one). Never silently: each absent
+  read is recorded per step (`workspace.absent_reads`), in `final.json` as
+  `missing_inputs` (`{"plan": ["inspect_notes.md"]}`) and in the verdict the analysts see
+  (`(the plan step ran without inspect_notes.md: no earlier step wrote it)`). Every other
+  read is still required. A step whose reply has no text is listed in
+  `steps_without_reply`.
 - **Analysts**: as swe's -- the input's preview as the item's context. SkillOpt's view
   shows each step's final message headed by its step, in order, then V2's verdict; the
   target's prompts are each step's prompt as sent and its system prompt, headed by step.

@@ -16,6 +16,8 @@ from typing import Any
 from refactory_packages.spreadsheetbench import ops
 from refactory_packages.spreadsheetbench.tasks import FINAL, PRED, TURN
 
+from refactory_dsh import workspace
+
 from . import swe_ops, swe_port
 from .steps_mode import STEPS, reply_path, session_path
 
@@ -36,18 +38,21 @@ def finalize(ctx: Any) -> dict[str, Any]:
     output, or ``output-not-found`` without one. Writes `tasks.FINAL` with each step's
     turns (``step_turns``, ``None`` where unknown) and their total (``n_turns``, the sum of
     the known counts), the steps stopped at their turn cap (``turn_limits``), the steps the
-    adapter left no facts of (``session_facts_missing``) and the steps that left no reply
-    (``steps_without_reply``: missing after their retries); the conversation is every
-    step's final message in order, and `TOOL_CALLS` every step's calls. An item where no
-    step answered ends with no answer (`ops.NoReply`), as swe's does."""
+    adapter left no facts of (``session_facts_missing``), each step's hand-offs that were
+    absent when it ran (``missing_inputs``, `workspace.absent_reads`: it ran without them)
+    and the steps that left no reply (``steps_without_reply``: missing after their
+    retries, or a reply with no text); the conversation is every step's final message in
+    order, and `TOOL_CALLS` every step's calls. An item where no step answered ends with no
+    answer (`ops.NoReply`), as swe's does."""
     turn = ctx.read_json(TURN, {}) or {}
     fail_reason, extra = "", {}
     n_turns: int | None = 0
     if turn.get("status") == "no_case":
         fail_reason, n_turns = "no-test-cases", 0
     else:
-        replies = {step: ctx.read_text(reply_path(step)) for step in STEPS
-                   if ctx.exists(reply_path(step))}
+        # A reply file with no text is no reply (the step said nothing).
+        replies = {step: text for step in STEPS if ctx.exists(reply_path(step))
+                   for text in (ctx.read_text(reply_path(step)),) if text.strip()}
         if not replies:
             raise ops.NoReply("no step left a reply: every step's model call ended without an "
                               "answer, so the item ends here")
@@ -63,6 +68,9 @@ def finalize(ctx: Any) -> dict[str, Any]:
         missing = [step for step in STEPS if step in replies and not sessions[step]]
         if missing:
             extra["session_facts_missing"] = missing
+        absent = workspace.absent_reads(ctx.workdir)
+        if absent:
+            extra["missing_inputs"] = absent
         silent = [step for step in STEPS if step not in replies]
         if silent:
             extra["steps_without_reply"] = silent

@@ -78,7 +78,9 @@ A sealed Claude Code step's writes after its reply are files it may leave out, a
 may leave out its reader may not find: a read that only sealed Claude Code steps write, each
 as such a file, is optional for a sealed Claude Code step (`workspace.optional_reads`). Absent,
 it is not copied into the workspace and the step runs without it, on both runtimes (the
-lowering declares them, `optional_reads`, and the worker skips them as the walker does).
+lowering declares them, `optional_reads`, and the worker skips them as the walker does);
+each one skipped is recorded beside the pass's files, per step (`workspace.absent_reads`),
+for the mode to report.
 Every other read is required, as before: a missing one fails the step
 (`required worker input is missing`). `spreadsheetbench_v2/steps` relies on it: a step
 stopped at its turn cap before writing its notes leaves the next to run without them.

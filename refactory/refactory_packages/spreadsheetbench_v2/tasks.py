@@ -295,8 +295,8 @@ class SpreadsheetBenchV2SweTask(SpreadsheetBenchV2Task):
 class SpreadsheetBenchV2StepsTask(SpreadsheetBenchV2SweTask):
     """The swe Task for the steps mode (`steps_mode`): the same items, grade and tool
     environment; the verdict names each step stopped at its turn cap (`tasks.FINAL`'s
-    ``turn_limits``) and each step the adapter left no facts of (``session_facts_missing``,
-    `steps_ops.finalize`)."""
+    ``turn_limits``), each hand-off a step ran without (``missing_inputs``) and each step
+    the adapter left no facts of (``session_facts_missing``, `steps_ops.finalize`)."""
 
     def session_note(self, final: dict[str, Any]) -> str:
         step_turns = final.get("step_turns") or {}
@@ -304,6 +304,11 @@ class SpreadsheetBenchV2StepsTask(SpreadsheetBenchV2SweTask):
                  + (f"{step_turns.get(step)} turns, " if step_turns.get(step) is not None else "")
                  + f"cap {cap})"
                  for step, cap in (final.get("turn_limits") or {}).items()]
+        for step, names in (final.get("missing_inputs") or {}).items():
+            notes.append(f"(the {step} step ran without {', '.join(names)}: no earlier step "
+                         "wrote it)" if len(names) == 1 else
+                         f"(the {step} step ran without {', '.join(names)}: no earlier step "
+                         "wrote them)")
         missing = final.get("session_facts_missing") or []
         if missing:
             many = len(missing) > 1

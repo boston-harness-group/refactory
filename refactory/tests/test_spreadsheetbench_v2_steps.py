@@ -224,8 +224,10 @@ class StepsStub:
 
     thread_safe = True
 
-    def __init__(self, commands: dict[str, list[str]]) -> None:
+    def __init__(self, commands: dict[str, list[str]], silent: tuple[str, ...] = ()) -> None:
         self.commands = commands
+        #: Steps whose every session ends with no reply text.
+        self.silent = silent
         self.calls: list[dict[str, Any]] = []
         self.routes: list[Any] = []
 
@@ -247,7 +249,7 @@ class StepsStub:
             seen.append(proc.stdout + proc.stderr)
         self.calls.append({"step": step, "prompt": prompt, "system": system, "files": files,
                            "seen": seen, "tools": seal["tools"]})
-        return f"{step} done."
+        return "" if step in self.silent else f"{step} done."
 
 
 def _state(**knobs: Any) -> dict[str, Any]:
@@ -367,6 +369,10 @@ def test_no_output_from_implement_or_verify_fails_the_item(tmp_path, sb2_env, of
     final = _final(tmp_path / "walk")
     assert final["fail_reason"] == steps_ops.NO_OUTPUT
     assert "steps_without_reply" not in final
+    # Verify ran without output.xlsx, and the record says so.
+    assert final["missing_inputs"] == {"verify": ["output.xlsx"]}
+    assert "(the verify step ran without output.xlsx: no earlier step wrote it)" \
+        in record["prediction"]
 
 
 @needs_linux
@@ -390,6 +396,33 @@ def test_a_step_runs_without_notes_the_step_before_did_not_write(tmp_path, sb2_e
     by = {c["step"]: c for c in model.calls}
     assert sorted(by["plan"]["files"]) == ["SKILL.md", "input.xlsx"]
     assert sorted(by["implement"]["files"]) == ["SKILL.md", "input.xlsx", "plan.md"]
+    # Never silent: final.json and the verdict name each step that ran without the notes.
+    final = _final(tmp_path / "walk")
+    assert final["missing_inputs"] == {"plan": ["inspect_notes.md"],
+                                       "implement": ["inspect_notes.md"],
+                                       "verify": ["inspect_notes.md"]}
+    for step in ("plan", "implement", "verify"):
+        assert f"(the {step} step ran without inspect_notes.md: no earlier step wrote it)" \
+            in record["prediction"], record["prediction"]
+
+
+@needs_linux
+def test_a_step_with_no_reply_is_named_and_the_item_goes_on(tmp_path, sb2_env, office):
+    """Plan's session ends with no reply text and no plan.md: the item goes on
+    (implement runs without plan.md), and final.json names plan in
+    ``steps_without_reply`` and implement's absent plan.md in ``missing_inputs``."""
+    commands = _commands(implement=7, verify=None)
+    commands["plan"] = ["cat inspect_notes.md"]  # and no plan.md
+    model = StepsStub(commands, silent=("plan",))
+    (record,) = _walk(tmp_path, model).item_records
+    assert record["passed"], record
+    assert [c["step"] for c in model.calls] == list(STEPS)
+    final = _final(tmp_path / "walk")
+    assert final["steps_without_reply"] == ["plan"]
+    assert final["missing_inputs"] == {"implement": ["plan.md"], "verify": ["plan.md"]}
+    assert final["step_turns"]["plan"] is None
+    assert "(the implement step ran without plan.md: no earlier step wrote it)" \
+        in record["prediction"]
 
 
 def test_only_reads_sealed_steps_may_leave_out_are_optional():
@@ -549,17 +582,19 @@ def test_files_flow_and_verify_corrects_the_output_on_the_spine(tmp_path, sb2_en
 
 @needs_linux
 @needs_spine
-def test_a_missing_output_is_optional_for_verify_on_the_spine(tmp_path, sb2_env, office):
-    """Spine: implement leaves no output.xlsx; the worker runs verify without it (as the
-    walker does) and verify's own output is graded."""
+def test_absent_hand_offs_are_optional_and_recorded_on_the_spine(tmp_path, sb2_env, office):
+    """Spine: inspect leaves no notes and implement no output.xlsx; the workers run the
+    later steps without them (as the walker does), record each one, and verify's own
+    output is graded."""
     from refactory_dsh.model import DshModelClient
 
     root = tmp_path / "dsh"
     root.mkdir()
     log = root / "calls.jsonl"
     script = root / "steps_dsh.py"
-    script.write_text(STEPS_DSH.format(log=str(log), steps=list(STEPS),
-                                       commands=_commands(implement=None, verify=7)))
+    commands = _commands(implement=None, verify=7)
+    commands["inspect"] = ["view_xlsx input.xlsx list"]
+    script.write_text(STEPS_DSH.format(log=str(log), steps=list(STEPS), commands=commands))
     cli = root / "dsh"
     cli.write_text(f'#!/bin/sh\nexec "{sys.executable}" -I "{script}" "$@"\n')
     cli.chmod(0o755)
@@ -569,6 +604,14 @@ def test_a_missing_output_is_optional_for_verify_on_the_spine(tmp_path, sb2_env,
     calls = [json.loads(line) for line in log.read_text().splitlines()]
     assert [c["step"] for c in calls] == list(STEPS)
     assert "output.xlsx" not in calls[3]["files"]
+    assert "inspect_notes.md" not in calls[1]["files"]
+    # Recorded on the spine as on the walker: final.json and the verdict.
+    final = _final(tmp_path / "spine")
+    assert final["missing_inputs"] == {"plan": ["inspect_notes.md"],
+                                       "implement": ["inspect_notes.md"],
+                                       "verify": ["inspect_notes.md", "output.xlsx"]}
+    assert ("(the verify step ran without inspect_notes.md, output.xlsx: no earlier step "
+            "wrote them)") in record["prediction"], record["prediction"]
 
 
 # ── the real adapter: turns per step, and a step stopped at its cap ───────────
@@ -715,6 +758,8 @@ def test_the_steps_task_names_each_capped_step_and_missing_facts():
     """The verdict's note: each capped step with its turns, and the steps with no facts."""
     task = tasks.SpreadsheetBenchV2StepsTask.__new__(tasks.SpreadsheetBenchV2StepsTask)
     assert task.session_note({}) == ""
+    assert task.session_note({"missing_inputs": {"plan": ["inspect_notes.md"]}}) == \
+        "(the plan step ran without inspect_notes.md: no earlier step wrote it)"
     assert task.session_note({"step_turns": {"plan": 50, "verify": None},
                               "turn_limits": {"plan": 50, "verify": 50}}) == (
         "(the plan step stopped at its turn cap: 50 turns, cap 50)\n"

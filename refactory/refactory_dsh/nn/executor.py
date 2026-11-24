@@ -2336,7 +2336,7 @@ class Executor:
                 self.ctx.workdir, node.id, node.workspace, knobs=self.ctx.knobs, facts=self.ctx.facts,
                 route=route, budget=self.ctx.budget, fresh=retrying and not kept,
                 tools=node.tools if is_sealed(node) else (),
-                reads=present_reads(self.ctx.workdir, node.reads, _optional_reads),
+                reads=present_reads(self.ctx.workdir, node.reads, _optional_reads, node.id),
                 runtime_root=Path(model_context["runtime_root"]) if (model_context or {}).get("runtime_root")
                 else None)
 

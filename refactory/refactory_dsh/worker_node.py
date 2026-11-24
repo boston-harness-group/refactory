@@ -159,7 +159,7 @@ def execute(spec: dict[str, Any], workdir: Path) -> dict[str, Any]:
             runtime_root=Path(runtime_root) if runtime_root else None,
             tools=spec.get('tools') or (),
             reads=workspaces.present_reads(workdir, spec.get('reads') or (),
-                                           spec.get('optional_reads')))
+                                           spec.get('optional_reads'), node))
 
     system = render(spec.get('system_prompt', ''), context)
     # Pre-flight: refuse a non-empty system prompt on a route that cannot carry it.

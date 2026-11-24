@@ -95,13 +95,43 @@ def optional_reads(graph: Any, node_id: str) -> tuple[str, ...]:
                      and name in w.writes[1:] for w in writers[name]))
 
 
-def present_reads(workdir: Path, reads: Any, optional: Any) -> list[str]:
+#: Beside a pass's files: each sealed step's optional reads that were absent when it ran
+#: (`present_reads`), ``{node: [file, ...]}``, so nothing a step ran without goes unsaid.
+ABSENT_READS = ".refactory-absent-reads.json"
+
+
+def present_reads(workdir: Path, reads: Any, optional: Any, node: str = "") -> list[str]:
     """``reads`` without the optional ones (`optional_reads`) the run directory lacks:
-    what a sealed step's workspace is given."""
+    what a sealed step's workspace is given. Each one left out is recorded for ``node``
+    in `ABSENT_READS` (`absent_reads`), on both runtimes."""
     from refactory_dsh.agent_delivery import _path
 
-    return [name for name in reads or ()
-            if name not in set(optional or ()) or _path(Path(workdir), name).exists()]
+    optional = set(optional or ())
+    kept, absent = [], []
+    for name in reads or ():
+        (absent if name in optional and not _path(Path(workdir), name).exists()
+         else kept).append(name)
+    if absent and node:
+        from refactory_dsh.items import update_record_file
+
+        def add(existing: dict[str, Any]) -> None:
+            seen = existing.setdefault(node, [])
+            seen.extend(name for name in absent if name not in seen)
+
+        update_record_file(Path(workdir) / ABSENT_READS, add, dict)
+    return kept
+
+
+def absent_reads(workdir: Path) -> dict[str, list[str]]:
+    """What `present_reads` recorded in ``workdir``: each step's optional reads that were
+    absent when it ran, ``{}`` for none."""
+    path = Path(workdir) / ABSENT_READS
+    try:
+        data = json.loads(path.read_text())
+    except (OSError, ValueError):
+        return {}
+    return {str(k): [str(n) for n in v] for k, v in data.items() if isinstance(v, list)} \
+        if isinstance(data, dict) else {}
 
 
 def sealed_backend(tools: Any) -> str:
