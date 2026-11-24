@@ -258,12 +258,13 @@ def test_a_self_check_pass_is_not_run_again_by_the_full_check(tmp_path):
     ids = {f"tests/test_two.py::{name}" for name in ("test_one", "test_two_more", "test_new")}
     assert set(prepass.passed_ids) == ids
     passed, used, result = _merged_full_check(fx, check)
-    assert set(used) == ids and set(passed) == ids
+    # The last pass always runs again (`with_deselected`), so no step deselects all.
+    assert set(passed) == ids and used == passed[:-1]
     assert result.ok
-    # The full check ran only what the self-check had not merged.
-    assert sorted(fx.tests("copy")) == ["tests/test_three.py::test_more",
-                                        "tests/test_two.py::test_two"]
-    assert "3 deselected" in result.stdout
+    # The full check ran only what the self-check had not merged, and that one pass.
+    assert sorted(fx.tests("copy")) == sorted(["tests/test_three.py::test_more",
+                                               "tests/test_two.py::test_two", passed[-1]])
+    assert "2 deselected" in result.stdout
 
 
 def test_an_id_whose_deselect_would_take_another_test_is_not_merged(tmp_path):
@@ -275,9 +276,11 @@ def test_an_id_whose_deselect_would_take_another_test_is_not_merged(tmp_path):
     repo_change.prepare_attempt(fx.ctx, 120)
     prepass = _self_check(fx, ["tests/test_two.py::test_one", "tests/test_two.py::test_two"])
     assert prepass.passed_ids == ["tests/test_two.py::test_one"]
-    _, used, result = _merged_full_check(fx, check)
-    assert used == ["tests/test_two.py::test_one"] and result.ok
-    assert sorted(fx.tests("copy")) == ["tests/test_two.py::test_two",
+    passed, used, result = _merged_full_check(fx, check)
+    # test_one, the only pass, is also the one that always runs again.
+    assert passed == ["tests/test_two.py::test_one"] and used == [] and result.ok
+    assert sorted(fx.tests("copy")) == ["tests/test_two.py::test_one",
+                                        "tests/test_two.py::test_two",
                                         "tests/test_two.py::test_two_more"]
 
 
@@ -346,9 +349,12 @@ def test_the_chunk_prints_a_line_per_test(command, added):
 
 def test_deselect_reaches_only_a_single_plain_pytest_step():
     ids = ["tests/test_a.py::test_x[a b]"]
+    assert base_check.with_deselected("pnpm test && pytest -q tests", ids) == (
+        "pnpm test && pytest -q tests", [])  # the last pass always runs again
+    ids = [*ids, "tests/test_a.py::test_y"]
     command, used = base_check.with_deselected("pnpm test && pytest -q tests", ids)
     assert command == "pnpm test && pytest -q tests '--deselect=tests/test_a.py::test_x[a b]'"
-    assert used == ids
+    assert used == ids[:1]
     for refused in ("pytest a && pytest b", "pytest tests | tee log", "pytest tests > out",
                     "pnpm test"):
         assert base_check.with_deselected(refused, ids) == (refused, [])
@@ -358,7 +364,7 @@ def test_deselect_stops_at_its_size_limit(monkeypatch):
     monkeypatch.setattr(base_check, "DESELECT_LIMIT_BYTES", 100)
     ids = [f"tests/test_a.py::test_{n:03}" for n in range(10)]
     _, used = base_check.with_deselected("pytest tests", ids)
-    assert 0 < len(used) < len(ids) and used == ids[:len(used)]
+    assert 0 < len(used) < len(ids) - 1 and used == ids[:len(used)]
 
 
 # ── 4. guardedness runs only test files whose content changed ─────────────────
@@ -671,33 +677,40 @@ def test_each_step_sees_the_status_the_shell_would_give_it(tmp_path, command, sh
     assert base_check.chain_status(records) == plain
 
 
-def test_a_step_whose_every_test_was_deselected_passes_without_running_one(tmp_path):
-    """Every test of the check passed in the self-check on this commit: all are deselected,
-    none runs again, and pytest's exit 5 for the empty step is read as the pass it is --
-    for a single step and as a step of a chain."""
+def test_every_step_keeps_one_passed_test_running(tmp_path):
+    """Every test of the check passed in the self-check on this commit: all but the last are
+    deselected, and that one runs again, so the step never exits 5 for deselecting all it
+    collects -- for a single step and as a step of a chain."""
+    both = "def test_more():\n    pass\n\n\ndef test_zmore():\n    pass\n"
     for check in (f"{PYTEST} -q tests", f"{PYTEST} -q tests && echo lint ok"):
         root = tmp_path / str(len(check))
         root.mkdir()
-        fx = Fixture(root, {"tests/test_three.py": MORE}, {"change.txt": "x\n"}, check=check)
+        fx = Fixture(root, {"tests/test_three.py": both}, {"change.txt": "x\n"}, check=check)
         repo_change.prepare_attempt(fx.ctx, 120)
         _self_check(fx, ["tests/test_three.py"])
-        _, used, result = _merged_full_check(fx, check)
-        assert used == ["tests/test_three.py::test_more"]
+        passed, used, result = _merged_full_check(fx, check)
+        assert len(passed) == 2 and used == passed[:1]
         assert result.ok and result.returncode == 0, result.stdout
-        assert fx.tests("copy") == []
+        assert fx.tests("copy") == [passed[-1]]
 
 
-def test_under_xdist_the_last_pass_runs_again(tmp_path):
-    """xdist's summary never counts deselections, so under it one passed test is left to
-    run and the step can never exit 5 for deselecting all it collects."""
-    check = f"{PYTEST} -q -n 2 tests"
-    fx = Fixture(tmp_path, {"tests/test_two.py": "def test_one():\n    pass\n\n\n"
-                                                 "def test_zwei():\n    pass\n"},
-                 {"change.txt": "x\n"}, check=check)
+@pytest.mark.parametrize("where", ["command", "addopts"])
+def test_under_xdist_the_last_pass_runs_again(tmp_path, where):
+    """xdist -- named in the command, or turned on by the project's ``addopts`` where the
+    command does not show it -- prints only "no tests ran" when everything is deselected,
+    with no count. Every test passed in the self-check, one runs again, and the full check
+    passes."""
+    files = {"tests/test_two.py": "def test_one():\n    pass\n\n\ndef test_zwei():\n    pass\n"}
+    if where == "addopts":
+        files["pytest.ini"] = "[pytest]\naddopts = -n 2\n"
+        check = f"{PYTEST} -q tests"
+    else:
+        check = f"{PYTEST} -q -n 2 tests"
+    fx = Fixture(tmp_path, files, {"change.txt": "x\n"}, check=check)
     repo_change.prepare_attempt(fx.ctx, 120)
     _self_check(fx, ["tests/test_two.py"])
     passed, used, result = _merged_full_check(fx, check)
-    assert used == passed[:-1] and len(passed) == 2
+    assert len(passed) == 2 and used == passed[:-1]
     assert result.ok and set(fx.tests("copy")) == {passed[-1]}  # xdist logs a test twice
 
 
@@ -744,11 +757,12 @@ def test_a_self_checked_file_the_whole_run_does_not_collect_still_fails(tmp_path
     check then deselects nothing it collected and runs nothing: exit 5 stays a failure, as
     it is without deselection."""
     check = f"{PYTEST} -q tests"
+    both = "def test_more():\n    pass\n\n\ndef test_zmore():\n    pass\n"
     fx = Fixture(tmp_path, {"pytest.ini": "[pytest]\npython_files = check_*.py\n",
-                            "tests/test_a.py": MORE}, {"change.txt": "x\n"}, check=check)
+                            "tests/test_a.py": both}, {"change.txt": "x\n"}, check=check)
     repo_change.prepare_attempt(fx.ctx, 120)
     prepass = _self_check(fx, ["tests/test_a.py"])
-    assert prepass.passed_ids == ["tests/test_a.py::test_more"]
+    assert prepass.passed_ids == ["tests/test_a.py::test_more", "tests/test_a.py::test_zmore"]
     plain = repo_change.run_check(fx.ctx, check, 120, beside_reviews=True, per_step=True)
     _, used, result = _merged_full_check(fx, check)
     assert used == ["tests/test_a.py::test_more"]

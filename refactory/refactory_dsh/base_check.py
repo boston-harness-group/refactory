@@ -759,16 +759,18 @@ def with_deselected(command: str, test_ids: list[str]) -> tuple[str, list[str]]:
     deselects: none when it has no single plain pytest step (`plain_pytest_step`).
 
     The full check uses it for the tests the self-check already passed on the same commit
-    (`design_ops._full_check`). A step whose every test is deselected runs none and exits
-    5; `settle_deselected` reads that as the pass it is from pytest's own count. Under
-    xdist, whose summary has no such count, the last id is left to run, so the step never
-    deselects all it collects. Past `DESELECT_LIMIT_BYTES` the rest are left to run.
+    (`design_ops._full_check`). The last id is never deselected, in any mode: a step that
+    deselected all it collects would run none and exit 5, and under xdist -- turned on in
+    the command or in the project's ``addopts`` -- pytest's summary does not even count
+    what was deselected. So one passed test runs again, and the step can never exit 5 for
+    deselecting everything; `settle_deselected` stays as a second safeguard. Past
+    `DESELECT_LIMIT_BYTES` the rest are left to run.
     """
     found = plain_pytest_step(command) if test_ids else None
     if found is None:
         return command, []
     steps, index = found
-    candidates = test_ids[:-1] if _uses_xdist(steps[index][0]) else test_ids
+    candidates = test_ids[:-1]
     used: list[str] = []
     size = 0
     for test_id in candidates:
@@ -788,18 +790,6 @@ def with_deselected(command: str, test_ids: list[str]) -> tuple[str, list[str]]:
 _ALL_DESELECTED = re.compile(r"^=*\s*(\d+) deselected(?:, \d+ warnings?)? in [\d.]+s\b")
 _PYTEST_FINAL_LINE = re.compile(r"^=*\s*\d+ (?:failed|passed|errors?|skipped|deselected|xfailed|"
                                 r"xpassed|warnings?)\b.* in [\d.]+s\b.*$", re.MULTILINE)
-#: pytest-xdist's options: its workers deselect, so its summary never counts what they did.
-_XDIST = re.compile(r"^(?:-n\S*|--numprocesses(?:=.*)?|--dist(?:=.*)?|-d)$")
-
-
-def _uses_xdist(step: str) -> bool:
-    try:
-        words = shlex.split(step)
-    except ValueError:
-        return True
-    return any(_XDIST.match(word) for word in words)
-
-
 def _deselected_all(output: str, deselected: int) -> bool:
     """Whether pytest's own summary says it deselected exactly ``deselected`` tests and ran
     none: every test it collected was one of them."""
@@ -842,9 +832,8 @@ def settle_deselected(result: Any, command: str) -> None:
     deselected exactly as many tests as the step names with ``--deselect`` and ran none
     (`_deselected_all`); then its exit becomes 0 and the command's status is worked out
     again (`chain_status`). Any other exit 5 -- a step that collected nothing, or tests
-    the self-check named but the whole run does not collect -- stays failing. Under xdist,
-    whose summary never counts deselections, `with_deselected` always leaves one test to
-    run, so no exit 5 there is read as a pass."""
+    the self-check named but the whole run does not collect -- stays failing. A second
+    safeguard: `with_deselected` always leaves one passed test to run."""
     steps = getattr(result, "step_results", None)
     if steps is not None:
         changed = False
