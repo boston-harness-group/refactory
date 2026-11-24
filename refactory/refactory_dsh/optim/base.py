@@ -2351,7 +2351,14 @@ def graph_facts(node_states: Sequence[dict[str, Any]], edges: Sequence[dict[str,
         for label, edit in tries:
             if edit["op"] not in ops:
                 continue
-            verdict = check(edit)
+            try:
+                verdict = check(edit)
+            except Exception as exc:  # noqa: BLE001 - a fact not established is not said
+                import logging
+
+                logging.getLogger(__name__).warning("graph fact for %s on %s not worked out: %s",
+                                                    label, node_id, exc)
+                continue
             if isinstance(verdict, list):
                 reason = "; ".join(str(r).removeprefix("E-precondition: ") for r in verdict)
                 refused.append(f"{label} is refused ({reason})")
