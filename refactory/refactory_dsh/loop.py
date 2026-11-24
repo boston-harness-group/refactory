@@ -39,7 +39,7 @@ from dataclasses import asdict, dataclass
 from contextlib import nullcontext
 from pathlib import Path
 from collections.abc import Mapping
-from typing import TYPE_CHECKING, Any, Iterable, Sequence
+from typing import TYPE_CHECKING, Any, Iterable, Mapping, Sequence
 
 if TYPE_CHECKING:
     from refactory_dsh.nn.mode import RunResult
@@ -64,7 +64,7 @@ from refactory_dsh.optim import (
 )
 from refactory_dsh.optim import create as create_optimizer
 from refactory_dsh.optim.base import (
-    MAX_EDITS_PER_PROPOSAL, RunStopped, available_before, edit_level, proposal_refusal,
+    MAX_EDITS_PER_PROPOSAL, NEW_STEP_TOOLS_OFF, RunStopped, available_before, edit_level, proposal_refusal,
     refused_entries,
     repair_losses,
     summarise_reasons,
@@ -116,6 +116,18 @@ HOLDOUT_FILE = "holdout.json"
 #: The optimizer's model calls (system, prompt, reply, parsed proposals, error).
 OPTIMIZER_TRACE = "optimizer_trace.jsonl"
 
+
+def opaque_item_key(item_id: str, secret: str) -> str:
+    """The key `Loop.part_item_scores` gives an item: an HMAC of its id under the run's
+    secret (`Loop.item_key_secret`), so a strategy can line two candidates' per-item
+    val scores up without learning a held-out id. Keyed rather than a bare hash, so a
+    known list of dataset ids cannot be hashed to undo it; the journal, which holds
+    the raw ids, is not a boundary this draws."""
+    import hashlib
+    import hmac
+
+    return hmac.new(secret.encode(), f"refactory-item:{item_id}".encode(),
+                    hashlib.sha256).hexdigest()[:16]
 
 
 def item_time_spread(records: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
@@ -426,6 +438,12 @@ class LoopConfig:
     #: only where the run permits structural edits, and a machine that cannot sandbox
     #: the code refuses code nodes either way (``E-code-nodes``).
     allow_code_nodes: bool = True
+    #: Whether a step an edit adds may have tools (``insert``/``map``/``fallback`` with
+    #: ``tools``, or a copy of a seed step that has some). On by default: such a step runs
+    #: sealed, seeing only the files it reads, with no network and no grader file. Off (an
+    #: ablation), the request offers no tool step and every new agent step with tools is
+    #: refused (``E-new-node-tools``); a step the seed has keeps its own tool rules either way.
+    new_step_tools: bool = True
     #: With ``val_gate``: stop after this many epochs in a row whose gating did not
     #: raise the best val score (SkillOpt's ``early_stop_patience``). 0 is off.
     early_stop_patience: int = 0
@@ -830,7 +848,8 @@ class Loop(OuterLoop):
         # request's offer and an attempt's acceptance (`workspace.sealed_steps`).
         from refactory_dsh.workspace import sealed_step, sealed_steps
 
-        self.optimizer.sealed_tools = sealed_steps(model)
+        self.optimizer.sealed_tools = self._sealed_answer(model)
+        self.optimizer.new_step_tools = bool(self.config.new_step_tools)
         # Each new sealed step on its own route, as its dispatch takes it.
         self.optimizer.sealed_check = functools.partial(sealed_step, model)
         self.optimizer.grader_secrets = self._grader_secrets
@@ -972,6 +991,9 @@ class Loop(OuterLoop):
         #: ``train_minibatch``: each epoch's sampled train ids, and the epoch whose
         #: minibatch each candidate's train records come from.
         self._minibatches: dict[int, list[str]] = {}
+        #: The per-run secret behind `opaque_item_key`, made on first use and
+        #: journaled (``item_key_secret``) so a resumed run keys items the same way.
+        self._item_key_secret: str | None = None
         self._records_epoch: dict[str, int] = {}
         #: Each candidate's train records by the epoch (and so the seed) they come from,
         #: so a child is compared with its parent scored in the same epoch.
@@ -1068,10 +1090,18 @@ class Loop(OuterLoop):
         """Whether the request shows a tool step: on the answer an attempt refuses one by
         (`workspace.sealed_steps`, the optimizer's ``sealed_tools``)."""
         if getattr(self.optimizer, "sealed_tools", None) is None:
-            from refactory_dsh.workspace import sealed_steps
-
-            self.optimizer.sealed_tools = sealed_steps(self.model)
+            self.optimizer.sealed_tools = self._sealed_answer(self.model)
         return bool(self.optimizer.sealed_tools[0])
+
+    def _sealed_answer(self, model: Any) -> tuple[bool, str]:
+        """Whether a new step may run its tools sealed in this run, and why not: off when
+        the run turns new steps' tools off (``new_step_tools``), else whether the seal can
+        run here (`workspace.sealed_steps`)."""
+        if not self.config.new_step_tools:
+            return False, NEW_STEP_TOOLS_OFF
+        from refactory_dsh.workspace import sealed_steps
+
+        return sealed_steps(model)
 
     def _tools_not_offered(self) -> str:
         """Why the request offers no tool step, for the run's start summary and journal; empty
@@ -1638,6 +1668,7 @@ class Loop(OuterLoop):
         sampler.allow_code_nodes = bool(self.config.allow_code_nodes)
         sampler.step_routes = self.optimizer.step_routes
         sampler.sealed_tools = self.optimizer.sealed_tools
+        sampler.new_step_tools = bool(self.config.new_step_tools)
         sampler.sealed_check = self.optimizer.sealed_check
         sampler.grader_secrets = self._grader_secrets
         edits = self._exploration_edits(seed, wanted)
@@ -2932,6 +2963,37 @@ class Loop(OuterLoop):
         return ({cid: statistics.mean(statistics.mean(r[i] for i in common)
                                       for r in repeats.values())
                  for cid, repeats in by_repeat.items()}, left_out)
+
+    @property
+    def item_key_secret(self) -> str:
+        """The run's secret for `opaque_item_key`: made on first use, journaled, and
+        restored on resume, so a key names the same item for the whole run."""
+        if self._item_key_secret is None:
+            import secrets
+
+            self._item_key_secret = secrets.token_hex(16)
+            self._journal("item_key_secret", secret=self._item_key_secret)
+        return self._item_key_secret
+
+    def part_item_scores(self, candidate_id: str, part: str = "val") -> dict[str, float]:
+        """Each item's score in the candidate's first finished ``part`` rollout (the one
+        the val gate reads), averaged over repeats, keyed by `opaque_item_key`: a
+        per-instance view for a strategy that keeps a per-item frontier on val (GEPA),
+        which names no held-out item. In the parts manifest's order, so a strategy that
+        walks it is deterministic. Items a harness incident left out have no score and
+        are absent; empty before a finished rollout."""
+        done = [o for o in self._part_results.get(candidate_id, {}).get(part, [])
+                if not o.get("budget_stopped") and o.get("score") is not None]
+        if not done:
+            return {}
+        values: dict[str, list[float]] = {}
+        for entry in done[0].get("item_scores") or ():
+            values.setdefault(str(entry[0]), []).append(float(entry[1]))
+        manifest = [str(i) for i in ((self._parts_manifest or {}).get(part) or ())]
+        rank = {item: n for n, item in enumerate(manifest)}
+        ordered = sorted(values, key=lambda item: (rank.get(item, len(rank)), item))
+        secret = self.item_key_secret
+        return {opaque_item_key(item, secret): statistics.mean(values[item]) for item in ordered}
 
     def part_incidents(self, candidate_id: str, part: str = "val") -> list[str]:
         """The items a harness incident left out of the candidate's first finished
@@ -5430,6 +5492,10 @@ class Loop(OuterLoop):
             # Every evaluation that had an item a harness fault failed: the items,
             # those a rerun recovered, and those left out of its score (`_settle_incidents`).
             "harness_incidents": list(self._harness_incidents),
+            # Sealed steps that ran without a whole-step memory and process cap, said once
+            # (`seal.step_cap`, each step's dispatch record).
+            **({"sealed_without_cap": uncapped}
+               if (uncapped := uncapped_sealed_steps(self.root / "runs")) else {}),
         }
         if gated and best is not None:
             payload.update(self.best_score_fields(best))
@@ -5858,6 +5924,7 @@ class Loop(OuterLoop):
             "",
             *_headline(payload),
             *_incident_lines(payload.get("harness_incidents") or []),
+            *_uncapped_lines(payload.get("sealed_without_cap")),
             *(["", f"The seed's first measurement on {', '.join(payload['seed_results']['parts_reused'])} "
                f"was reused from {payload['seed_results']['source']} (--seed-results), not run again."]
               if (payload.get("seed_results") or {}).get("parts_reused") else []),
@@ -6623,10 +6690,33 @@ class Loop(OuterLoop):
                                evaluated=0, rolled=0, tried=tried, refused=refused)
 
     def _with_meta(self, held: Mapping[str, Any]) -> dict[str, dict[str, Any]]:
-        """Records by item, each with its declared metadata when the mode reads any."""
-        return {item: dict(rec, item_meta=self._item_meta(rec))
-                if self._item_meta_reader() is not None else dict(rec)
-                for item, rec in held.items()}
+        """Records by item, each with its declared metadata and context when the mode
+        reads any (`_declared`)."""
+        return {item: self._declared(rec) for item, rec in held.items()}
+
+    def _declared(self, record: Mapping[str, Any]) -> dict[str, Any]:
+        """``record`` with what its Task declares for the optimizer: its metadata
+        (``item_meta``, the item header) and its context (``item_context``, shown in full
+        after its input, `evidence.render_item`), each only when a Task declares it."""
+        out = dict(record)
+        if self._item_meta_reader() is not None:
+            out["item_meta"] = self._item_meta(out)
+        context = self._item_context_reader()
+        if context is not None:
+            out["item_context"] = context(out)
+        return out
+
+    def _item_context_reader(self) -> Any:
+        """How a record's declared context is read (`task.item_metadata_reader` with
+        ``context``), once; ``None`` when no Task declares any."""
+        if getattr(self, "_item_context", None) is None:
+            from refactory_dsh.task import item_metadata_reader
+
+            try:
+                self._item_context = (item_metadata_reader(self.mode.state_dict(), context=True),)
+            except Exception:  # noqa: BLE001 - a mode that cannot say declares nothing
+                self._item_context = (None,)
+        return self._item_context[0]
 
     def _rejected_side(self, incumbent: Candidate, tried: Sequence[Mapping[str, Any]]
                        ) -> tuple[Any, ...] | None:
@@ -6873,9 +6963,9 @@ class Loop(OuterLoop):
     def _with_item_meta(self, records: list[dict[str, Any]]) -> list[dict[str, Any]]:
         """Train records with their declared metadata (``item_meta``) for the item headers
         the analysts and the proposal's evidence show; unchanged when none is declared."""
-        if self._item_meta_reader() is None:
+        if self._item_meta_reader() is None and self._item_context_reader() is None:
             return records
-        return [{**record, "item_meta": self._item_meta(record)} for record in records]
+        return [self._declared(record) for record in records]
 
     def _with_step_sources(self, records: Iterable[Mapping[str, Any]],
                            candidate: Candidate | str | None) -> list[dict[str, Any]]:
@@ -7871,6 +7961,8 @@ class Loop(OuterLoop):
                     self._occasion_counters.setdefault(cid, {})[part_name] = int(counter_val)
             elif event == "rollouts":
                 self.rollouts = int(record.get("rollouts") or 0)
+            elif event == "item_key_secret":
+                self._item_key_secret = str(record.get("secret") or "") or None
             elif event == "evaluation_interrupted":
                 if record.get("outcome") in ("stopped", "recorded_failed") and record.get("key"):
                     self._interrupted_stops[str(record["key"])] = int(record.get("stops") or 0)
@@ -8051,6 +8143,37 @@ def _considered_lines(outcomes: Sequence[dict[str, Any]]) -> list[str]:
             "The kinds of change each proposal's answer said it weighed, and why it chose "
             "its own.", "",
             *(f"- `{cid}` (epoch {epoch}): {text}" for cid, epoch, text in rows), ""]
+
+
+#: Where a sealed step's dispatch record sits under a candidate's run directory
+#: (`workspace.prepare`), at any depth: the run, an item's pass, and every occasion
+#: (``occasions/<part>_N``, ``train_epoch_N``, memory rollouts, smoke runs) and its passes.
+_DISPATCH_RECORDS = "*/**/.refactory/workspaces/*/dispatch.json"
+
+
+def uncapped_sealed_steps(runs: Path) -> dict[str, Any]:
+    """The sealed steps under ``runs`` (a run's candidate runs) whose dispatch record says
+    they ran without a whole-step cap (`seal.step_cap`): how many, and the first
+    reason; empty when none did."""
+    found: list[str] = []
+    # ``**`` does not follow links, so a concurrent pass's alias (``.refactory/live``) is
+    # not counted a second time.
+    for path in sorted(Path(runs).glob(_DISPATCH_RECORDS)):
+        try:
+            record = json.loads(path.read_text())
+        except (OSError, ValueError):
+            continue
+        if isinstance(record, dict) and record.get("whole_step_cap") is False:
+            found.append(str(record.get("cap") or "no cap"))
+    return {"dispatches": len(found), "why": found[0]} if found else {}
+
+
+def _uncapped_lines(uncapped: Mapping[str, Any] | None) -> list[str]:
+    """The report's one line on sealed steps that ran without a whole-step cap."""
+    if not uncapped:
+        return []
+    return ["", f"Sealed steps ran without a whole-step memory cap "
+                f"({uncapped.get('dispatches')} step(s)): {uncapped.get('why')}."]
 
 
 def _incident_lines(incidents: Sequence[dict[str, Any]]) -> list[str]:

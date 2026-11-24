@@ -387,7 +387,7 @@ def test_mutation_slots_without_the_agent_input_rule_is_caught(monkeypatch):
 
 
 def test_mutation_tools_without_the_new_node_rule_is_caught(monkeypatch):
-    monkeypatch.setattr(base_mod, "_new_node_tools", lambda seed, state, sealed=None, check=None: [])
+    monkeypatch.setattr(base_mod, "_new_node_tools", lambda seed, state, sealed=None, check=None, allowed=True: [])
     _finds("tools", seeds=("fuzz_dataflow", "fuzz_gates"))
 
 

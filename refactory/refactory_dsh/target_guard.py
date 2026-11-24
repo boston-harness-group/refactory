@@ -56,6 +56,12 @@ SHOWN = 8
 WARNING = "refactory: run warning: "
 
 
+def _now() -> datetime:
+    """The time now, in UTC: the one clock every watch and record here is read against,
+    so a test can freeze it."""
+    return datetime.now(timezone.utc)
+
+
 def _git(root: Path, *args: str) -> str | None:
     """What a git command prints in ``root``, or None when git cannot answer there.
 
@@ -244,7 +250,7 @@ def record(workdir: Path, root: Path, *, output_only: tuple[str, ...] = (),
                 "also": [str(Path(path).resolve()) for path in also],
                 "warn_also": [str(Path(path).resolve()) for path in warn_also
                               if Path(path).resolve() not in unwatched],
-                "recorded": datetime.now(timezone.utc).isoformat()}
+                "recorded": _now().isoformat()}
     path = workdir / RECORD
     path.parent.mkdir(parents=True, exist_ok=True)
     pending = path.with_suffix(".tmp")
@@ -312,12 +318,12 @@ def watch(workdir: Path, node: str) -> dict[str, Any] | None:
             return None
         # Worktree run: target-only guard (no also/warn_also tracking).
         found = state(Path(baseline["root"]), exclude=(Path(workdir),))
-        found["watched_at"] = datetime.now(timezone.utc).isoformat()
+        found["watched_at"] = _now().isoformat()
         return found
     found = state(Path(baseline["root"]), exclude=(Path(workdir),))
     found["also"] = {path: _also_state(path, workdir) for path in baseline.get("also", [])}
     found["warn_also"] = {path: _also_state(path, workdir) for path in baseline.get("warn_also", [])}
-    found["watched_at"] = datetime.now(timezone.utc).isoformat()
+    found["watched_at"] = _now().isoformat()
     return found
 
 
@@ -623,7 +629,7 @@ def restore_target(root: Path, before: dict[str, Any],
                 strays[path] = {
                     "digest": after.get("changes", {}).get(path, "-"),
                     "pre_digest": before.get("changes", {}).get(path, "-"),
-                    "at": datetime.now(timezone.utc).isoformat(),
+                    "at": _now().isoformat(),
                 }
                 # (b) Restore pre-node content
                 kind, value = plan
@@ -1102,7 +1108,7 @@ def _read_watches(root: Path) -> list[dict[str, Any]]:
     then, so it overlaps a window it started in and no later one.
     """
     found = []
-    now = datetime.now(timezone.utc)
+    now = _now()
     for path in sorted(_watches(root).glob("*.json")) if _watches(root).is_dir() else []:
         try:
             watch = json.loads(path.read_text())
@@ -1127,7 +1133,7 @@ def _read_watches(root: Path) -> list[dict[str, Any]]:
 
 def close_watches(checkouts: dict[str, dict[str, Any]] | None, at: str | None = None) -> None:
     """Close the watches a dispatch record carries: its node is over without a finish."""
-    at = at or datetime.now(timezone.utc).isoformat()
+    at = at or _now().isoformat()
     for path, snapshot in (checkouts or {}).items():
         if snapshot.get("watch_id"):
             _close_watch(Path(path), snapshot["watch_id"], at)
@@ -1141,7 +1147,7 @@ def _close_watch(root: Path, identifier: str, at: str) -> None:
 
 def _overlapping(root: Path, identifier: str, start: str, end: str) -> list[dict[str, Any]]:
     """Every other watch of ``root`` open at some time between ``start`` and ``end``."""
-    now = datetime.now(timezone.utc)
+    now = _now()
     found = []
     for watch in _read_watches(root):
         if watch.get("id") == identifier or watch.get("started", "") > end:
@@ -1171,7 +1177,7 @@ def watch_checkouts(workdir: Path, paths: list[Path], node: str = "",
         if snapshot.get("packages") is None:
             warn(f"refactory's own checkout {path} has more than {LIMIT} paths under its package "
                  f"roots, so a package an agent writes there is not watched during this node")
-        at = datetime.now(timezone.utc).isoformat()
+        at = _now().isoformat()
         try:
             watch_id = _open_watch(Path(path), Path(workdir), node, at, owner_pid)
         except OSError as error:
@@ -1216,7 +1222,7 @@ def strayed_checkouts(workdir: Path, before: dict[str, dict[str, Any]] | None) -
             continue
         differences = _compare(earlier, now, commits=False)
         added, altered = _package_strays(Path(path), earlier, now)
-        end = datetime.now(timezone.utc).isoformat()
+        end = _now().isoformat()
         identifier = earlier.get("watch_id")
         if identifier:
             _close_watch(Path(path), identifier, end)
@@ -1368,7 +1374,7 @@ def settle_checkout(path: str, before: dict[str, Any], directory: Path, workdir:
         log = restore_log(root)
         log.parent.mkdir(parents=True, exist_ok=True)
         with log.open("a") as handle:
-            handle.write(f"{datetime.now(timezone.utc).isoformat()} run {Path(workdir)}: {note}\n")
+            handle.write(f"{_now().isoformat()} run {Path(workdir)}: {note}\n")
     except OSError as error:
         warn(f"could not write {restore_log(root)}: {error}")
     return result

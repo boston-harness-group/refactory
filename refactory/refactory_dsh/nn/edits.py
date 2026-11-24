@@ -1148,6 +1148,10 @@ def _expand_duplicate(edit: dict, state: State) -> list[dict]:
     node = source.to_state()
     new_id = str(edit.get("new_id") or _fresh_id(graph, f"{source.id}_copy"))
     node["id"] = new_id
+    if node.get("kind") == "agent" and node.get("tools") and "tool_policy" not in node:
+        # A copy of a step with tools keeps them, as the step runs them (no tool policy):
+        # the attempt path judges it as a copy of a seed step's tools (`E-new-node-tools`).
+        node["tool_policy"] = None
     knobs = state.get("knobs") or {}
     steps: list[dict] = []
     bindings: list[list[str]] = []
@@ -1450,9 +1454,12 @@ _core_ops.register(_macro, _MACROS)
 CORE_OPS = _core_ops.CORE_OPS
 
 
-def core_wiring_notes(edit: Any, before: Mapping[str, Any], after: Mapping[str, Any]) -> list[str]:
-    """What a core operator wired beside the steps it names (`core_ops.wiring_notes`)."""
-    return _core_ops.wiring_notes(edit, before, after)
+def core_wiring_notes(edit: Any, before: Mapping[str, Any], after: Mapping[str, Any],
+                      final: Mapping[str, Any] | None = None) -> list[str]:
+    """What a core operator wired beside the steps it names (`core_ops.wiring_notes`).
+
+    ``final`` is the candidate's state after its proposal's last edit."""
+    return _core_ops.wiring_notes(edit, before, after, final)
 
 
 def core_ops_calls() -> dict[str, str]:

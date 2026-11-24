@@ -20,21 +20,24 @@ Two items are known by name, as they are in SkillOpt's runs:
   field, so neither does this Task.
 
 The golden file and the input's path in the dataset are grader-only
-(``grader_fields``): the nodes see the input as a copy in their pass, and model code
-sees a copy of that in its sandbox (`sandbox`).
+(``grader_fields``): the nodes see the input as a copy in their pass, its item file
+``item/input.xlsx`` (`Task.item_files`), and model code sees a copy of that in its
+sandbox (`sandbox`), under the input's own name.
 """
 from __future__ import annotations
 
+import functools
 import hashlib
 import json
 import os
 import shutil
 from pathlib import Path
+from types import MappingProxyType
 from typing import Any
 
-from refactory_dsh.task import Task, TaskError, TaskInstance, VerifyResult
+from refactory_dsh.task import Task, TaskError, TaskInstance, ToolEnvironment, VerifyResult
 
-from . import recalc
+from . import interpreter, recalc
 # SandboxFailed, like RecalcFailed, must be known as a harness incident wherever a record
 # is classified (`model.HARNESS_INCIDENT_CLASSES`), the spine's item command included.
 from . import sandbox  # noqa: F401
@@ -45,8 +48,9 @@ DATA_ENV = "SB_DATA"
 #: Another id split and dataset checksum in the manifest's format (a smoke split, a
 #: test fixture); the shipped ``manifest.json`` by default.
 MANIFEST_ENV = "SB_MANIFEST"
-#: Where `setup` puts the item's input in its pass.
-INPUT_DIR = "input"
+#: Where `setup` lays the item's input in its pass: its item file (`Task.item_files`),
+#: under one name for every item, so any step may declare it in its reads.
+INPUT = "item/input.xlsx"
 #: The pass's copy of the latest prediction (SkillOpt's ``<case>_pred.xlsx``).
 PRED = "pred.xlsx"
 #: What the pass's last step (`ops.finalize`) concluded, for `verify`.
@@ -94,6 +98,14 @@ def item_record(row: dict[str, Any], data_root: Path) -> TaskInstance:
     return TaskInstance(id=item_id, metadata=metadata)
 
 
+def _tool_hidden(workdir: Path) -> list[str]:
+    """What model code may not see (`ops.tool_hidden`): no folder of a sealed tool step's
+    environment may hold or lie inside it."""
+    from . import ops
+
+    return ops.tool_hidden(workdir)
+
+
 class SpreadsheetBenchTask(Task):
     """SpreadsheetBench Verified 400, graded as SkillOpt's runs graded it.
 
@@ -104,6 +116,13 @@ class SpreadsheetBenchTask(Task):
     name = "spreadsheetbench"
     #: ``verify`` scores the pass's final record and its latest prediction.
     graded_files = (PRED, FINAL)
+    #: The item's input workbook, the one item file (all the release's inputs are .xlsx).
+    item_files = MappingProxyType({"input": INPUT})
+    #: A sealed tool step's commands run the interpreter model code runs under, checked
+    #: the same way (`interpreter.interpreter`), as ``python3`` and ``python``.
+    tool_environment = ToolEnvironment(summary=interpreter.SUMMARY,
+                                       python=interpreter.interpreter,
+                                       hidden=_tool_hidden)
     grader_fields = ("gold_path", "input_path", "exclude")
     item_metadata = ("task_type",)
 
@@ -143,10 +162,11 @@ class SpreadsheetBenchTask(Task):
 
     def setup(self, instance: TaskInstance, workspace: Path, *, part: str | None = None,
               seed: int | None = None) -> None:
-        """Copy the item's input into the pass (nothing for an item with no case)."""
+        """Copy the item's input into the pass as its item file (nothing for an item with
+        no case)."""
         source = instance.metadata.get("input_path") or ""
         if source:
-            target = Path(workspace) / INPUT_DIR / instance.metadata["input_name"]
+            target = Path(workspace) / INPUT
             target.parent.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(source, target)
 
@@ -197,7 +217,12 @@ class SpreadsheetBenchTask(Task):
         if not meta.get("gold_path"):
             reason = "no-test-cases"
         if reason:
-            return VerifyResult(passed=False, score=0.0, details=reason)
+            # rollout.py:799-812: code that failed to run is shown to the analysts as its
+            # first 500 characters of error under ``## Execution (case N)``.
+            error = final.get("exec_error")
+            return VerifyResult(passed=False, score=0.0, details=reason, prediction=(
+                f"## Execution (case {meta.get('case_no') or 1})\nERROR: {error}"
+                if error is not None and meta.get("gold_path") else None))
         pred = Path(workspace) / PRED
         ape = meta.get("answer_position_eval", "")
         try:
@@ -218,3 +243,30 @@ class SpreadsheetBenchTask(Task):
             details="" if ev["ok"] else f"eval-mismatch: {str(ev.get('reason', ''))[:200]}",
             prediction=verification,
         )
+
+
+class SpreadsheetBenchAgentTask(SpreadsheetBenchTask):
+    """The same items and grade, for the agent harness (`agent_mode.Agent`), whose model
+    call carries the item only as the files of its workspace: the optimizer is shown the
+    input's preview as the item's context (`Task.item_context`), as SkillOpt's analysts
+    see it for an exec rollout (rollout.py:697-721: its ``spreadsheet_preview.txt``, also
+    inside its target user prompt). The solver's call already carries it in its prompt."""
+
+    item_context = ("spreadsheet_preview",)
+
+    def item_context_values(self, metadata: Any) -> dict[str, Any]:
+        sp = str(metadata.get("spreadsheet_path") or "")
+        name = str(metadata.get("input_name") or "")
+        if not name:
+            return {}
+        folder = sp if os.path.isabs(sp) else os.path.join(str(self.data_root), sp)
+        return {"spreadsheet_preview": _preview(os.path.join(folder, name))}
+
+
+@functools.lru_cache(maxsize=1024)
+def _preview(path: str) -> str:
+    """rollout.py:701-704: the input's preview, ``(preview failed)`` when it cannot be read."""
+    try:
+        return port.preview_workbook(path)
+    except Exception:  # noqa: BLE001 - as SkillOpt's
+        return "(preview failed)"

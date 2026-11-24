@@ -302,6 +302,7 @@ class RunContext:
         return target
 
     def read_text(self, name: str) -> str:
+        self._check_item_read(name)
         return self.path(name).read_text()
 
     def write_json(self, name: str, payload: Any) -> Path:
@@ -312,6 +313,7 @@ class RunContext:
     def read_json(self, name: str, default: Any = None) -> Any:
         import json
 
+        self._check_item_read(name)
         target = self.path(name)
         if not target.exists():
             return default
@@ -321,7 +323,77 @@ class RunContext:
             return default
 
     def exists(self, name: str) -> bool:
+        self._check_item_read(name)
         return self.path(name).exists()
+
+    def _pass_item_files(self) -> dict[str, str]:
+        """``{path: role}`` for the item files the Task of this item's pass lays in
+        (`Task.item_files`); empty outside a pass. Read from the pass's marker."""
+        import json
+
+        from refactory_dsh.items import PASS_MARKER
+        from refactory_dsh.task import TaskError, task_item_files
+
+        marker = self.workdir / PASS_MARKER
+        try:
+            ref = str(json.loads(marker.read_text()).get("task") or "")
+        except (OSError, ValueError, AttributeError):
+            return {}
+        if not ref:
+            return {}
+        try:
+            return {path: role for role, path in task_item_files(ref).items()}
+        except (TaskError, ImportError) as exc:
+            raise ExecutionError(f"node {self.node_id!r}: the Task's item files cannot be "
+                                 f"read: {exc}") from exc
+
+    def _check_item_read(self, name: str) -> None:
+        """Refuse a read, through this context's read helpers, of an item file the node
+        does not declare in its ``reads`` (as `item_file` does). ``path`` gives a path,
+        not a read, and is not checked: an op reads an item file through `item_file`."""
+        files = self._pass_item_files()
+        normal = Path(name).as_posix()
+        if normal in files and normal not in self._declared_reads:
+            raise ExecutionError(f"node {self.node_id!r} reads item file {normal!r} "
+                                 f"({files[normal]}), which it does not declare; declared "
+                                 f"reads: {list(self._declared_reads)}")
+
+    def item_file(self, role: str) -> Path | None:
+        """The file the item's Task laid into this pass under ``role`` (`Task.item_files`),
+        or ``None`` when this item has none. Refused (`ExecutionError`) outside an item's
+        pass, for a role the Task does not declare, and when this node does not list the
+        file in its ``reads``: what a step takes in is what it declares, so a read around
+        the declaration fails loudly instead of passing unseen. Both runtimes hand an op
+        this context (`run.build_op_context`)."""
+        import json
+
+        from refactory_dsh.items import PASS_MARKER
+        from refactory_dsh.task import TaskError, task_item_files
+
+        marker = self.workdir / PASS_MARKER
+        try:
+            ref = str(json.loads(marker.read_text()).get("task") or "")
+        except (OSError, ValueError, AttributeError):
+            ref = ""
+        if not ref:
+            raise ExecutionError(f"node {self.node_id!r} asks for item file {role!r} outside "
+                                 "an item's pass (no Task laid one in)")
+        try:
+            files = task_item_files(ref)
+        except (TaskError, ImportError) as exc:
+            raise ExecutionError(f"node {self.node_id!r}: the Task's item files cannot be "
+                                 f"read: {exc}") from exc
+        if role not in files:
+            raise ExecutionError(f"node {self.node_id!r} asks for item file {role!r}, which "
+                                 f"the Task does not lay in; it lays in: "
+                                 f"{', '.join(sorted(files)) or 'none'}")
+        name = files[role]
+        if name not in self._declared_reads:
+            raise ExecutionError(f"node {self.node_id!r} reads item file {name!r} ({role}), "
+                                 f"which it does not declare; declared reads: "
+                                 f"{list(self._declared_reads)}")
+        target = self.path(name)
+        return target if target.is_file() else None
 
     # ── facts ──────────────────────────────────────────────────────────────
     def set_fact(self, name: str, value: Any) -> None:
@@ -1260,6 +1332,11 @@ class Executor:
 
                         if task is not None:
                             task.setup(instance, self.ctx.workdir, **_setup_kwargs)
+                            # What it laid in as item files is files of the pass
+                            # (`Task.item_files`), on the spine too (`items.command_begin`).
+                            from refactory_dsh.task import check_laid_item_files
+
+                            check_laid_item_files(task, self.ctx.workdir)
                         # The item is written as the data node, so the declaration that
                         # governs it is the data node's — not the last node of the pass
                         # before it.
@@ -2114,12 +2191,13 @@ class Executor:
             raise ExecutionError(f"agent node {node.id!r} needs a model client")
         # Refuse an agent node with a tools field it cannot run sealed, matching the
         # spine's lowering refusal (`workers.lower_workflow`) — SWEEP-7 / gap 15.
-        from refactory_dsh.workspace import SEALED_TOOLS, is_sealed
+        from refactory_dsh.workspace import CLAUDE_CODE_TOOLS, SEALED_TOOLS, is_sealed
         if getattr(node, "tools", None) and not is_sealed(node):
             raise ValueError(
                 f"agent node {node.id!r} declares tools {list(node.tools)} it cannot run "
-                f"sealed: an agent node lists tools only from {', '.join(SEALED_TOOLS)}, "
-                "in a 'scratch' workspace, with no tool_policy"
+                f"sealed: an agent node lists tools only from {', '.join(SEALED_TOOLS)} (or "
+                f"Claude Code's {', '.join(CLAUDE_CODE_TOOLS)}), in a 'scratch' workspace, "
+                "with no tool_policy"
             )
         from refactory_dsh.agent_delivery import _path, fill_feedback, previous_output, with_feedback
 
@@ -2132,17 +2210,19 @@ class Executor:
         client = self.ctx.model
         if callable(getattr(client, "for_node", None)):
             client = client.for_node(node.id, role=node.role)
-        if node.route is not None:
-            # The step's own model, effort and output cap, as the spine's worker gets them
-            # (`workers.lower_workflow`); a client that cannot take them is refused.
+        step_route = node.bound_route(self.ctx.knobs)
+        if step_route is not None:
+            # The step's own model, effort and output cap (and settings its knobs bind,
+            # `Node.bound_route`), as the spine's worker gets them (`workers.lower_workflow`);
+            # a client that cannot take them is refused.
             if not callable(getattr(client, "with_step_route", None)):
                 raise ValueError(f"agent node {node.id!r} declares a route, which the model "
                                  "client cannot take")
-            client = client.with_step_route(node.route)
+            client = client.with_step_route(step_route)
         # A sealed step runs on the dsh backend with the run's model, as on the spine
         # (`workspace.for_sealed_step`).
         from refactory_dsh.workspace import for_sealed_step
-        client = for_sealed_step(client, node.id, is_sealed(node))
+        client = for_sealed_step(client, node.id, is_sealed(node), node.tools)
         # ── no-tools enforcement ──────────────────────────────────────────
         from refactory_dsh import tool_policy as tool_policies
         tool_policy = tool_policies.check(node.tool_policy)
@@ -2191,10 +2271,13 @@ class Executor:
         from refactory_dsh import workspace as workspaces
         from refactory_dsh.node_retry import deliver
 
-        def dispatch_workspace(retrying: bool):
+        def dispatch_workspace(retrying: bool, keep: bool = False, session: int | None = None):
+            from refactory_dsh.attempt_processes import keeps_workspace
+            kept = keeps_workspace(self.ctx.workdir, node.id, retrying=retrying, keep=keep,
+                                   session=session)
             return workspaces.dispatched(
                 self.ctx.workdir, node.id, node.workspace, knobs=self.ctx.knobs, facts=self.ctx.facts,
-                route=route, budget=self.ctx.budget, fresh=retrying,
+                route=route, budget=self.ctx.budget, fresh=retrying and not kept,
                 tools=node.tools if is_sealed(node) else (), reads=node.reads,
                 runtime_root=Path(model_context["runtime_root"]) if (model_context or {}).get("runtime_root")
                 else None)
@@ -2263,7 +2346,9 @@ class Executor:
             return response
 
         _capture_final = route.get("worker_backend", "dsh") == "dsh"
-        if tool_policies.no_effect(tool_policy):
+        if tool_policies.no_effect(tool_policy) or is_sealed(node):
+            # A sealed step answers in its reply too: a Claude Code one's is its first
+            # output (`workspace.collect`), as a DSH one's is.
             _capture_final = True
         try:
             output, _receipt = deliver(

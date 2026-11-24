@@ -302,16 +302,22 @@ def _changes_text(ctx: Any, kind: str = "failure") -> str:
     source (`base.operation_lines`), so a finding names only what the proposer is shown,
     and, for a failure analyst (who recommends changes), which operators apply at each
     step (`base.applicability_lines`)."""
-    from .base import applicability_lines, operation_lines
+    from .base import applicability_lines, compute_policy, operation_lines
 
     if not ctx.catalogue:
         return "(not listed)"
     return "\n".join([*operation_lines(
         ctx.catalogue, ctx.node_states, ctx.edges, protected=getattr(ctx, "protected", ()),
         knob_values={k.get("name"): k.get("value") for k in ctx.knobs},
-        step_routes=getattr(ctx, "step_routes", None)),
+        step_routes=getattr(ctx, "step_routes", None),
+        tools=bool(getattr(ctx, "new_node_tools", False)),
+        policy=compute_policy(getattr(ctx, "parsimony", None),
+                              item_mean=bool(getattr(ctx, "score_is_item_mean", False)),
+                              gated=getattr(ctx, "selection", "") or False)),
         *(applicability_lines(ctx.catalogue, ctx.node_states, ctx.edges, ctx.knobs,
-                              getattr(ctx, "edit_check", None)) if kind == "failure" else ())])
+                              getattr(ctx, "edit_check", None),
+                              tools=bool(getattr(ctx, "new_node_tools", False)))
+          if kind == "failure" else ())])
 
 
 def _memory_text(ctx: Any) -> str:

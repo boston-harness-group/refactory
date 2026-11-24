@@ -356,6 +356,14 @@ def evaluate_on_dsh(
     merely scored badly.
     """
     name = f"{type(mode).__module__.split('.')[-2]}-{mode.name}"
+    # A state an earlier version of the mode saved runs as the walker runs it: upgraded
+    # by the mode, and the upgrade recorded (`Mode.upgrade_state`).
+    upgrade = getattr(type(mode), "upgrade_state", None)
+    if callable(upgrade):
+        from refactory_dsh.nn.mode import record_state_upgrades
+
+        state, notes = upgrade(state)
+        record_state_upgrades(Path(workdir), notes)
     run = run_on_dsh(state, workdir, name=name, timeout_s=timeout_s, on_output=on_output,
                      **({"model": model} if model is not None else {}),
                      **({"item_slots_dir": item_slots_dir, "item_slots": item_slots}

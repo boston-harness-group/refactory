@@ -145,10 +145,13 @@ def execute(spec: dict[str, Any], workdir: Path) -> dict[str, Any]:
     from refactory_dsh.node_retry import deliver
     runtime_root = (client.context() or {}).get('runtime_root') if spec.get('workspace') else None
 
-    def dispatch_workspace(retrying: bool):
+    def dispatch_workspace(retrying: bool, keep: bool = False, session: int | None = None):
+        from refactory_dsh.attempt_processes import keeps_workspace
+        kept = keeps_workspace(workdir, node, retrying=retrying, keep=keep, session=session)
         return workspaces.dispatched(
             workdir, node, spec.get('workspace'), knobs=context.knobs, facts=context.facts,
-            route=client.route(), fresh=retrying, runtime_root=Path(runtime_root) if runtime_root else None,
+            route=client.route(), fresh=retrying and not kept,
+            runtime_root=Path(runtime_root) if runtime_root else None,
             tools=spec.get('tools') or (), reads=spec.get('reads') or ())
 
     system = render(spec.get('system_prompt', ''), context)
@@ -168,7 +171,11 @@ def execute(spec: dict[str, Any], workdir: Path) -> dict[str, Any]:
         return workspaces.ask(place, attempt, sent, workdir=workdir, system=system)
 
     _capture_final = client.route()["worker_backend"] == "dsh"
-    if tool_policies.no_effect(tool_policy):
+    from refactory_dsh.workspace import is_sealed
+    if tool_policies.no_effect(tool_policy) or is_sealed({
+            'kind': 'agent', 'tools': spec.get('tools') or (), 'tool_policy': spec.get('tool_policy'),
+            'workspace': spec.get('workspace')}):
+        # A sealed step answers in its reply too, as on the walker (`nn.executor`).
         _capture_final = True
     output, receipt = deliver(
         workdir, node, prompt=with_feedback(render(prompt, context), feedback, previous_output(

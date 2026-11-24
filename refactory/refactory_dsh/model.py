@@ -834,6 +834,10 @@ class DshModelClient:
         setting_sources: str = "",
         dsh_sessions: str = "",
         claude_executable: str = "",
+        max_thinking_tokens: str = "",
+        max_turns: str = "",
+        bash_timeout_ms: str = "",
+        bash_output_chars: str = "",
         _monotonic: Callable[[], float] | None = None,
         _wall_clock: Callable[[], float] | None = None,
     ) -> None:
@@ -902,6 +906,18 @@ class DshModelClient:
         #: Inherited only within the same product, as effort is: a DSH client in a
         #: Claude Code worker's child process must not take Claude Code's sources.
         self._setting_sources = setting_sources or inherited_route.get("setting_sources", "")
+        #: Claude Code's thinking budget (``--max-thinking-tokens``), a claude_code route's
+        #: ``max_thinking_tokens``; empty leaves Claude Code's own (adaptive) thinking.
+        #: Inherited only within the same product, as the settings sources are.
+        self._max_thinking_tokens = max_thinking_tokens or inherited_route.get("max_thinking_tokens", "")
+        #: Claude Code's turn cap (``--max-turns``), a claude_code route's ``max_turns``; empty
+        #: leaves none. Inherited only within the same product, as the thinking budget is.
+        self._max_turns = max_turns or inherited_route.get("max_turns", "")
+        #: Claude Code's Bash timeout (default and most, ``BASH_DEFAULT_TIMEOUT_MS`` and
+        #: ``BASH_MAX_TIMEOUT_MS``) and the most of a command's output it sees inline (the
+        #: ``bashOutputMaxChars`` setting); empty keeps Claude Code's own. Inherited likewise.
+        self._bash_timeout_ms = bash_timeout_ms or inherited_route.get("bash_timeout_ms", "")
+        self._bash_output_chars = bash_output_chars or inherited_route.get("bash_output_chars", "")
         #: The Claude Code executable a claude_code worker runs; empty keeps the one
         #: bundled with the Agent SDK. Inherited only within the same product, as the
         #: settings sources are, then `workers.CLAUDE_EXECUTABLE_ENV` on claude_code.
@@ -993,6 +1009,11 @@ class DshModelClient:
             result["setting_sources"] = self._setting_sources
         if getattr(self, "_claude_executable", ""):
             result["claude_executable"] = self._claude_executable
+        if getattr(self, "_max_thinking_tokens", ""):
+            result["max_thinking_tokens"] = self._max_thinking_tokens
+        for key in ("max_turns", "bash_timeout_ms", "bash_output_chars"):
+            if getattr(self, "_" + key, ""):
+                result[key] = getattr(self, "_" + key)
         return result
 
     def output_limit(self) -> int | None:
@@ -1105,8 +1126,30 @@ class DshModelClient:
         client._provider, client._model = found[0][:2]
         client._setting_sources = ""
         client._claude_executable = ""
+        client._max_thinking_tokens = ""
+        client._max_turns = ""
+        client._bash_timeout_ms = ""
+        client._bash_output_chars = ""
         validate_route(client.route())
         return client
+
+    def for_claude_sealed(self) -> DshModelClient:
+        """A copy for a step that runs Claude Code's own tools sealed (`workspace.
+        sealed_backend` ``claude_code``): on this route, which must be the claude_code backend
+        in ``skip`` or ``bypassPermissions`` mode (`workspace.CLAUDE_SEALED_MODES`), as a
+        harness running ``claude -p --permission-mode bypassPermissions`` does; the seal, not
+        a permission prompt, confines its tools. Raises ValueError on any other route: such a
+        step is never moved to another product, nor run with less."""
+        from refactory_dsh.workspace import CLAUDE_SEALED_MODES
+
+        if self._worker_backend != "claude_code":
+            raise ValueError("a step with Claude Code's tools runs on the claude_code worker "
+                             f"backend, and this route is {self._worker_backend!r}")
+        if (self._permission_mode or "skip") not in CLAUDE_SEALED_MODES:
+            raise ValueError("a step with Claude Code's tools runs under permission mode "
+                             f"{' or '.join(map(repr, CLAUDE_SEALED_MODES))}, and this route has "
+                             f"{self._permission_mode!r}")
+        return copy.copy(self)
 
     def with_tool_policy(self, policy: str) -> DshModelClient:
         """A copy whose model call enforces the given tool policy."""
@@ -1205,6 +1248,11 @@ class DshModelClient:
                else {}),
             **({"setting_sources": ss} if (ss := getattr(self, "_setting_sources", "")) else {}),
             **({"claude_executable": ce} if (ce := getattr(self, "_claude_executable", "")) else {}),
+            **({"max_thinking_tokens": mtt} if (mtt := getattr(self, "_max_thinking_tokens", ""))
+               else {}),
+            **{key: getattr(self, "_" + key) for key in ("max_turns", "bash_timeout_ms",
+                                                          "bash_output_chars")
+               if getattr(self, "_" + key, "")},
             # Only the non-default choice, so a default context is the bytes it was.
             **({"dsh_sessions": ds} if (ds := getattr(self, "_dsh_sessions", "run")) != "run" else {}),
         }
@@ -1353,8 +1401,10 @@ class DshModelClient:
         client._cwd = Path(cwd).expanduser().resolve() if cwd is not None else None
         client._env_overrides = dict(env or {})
         client._confine = bool(confine and cwd is not None)
-        if seal is not None and (cwd is None or self._worker_backend != "dsh"):
-            raise ValueError("a sealed agent runs on the dsh worker backend, in a workspace")
+        if seal is not None and (cwd is None or self._worker_backend != (
+                "claude_code" if seal.get("backend") == "claude_code" else "dsh")):
+            raise ValueError("a sealed agent runs in a workspace, on the dsh worker backend, or "
+                             "on the claude_code backend for Claude Code's own tools")
         client._seal = dict(seal) if seal is not None else None
         client._checkpoint()
         if client._budget is not None:
@@ -1566,6 +1616,8 @@ class DshModelClient:
                             f"model completion timed out after {budget_s}s; "
                             f"requested runtime shutdown; the client does not replay a deadline{detail}")
                     error.cleanup_unconfirmed = bool(unconfirmed)  # type: ignore[attr-defined]
+                    if (session := getattr(exc, "session_id", None)) is not None:
+                        error.session_id = session  # type: ignore[attr-defined]
                     raise error from exc
                 else:
                     self._raise_if_cancelled()
@@ -1911,6 +1963,13 @@ class DshModelClient:
                             if self._monotonic() >= deadline:
                                 raise
                 except BaseException as error:
+                    if os.name == "posix":
+                        # The session the CLI leads (start_new_session): a retry that keeps
+                        # the workspace ends what is left of it first (`attempt_processes`).
+                        try:
+                            error.session_id = proc.pid  # type: ignore[attr-defined]
+                        except AttributeError:
+                            pass
                     if isinstance(error, subprocess.TimeoutExpired) and not isinstance(
                             error, InactivityTimeout):
                         # How long the model had streamed nothing when the deadline came,

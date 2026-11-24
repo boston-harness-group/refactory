@@ -80,9 +80,9 @@ def retry_declaration(value: Any) -> dict[str, Any] | None:
         return None
     if not isinstance(value, dict):
         raise ValueError(f"a retry is a mapping of on, times and timeout_factor, not {value!r}")
-    unknown = sorted(set(value) - {"on", "times", "timeout_factor"})
+    unknown = sorted(set(value) - {"on", "times", "timeout_factor", "keep_workspace"})
     if unknown:
-        raise ValueError(f"a retry takes on, times and timeout_factor; unknown: {unknown}")
+        raise ValueError(f"a retry takes on, times, timeout_factor and keep_workspace; unknown: {unknown}")
     on = value.get("on", ["timeout"])
     if isinstance(on, str) or not isinstance(on, (list, tuple)) or not on:
         raise ValueError(f"a retry's 'on' is a non-empty list of failures, not {on!r}")
@@ -100,7 +100,12 @@ def retry_declaration(value: Any) -> dict[str, Any] | None:
                          f"not {factor!r}")
     if float(factor).is_integer():
         factor = int(factor)
-    return {"on": sorted({str(item) for item in on}), "times": times, "timeout_factor": factor}
+    keep_workspace = value.get("keep_workspace", False)
+    if not isinstance(keep_workspace, bool):
+        raise ValueError(f"a retry's 'keep_workspace' is true or false, not {keep_workspace!r}")
+    # Written only when set, so a rule that does not keep its workspace reads as before.
+    return {"on": sorted({str(item) for item in on}), "times": times, "timeout_factor": factor,
+            **({"keep_workspace": True} if keep_workspace else {})}
 
 def retry_safe(node: "Node") -> bool:
     """Whether running ``node`` again in a fresh session cannot start from what a failed
@@ -114,6 +119,19 @@ def retry_safe(node: "Node") -> bool:
 #: What an agent step's own route may set (`Node.route`): its model, reasoning effort and
 #: output cap, each a value the run's routes already use (`workers.step_route_refusal`).
 STEP_ROUTE_FIELDS = ("model", "effort", "max_completion_tokens")
+#: Route settings a mode may bind to a frozen knob of its own instead (``field_bindings``
+#: ``("route.<field>", knob)``, `Node.bound_route`), so the value reaches the step's route
+#: on both runtimes: its output cap, Claude Code's thinking budget (a claude_code
+#: route's ``max_thinking_tokens``), and Claude Code's turn cap and Bash limits (its
+#: ``max_turns``, ``bash_timeout_ms``, ``bash_output_chars``). An int knob; 0 sets nothing.
+#: A search never chooses one of Claude Code's settings (`workers.StepRoutes` offers none).
+CLAUDE_CODE_ROUTE_FIELDS = ("max_thinking_tokens", "max_turns", "bash_timeout_ms",
+                            "bash_output_chars")
+BOUND_ROUTE_FIELDS = ("max_completion_tokens", *CLAUDE_CODE_ROUTE_FIELDS)
+#: Every field a step's route may hold.
+ROUTE_DECLARATION_FIELDS = (*STEP_ROUTE_FIELDS, *CLAUDE_CODE_ROUTE_FIELDS)
+#: Whole-number fields of a step's route.
+_WHOLE_ROUTE_FIELDS = ("max_completion_tokens", *CLAUDE_CODE_ROUTE_FIELDS)
 
 
 def route_declaration(value: Any) -> dict[str, str] | None:
@@ -122,21 +140,22 @@ def route_declaration(value: Any) -> dict[str, str] | None:
     if value is None or value == {}:
         return None
     if not isinstance(value, Mapping):
-        raise ValueError(f"a step's route is an object of {list(STEP_ROUTE_FIELDS)}, not {value!r}")
-    unknown = sorted(set(value) - set(STEP_ROUTE_FIELDS))
+        raise ValueError(f"a step's route is an object of {list(ROUTE_DECLARATION_FIELDS)}, "
+                         f"not {value!r}")
+    unknown = sorted(set(value) - set(ROUTE_DECLARATION_FIELDS))
     if unknown:
-        raise ValueError(f"a step's route sets {list(STEP_ROUTE_FIELDS)}; unknown: {unknown}")
+        raise ValueError(f"a step's route sets {list(ROUTE_DECLARATION_FIELDS)}; unknown: {unknown}")
     out = {}
-    for key in STEP_ROUTE_FIELDS:
+    for key in ROUTE_DECLARATION_FIELDS:
         given = value.get(key)
         if given is None or given == "":
             continue
-        if key == "max_completion_tokens" and isinstance(given, int) and not isinstance(given, bool):
+        if key in _WHOLE_ROUTE_FIELDS and isinstance(given, int) and not isinstance(given, bool):
             given = str(given)
-        if not isinstance(given, str) or (key == "max_completion_tokens"
+        if not isinstance(given, str) or (key in _WHOLE_ROUTE_FIELDS
                                           and not (given.isdigit() and int(given) > 0)):
             raise ValueError(f"a step's route {key!r} is " + (
-                "a positive whole number" if key == "max_completion_tokens" else "a string")
+                "a positive whole number" if key in _WHOLE_ROUTE_FIELDS else "a string")
                 + f", not {given!r}")
         out[key] = given
     return out or None
@@ -264,6 +283,8 @@ BINDABLE_FIELDS = frozenset({
     # the item, a bool knob read by `Graph.optional_targets_of` on both runtimes. Not a
     # `Node` field: the fork's `optional_targets` says it for a branch with no binding.
     "optional",
+    # An agent's route setting from an int knob (`BOUND_ROUTE_FIELDS`, `Node.bound_route`).
+    *(f"route.{name}" for name in BOUND_ROUTE_FIELDS),
 })
 
 
@@ -712,13 +733,15 @@ class Node:
             if retries and not retry_safe(self):
                 # A node that may change the run's worktree or the target cannot simply
                 # run again: the second session would start from what the first left.
-                # A node with a workspace is safe: each attempt gets a fresh workspace
-                # via workspace.dispatched(fresh=True), which discards the previous one.
-                # A clone and a scratch folder both keep an attempt's writes inside the
-                # workspace until collect, and collect runs only after the session
-                # returns, so a timed-out attempt contributes nothing. The declaration is
-                # canonical by here, so one that means "no workspace" is None and counts
-                # as none.
+                # A node with a workspace is safe: each attempt either gets a fresh
+                # workspace via workspace.dispatched(fresh=True), which discards the
+                # previous one, or keeps it when the retry rule sets keep_workspace
+                # (the builder's timeout retry continues from the previous attempt's
+                # edits). A clone and a scratch folder both keep an attempt's writes
+                # inside the workspace until collect, and collect runs only after the
+                # session returns, so a timed-out attempt contributes nothing outside
+                # the workspace. The declaration is canonical by here, so one that means
+                # "no workspace" is None and counts as none.
                 raise GraphError(
                     f"node {self.id!r} declares a retry but may change shared state (the "
                     "run's worktree or the target), so a second session would start from "
@@ -876,6 +899,26 @@ class Node:
                 f"node {self.id!r}: {knob_name} is bound to {field_name} and must be an "
                 f"integer, got {value!r}")
         return value
+
+    def bound_route(self, knobs: Mapping[str, Any]) -> dict[str, str] | None:
+        """The step's own route in a run with these knob values: ``route``, with each
+        ``route.<field>`` binding's knob value in place (`BOUND_ROUTE_FIELDS`; 0 leaves
+        the field unset). Both runtimes take a step's route through here: the walker's
+        executor, and lowering for the spine's worker."""
+        route = dict(self.route or {})
+        for field_name, knob_name in self.field_bindings:
+            if not field_name.startswith("route.") or knobs.get(knob_name) is None:
+                continue
+            value = knobs[knob_name]
+            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                raise GraphError(f"node {self.id!r}: {knob_name} is bound to {field_name} and "
+                                 f"must be a whole number, got {value!r}")
+            key = field_name.removeprefix("route.")
+            if value:
+                route[key] = str(value)
+            else:
+                route.pop(key, None)
+        return route_declaration(route)
 
     def bound_flag(self, field_name: str, knobs: Mapping[str, Any]) -> bool | None:
         """A bound boolean setting (``optional``) in a run with these knob values; None

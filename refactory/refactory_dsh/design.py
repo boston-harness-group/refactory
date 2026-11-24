@@ -58,7 +58,7 @@ CODE_GRAPH_WAIT_MAX_S = 540
 #: The builder's timeout retry: one fresh session on the same limits (factor 1). A stuck
 #: session is retried on inactivity, so the retry needs no longer limit, and the hard maximum
 #: is not doubled for it.
-BUILDER_RETRY = {"on": ["timeout"], "times": 1, "timeout_factor": 1}
+BUILDER_RETRY = {"on": ["timeout"], "times": 1, "timeout_factor": 1, "keep_workspace": True}
 
 #: Design mode's verifier runs beside the check, in the review fork.
 BESIDE_CHECK_VERIFIER_NOTE = (
@@ -106,6 +106,8 @@ WORKSPACE_BRIEFING = (
     "installed and its setup and generate commands run; its path is in the execution "
     "block above. Make the change there. `git diff HEAD` there shows what you changed "
     "since the last attempt; the run's base commit is {{base}}.\n"
+    "Change existing files with targeted edits (`edit`), not by rewriting the whole file.\n"
+    "Make the edits in this session; use subagents only for short, read-only analysis in parallel.\n"
     "Run there, as often as you need, the tests your change touches: the test files you "
     "changed or added, and the tests that import the modules you changed. Run the brief's "
     "own example or CLI path there too. They run there as they run in the check.\n"
@@ -113,10 +115,14 @@ WORKSPACE_BRIEFING = (
     "what the self-check will run for your change. {{builder_tests}}\n"
     "Iterate with `refactory-targeted-tests --failed`; run plain `refactory-targeted-tests` "
     "once before you stop.\n"
+    "Each run saves its output to `.refactory/targeted-tests-output.log` in your workspace; "
+    "read that file instead of rerunning to review results.\n"
     "Do not run the whole test suite: the full check runs after you finish, beside the "
     "reviews.\n"
-    "If you wrap a command in `timeout`, give it about twice the time stated above; DSH "
-    "workspace shell commands are killed after at most 10 minutes.\n"
+    "Do not wrap `refactory-targeted-tests` in `timeout`. Each command is already bounded by "
+    "the workspace's 10-minute per-command cap, and a run killed early is a run wasted. If "
+    "you wrap another command that might hang in `timeout`, give it about twice the time it "
+    "needs.\n"
     "When you are done, stop: the workspace's diff is your answer. The runtime turns it "
     "into the next attempt, which the check and the reviews then judge. Return a short "
     "completion message.\n"
@@ -1178,7 +1184,7 @@ class DesignMode(Mode):
             prompt_template=DESIGN_VERIFIER_PROMPT + BESIDE_CHECK_VERIFIER_NOTE,
             timeout_s=DESIGN_VERIFIER_TIMEOUT_S,
             # Not test-guardedness.json: the check beside it writes that file.
-            reads=("brief.json", "changes.diff"),
+            reads=("brief.json", "changes.diff", "changed-functions.json"),
             writes=("reviews/verification.md",),
             produces=("verification",),
             role="code_reviewer",
@@ -1344,8 +1350,11 @@ class DesignMode(Mode):
             produces=("probe_results",),
             resource_role="final_validation",
             notes="rerun each probe file the verifier wrote on the attempt in a scratch clone "
-                  "(120 s each, 600 s in all); a failing probe is a blocking defect, a PROBED "
-                  "claim without a probe file of its own is unverified",
+                  "(120 s each, 600 s total, shared with the base rerun); the same probes "
+                  "run on the base in parallel for discrimination (wall-clock seconds in "
+                  "probe-results.json); a failing probe is a blocking defect, a PROBED "
+                  "claim without a probe file of its own is unverified, a requirement "
+                  "no probe tells apart from the base is advisory",
         ))
         # ── the reviews report, and two judges decide (refactory_dsh.judges) ──
         graph.add(Node(

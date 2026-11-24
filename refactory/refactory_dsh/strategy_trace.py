@@ -1,4 +1,8 @@
-"""Append-only JSONL trace recorder for SkillOpt.
+"""Append-only JSONL trace recorder for outer-loop strategies (SkillOpt, GEPA).
+
+Written for SkillOpt (``skillopt_trace.jsonl``) and shared by any strategy that
+makes optimizer calls of its own (GEPA's ``gepa_trace.jsonl``); the retry rule
+below is SkillOpt's, cited where it is applied.
 
 Each line is a JSON object with ``type`` (``model_call`` or ``decision``),
 ``timestamp``, ``epoch``, ``step_type``, and an optional ``call_key`` (the

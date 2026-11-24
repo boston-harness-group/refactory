@@ -178,6 +178,20 @@ def test_code_and_inputs_round_trip_and_only_ops_and_fn_gates_take_them():
 # ── the sandbox (the raw sandbox, as V18 would never let these through) ────
 
 
+def _where_homes_live(tmp_path: Path) -> str:
+    """The directory that holds the home directory and is itself hidden: on Linux the
+    hidden root covering HOME (``/home``, or ``/root``), wherever HOME sits under it -- a
+    check run moves HOME into its run directory, whose parent is gone once ``/home`` is
+    covered; on macOS the home directory's parent, which the profile denies."""
+    home = os.path.realpath(Path.home())
+    if MAC:
+        return str(Path(home).parent)
+    roots = [root for root in snippet._hidden((str(tmp_path),))
+             if home == root or home.startswith(root.rstrip("/") + "/")]
+    assert roots, f"setup: HOME {home} is under none of the directories the sandbox hides"
+    return roots[0]
+
+
 @needs_sandbox
 @pytest.mark.parametrize("code, refused", [
     ("import socket\ndef main(inp):\n    socket.create_connection(('1.1.1.1', 80), timeout=3)\n",
@@ -198,7 +212,7 @@ def test_the_sandbox_denies_network_files_secrets_and_memory(code, refused, tmp_
     secret_file.parent.mkdir()
     secret_file.write_text("the answer")
     monkeypatch.setenv("SOME_API_KEY", "k")
-    inp = {"files": {}, "facts": {"path": str(secret_file), "dir": str(Path.home().parent)}}
+    inp = {"files": {}, "facts": {"path": str(secret_file), "dir": _where_homes_live(tmp_path)}}
     if refused.startswith("ok"):
         assert not snippet._sandboxed(code, inp, timeout_s=10, extra=(str(tmp_path),))
         return

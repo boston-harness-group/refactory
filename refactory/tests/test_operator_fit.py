@@ -108,7 +108,7 @@ def _check_rows_are_true(state: dict, protected: tuple = ()) -> dict[str, list[s
 #: only an agent's row says (`base._fit_edits`).
 EVERY_STEP_OPS = {"insert", "insert before", "remove", "loop", "route", "split",
                   "split (replace)", "fallback", "map"}
-AGENT_OPS = {"rewire", "parallelize"}
+AGENT_OPS = {base.REWIRE_TO_TASK, "parallelize"}
 
 
 def _labels(applies: str, refused: str) -> set[str]:
@@ -183,11 +183,12 @@ def test_a_model_step_s_row_follows_its_prompt_back_through_the_plain_op_that_bu
 def test_lineage_follows_plain_ops_back_to_their_sources():
     state = sf.cached_applier("fuzz_dataflow").seed_state
     carries = _rows(_section(state))["summarise"][0]
-    # cleaned <- op clean <- raw.txt <- op load (which reads nothing): two ops back.
+    # cleaned <- op clean <- raw.txt <- op load (which reads nothing): two ops back; each
+    # op is followed once in the cell, and said as "above" after.
     clean = ("op clean, which reads raw.txt (op load, which reads nothing), knob(s) depth "
              "(the op's, for all 2 of its outputs)")
-    assert carries == (f"cleaned ({clean}); source (op load, which reads nothing); "
-                       f"clean.txt ({clean})"), carries
+    assert carries == (f"cleaned ({clean}); source (op load, above); "
+                       "clean.txt (op clean, above)"), carries
 
 
 def test_lineage_stops_at_its_depth_and_says_so(monkeypatch):
@@ -199,7 +200,7 @@ def test_lineage_stops_at_its_depth_and_says_so(monkeypatch):
     # format_prompt declares that only skill_section carries the skill knob.
     assert _rows(_section(mode().state_dict()))["solve"][0] == (
         "skill_section (op format_prompt, which reads current_item.json (data), knob skill); "
-        "solver_prompt (op format_prompt, which reads current_item.json (data))")
+        "solver_prompt (op format_prompt, above)")
 
 
 def test_a_refusal_names_the_exact_replacing_edit_and_that_edit_applies():

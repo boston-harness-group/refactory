@@ -21,9 +21,11 @@ Run settings, as SkillOpt's runs used them, are not part of the graph: the
 ``claude_code`` worker, ``claude-opus-4-6`` at effort ``medium``, permission mode
 ``dontAsk`` (which ``refused`` requires). A refused step loads no settings whatever the
 route names (SkillOpt's ``project`` found none in its empty directory). Its Claude Code
-is pinned to SkillOpt's, 2.1.299 (`Solver.claude_code_versions`): a run whose solve step
-would run another (the SDK's bundled 2.1.281, say) is refused before it starts, so name
-it with ``--claude-executable``.
+is pinned to 2.1.299, the lab's install that SkillOpt's runs used (SkillOpt pins none;
+`Solver.claude_code_versions`): a run whose solve step would run another (the SDK's
+bundled 2.1.281, say) is refused before it starts, so name it with
+``--claude-executable``. The output cap (``max_completion_tokens``, 0 by default) is bound
+to the solve step's route (`CAP_BINDING`), so a nonzero one reaches it on both runtimes.
 
 **Deviations from SkillOpt as shipped**, each recorded where it is decided:
 
@@ -54,20 +56,26 @@ it with ``--claude-executable``.
    later turns end (`refactory_dsh.feedback.SCORING`); SkillOpt scores the attempt after
    the feedback, which passed nearly every clean train item and left the search nothing
    to learn from. The conversation, the feedback included, is unchanged.
+7. *Formula note*: the verification report (the analysts' view) lists cells holding text
+   that starts with ``=``, not formulas; under ``recalc`` it says so
+   (`skillopt_port.FORMULA_NOTE_RECALC`), not SkillOpt's "openpyxl cannot evaluate them",
+   which is false there and led a proposer to argue for plain values; ``cached`` keeps it.
 """
 from __future__ import annotations
 
 import copy
-from pathlib import Path
 from typing import Any, Mapping
 
 from refactory_dsh import nn
 from refactory_dsh.feedback import CALL as FEEDBACK_CALL
 
 from . import skillopt_port as port
+from .tasks import INPUT
 
 OPS = "refactory_packages.spreadsheetbench.ops"
 TASK = "refactory_packages.spreadsheetbench.tasks:SpreadsheetBenchTask"
+#: The ops that open the item's input (`RunContext.item_file`), so declare it in reads.
+INPUT_READERS = (f"{OPS}:prepare", f"{OPS}:run_turn", f"{OPS}:finalize")
 
 #: The Claude Code SkillOpt's runs used (the lab's ``claude --version``): its system
 #: prompt and tool text are what the solve call is compared with.
@@ -80,6 +88,9 @@ SYSTEM_PROMPT_KNOB = "solve__system_prompt"
 #: A crashed solve call is run again in a fresh session up to 4 times, 5 attempts in
 #: all, as SkillOpt's wrapper attempts each call (rather than the data pass's default 2).
 SOLVE_RETRY = {"on": ["crash"], "times": 4}
+#: The solve step's output cap is its frozen ``max_completion_tokens`` knob, bound to its
+#: route (`nn.Node.bound_route`), so a nonzero cap reaches its route on both runtimes.
+CAP_BINDING = "route.max_completion_tokens"
 
 
 class Solver(nn.Mode):
@@ -111,9 +122,11 @@ class Solver(nn.Mode):
     def build(self) -> nn.Graph:
         g = nn.Graph()
         g.add(nn.Node("data", "data", subgraph_entry="prepare", subgraph_exit="finalize",
-                      task_ref=TASK, writes=("current_item.json",), produces=("item_scores",),
+                      task_ref=TASK, writes=("current_item.json", INPUT),
+                      produces=("item_scores",),
                       parallelism_knob="data_parallelism", knobs=("data_parallelism",)))
-        g.add(nn.Node("prepare", "op", call=f"{OPS}:prepare", reads=("current_item.json",),
+        g.add(nn.Node("prepare", "op", call=f"{OPS}:prepare",
+                      reads=("current_item.json", INPUT),
                       knobs=("skill",),
                       writes=("history.json", "turn.json", "target_system_prompt.txt",
                               "target_user_prompt.txt", "spreadsheet_preview.txt"),
@@ -133,9 +146,11 @@ class Solver(nn.Mode):
                       tool_policy="refused", role="solver", outputs_only=True,
                       retry=SOLVE_RETRY,
                       knobs=("max_completion_tokens", SYSTEM_PROMPT_KNOB),
-                      field_bindings=(("system_prompt_template", SYSTEM_PROMPT_KNOB),)))
+                      field_bindings=(("system_prompt_template", SYSTEM_PROMPT_KNOB),
+                                      (CAP_BINDING, "max_completion_tokens"))))
         g.add(nn.Node("run_turn", "op", call=f"{OPS}:run_turn",
-                      reads=("reply.txt", "history.json", "turn.json", "current_item.json"),
+                      reads=("reply.txt", "history.json", "turn.json", "current_item.json",
+                             INPUT),
                       knobs=("turn_pause_s",),
                       writes=("history.json", "turn.json", "code.py", "raw.txt", "pred.xlsx"),
                       produces=("turn_status",),
@@ -151,7 +166,8 @@ class Solver(nn.Mode):
                       max_iterations=MAX_TURNS - 1, on_exhausted="continue",
                       notes="another turn while turns and budget remain"))
         g.add(nn.Node("finalize", "op", call=f"{OPS}:finalize",
-                      reads=("current_item.json", "turn.json", "history.json", "code.py"),
+                      reads=("current_item.json", "turn.json", "history.json", "code.py",
+                             INPUT),
                       knobs=("max_turns",),
                       writes=("final.json", "conversation.json", "pred.xlsx"),
                       produces=("finished",),
@@ -168,6 +184,65 @@ class Solver(nn.Mode):
         g.connect("turn_gate", "finalize", condition="proceed")
         return g
 
+    @classmethod
+    def upgrade_state(cls, state: Mapping[str, Any]) -> tuple[dict[str, Any], list[str]]:
+        """`_upgrade_item_files`, then `_upgrade_cap_binding`."""
+        state, notes = cls._upgrade_item_files(state)
+        state, more = cls._upgrade_cap_binding(state)
+        return state, [*notes, *more]
+
+    @classmethod
+    def _upgrade_cap_binding(cls, state: dict[str, Any]) -> tuple[dict[str, Any], list[str]]:
+        """A state saved before the output cap was bound to the solve step's route
+        (`CAP_BINDING`; `Solver.run` put it on the route, on the walker only): each agent
+        node that reads the ``max_completion_tokens`` knob and binds no route cap gets the
+        binding, so the cap it had on the walker reaches its route on both runtimes. Any
+        other state is returned as it is."""
+        nodes = (state.get("graph") or {}).get("nodes") or {}
+        stale = [node_id for node_id, node in sorted(nodes.items())
+                 if node.get("kind") == "agent" and "max_completion_tokens" in (node.get("knobs") or ())
+                 and not any(pair[0] == CAP_BINDING for pair in node.get("field_bindings") or ())]
+        if not stale:
+            return state, []
+        state = copy.deepcopy(state)
+        for node_id in stale:
+            node = state["graph"]["nodes"][node_id]
+            node["field_bindings"] = [*(node.get("field_bindings") or []),
+                                      [CAP_BINDING, "max_completion_tokens"]]
+        return state, [f"{node_id} now binds max_completion_tokens to its route (a state saved "
+                       "before the cap was a route binding)" for node_id in stale]
+
+    @classmethod
+    def _upgrade_item_files(cls, state: Mapping[str, Any]) -> tuple[dict[str, Any], list[str]]:
+        """A state saved before the input was an item file (`tasks.INPUT`): one whose data
+        node for this Task (protected, so no edit changes it) does not declare the input in
+        its writes. Then each such data node declares it, and each node running one of the
+        ops that open it (`ops.prepare`, ``run_turn``, ``finalize``, by call, whatever its
+        id) declares it in its reads, as this version's graph does. A state that already
+        declares it -- any state this version saved -- is returned as it is, with no note:
+        never a change to anything an edit chose."""
+        nodes = ((state.get("graph") or {}).get("nodes") or {}) if isinstance(state, Mapping) \
+            else {}
+        data = [n for n in nodes.values() if n.get("kind") == "data" and n.get("task_ref") == TASK]
+        if not data or all(INPUT in (n.get("writes") or ()) for n in data):
+            return dict(state), []
+        state = copy.deepcopy(dict(state))
+        nodes = state["graph"]["nodes"]
+        notes: list[str] = []
+        for node_id, node in sorted(nodes.items()):
+            if node.get("kind") == "data" and node.get("task_ref") == TASK:
+                key = "writes"
+            elif node.get("call") in INPUT_READERS:
+                key = "reads"
+            else:
+                continue
+            declared = list(node.get(key) or [])
+            if INPUT not in declared:
+                node[key] = [*declared, INPUT]
+                notes.append(f"{node_id} now declares {INPUT} in its {key} (a state saved "
+                             "before the input was an item file)")
+        return state, notes
+
     def claude_code_versions(self) -> dict[str, str]:
         """The solve step runs on SkillOpt's Claude Code (`SKILLOPT_CLAUDE_CODE`)."""
         return {"solve": SKILLOPT_CLAUDE_CODE}
@@ -175,18 +250,6 @@ class Solver(nn.Mode):
     def protected_nodes(self) -> tuple[str, ...]:
         """The data pass, the train-feedback node (V17's channel) and the item's outcome."""
         return ("data", "gold_check", "finalize")
-
-    def run(self, workdir: Path, *, model: Any = None, task: Mapping[str, Any] | None = None,
-            memory: Any = None, **kwargs: Any) -> nn.RunResult:
-        """Put a nonzero ``max_completion_tokens`` on the solve node's route, as LiveMath
-        does (`refactory_packages.livemath.mode.Solver.run`)."""
-        cap = int(self.values().get("max_completion_tokens") or 0)
-        if cap > 0 and model is not None and callable(getattr(model, "for_node", None)):
-            routes = dict(getattr(model, "_node_routes", None) or {})
-            routes["solve"] = {**routes.get("solve", {}), "max_completion_tokens": str(cap)}
-            model = copy.copy(model)
-            model._node_routes = routes
-        return super().run(workdir, model=model, task=task, memory=memory, **kwargs)
 
     def score(self, run: nn.RunResult) -> float:
         scores = [entry["score"] for entry in run.facts.get("item_scores", [])]

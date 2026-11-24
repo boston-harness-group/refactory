@@ -397,9 +397,9 @@ describe('a step\'s own route', () => {
   })
 
   it.each([
-    [{ route: { temperature: '1' } }, 'a route sets model, effort, max_completion_tokens; unknown: temperature'],
+    [{ route: { temperature: '1' } }, 'a route sets model, effort, max_completion_tokens, max_thinking_tokens, max_turns, bash_timeout_ms, bash_output_chars; unknown: temperature'],
     [{ route: { model: 3 } }, "route 'model' is a nonempty string"],
-    [{ route: ['small-model'] }, 'a route is an object of model, effort, max_completion_tokens'],
+    [{ route: ['small-model'] }, 'a route is an object of model, effort, max_completion_tokens, max_thinking_tokens, max_turns, bash_timeout_ms, bash_output_chars'],
     [{ dispatch_command: undefined }, 'declares a route, which only a dispatched worker can take; run it with a worker route'],
     [{ _type: 'FnNode', command: 'true' }, "node type 'FnNode' declares a route; only an agent does"],
   ])('refuses %j', (fields, message) => {

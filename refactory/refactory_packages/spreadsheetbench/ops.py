@@ -31,7 +31,7 @@ from refactory_dsh.nn import Verdict
 from refactory_packages.skillopt.claude_backend import claude_backend_messages
 
 from . import skillopt_port as port
-from .tasks import FINAL, INPUT_DIR, PRED, TURN
+from .tasks import FINAL, PRED, TURN
 
 HISTORY = "history.json"
 REPLY = "reply.txt"
@@ -60,10 +60,10 @@ def _item(ctx: Any) -> dict[str, Any]:
     return ctx.read_json("current_item.json", {}) or {}
 
 
-def _input(ctx: Any, item: dict[str, Any]) -> Path | None:
-    name = str(item.get("input_name") or "")
-    path = Path(ctx.workdir) / INPUT_DIR / name
-    return path if name and path.is_file() else None
+def _input(ctx: Any) -> Path | None:
+    """The item's input workbook, its item file (`tasks.INPUT`), through the declaration
+    that names it (`RunContext.item_file`); ``None`` for an item with no case."""
+    return ctx.item_file("input")
 
 
 def prepare(ctx: Any) -> dict[str, Any]:
@@ -71,7 +71,7 @@ def prepare(ctx: Any) -> dict[str, Any]:
     (rollout.py:700-721; codegen_agent.py:684-697) and the history that starts with it."""
     started = time.time()
     item = _item(ctx)
-    source = _input(ctx, item)
+    source = _input(ctx)
     if source is None:
         # rollout.py:681-685: no init+golden pair, no model call.
         ctx.write_json(TURN, {"start": started, "turn": 0, "status": "no_case", "done": True})
@@ -107,24 +107,28 @@ def frame(ctx: Any) -> dict[str, Any]:
     return {"solver_prompt": prompt}
 
 
-def _sandbox_run(ctx: Any, item: dict[str, Any], code: str) -> tuple[bool, str]:
+def _sandbox_run(ctx: Any, item: dict[str, Any], code: str,
+                 data_roots: list[str] | None = None) -> tuple[bool, str]:
     """Run ``code`` as SkillOpt's executor does, in a fresh confined directory holding a
-    copy of the input and of the prediction so far; the prediction comes back after."""
+    copy of the input and of the prediction so far; the prediction comes back after.
+    ``data_roots``: the dataset directories it must not see (SB's, by default)."""
     from . import interpreter, sandbox
 
     python = interpreter.interpreter()
     sandbox.require(python)
     workdir = Path(ctx.workdir)
-    hidden = sandbox.hidden_paths([*_run_roots(workdir), *_data_roots()])
+    roots = _data_roots() if data_roots is None else data_roots
+    hidden = sandbox.hidden_paths([*_run_roots(workdir), *roots])
     pred_name = f"{item.get('case_no') or 1}_pred.xlsx"
     with tempfile.TemporaryDirectory(prefix="sb-item-") as work:
         root = Path(work)
         (root / "in").mkdir()
         (root / "out").mkdir()
         (root / "cwd").mkdir()
-        source = _input(ctx, item)
+        source = _input(ctx)
         assert source is not None
-        input_path = root / "in" / source.name
+        # Under the input's own name, as SkillOpt's code found it (``INPUT_PATH``).
+        input_path = root / "in" / (str(item.get("input_name") or "") or source.name)
         shutil.copyfile(source, input_path)
         output_path = root / "out" / pred_name
         if (workdir / PRED).exists():
@@ -145,18 +149,20 @@ def _sandbox_run(ctx: Any, item: dict[str, Any], code: str) -> tuple[bool, str]:
 def _run_roots(workdir: Path) -> list[str]:
     """The run the pass belongs to and, above it, the outer loop's root (every
     candidate's records): what model code must not see. A concurrent pass works through
-    an alias (``.refactory/live/<node>/<item>``), so the pass is resolved first."""
-    from refactory_dsh.history import JOURNAL, RUN_FILE
-    from refactory_dsh.items import PASS_MARKER
+    an alias (``.refactory/live/<node>/<item>``), so the pass is resolved first
+    (`items.run_roots`)."""
+    from refactory_dsh.items import run_roots
 
-    real = workdir.resolve()
-    # ``<run>/passes/<node>/<item>``, else the directory itself.
-    run = real.parents[2] if (real / PASS_MARKER).exists() else real
-    roots = [str(run)]
-    for parent in run.parents:
-        if (parent / RUN_FILE).exists() or (parent / JOURNAL).exists():
-            roots.append(str(parent))
-    return roots
+    return run_roots(workdir)
+
+
+def tool_hidden(workdir: Path) -> list[str]:
+    """What no folder of a sealed tool step's environment may hold or lie inside
+    (`ToolEnvironment.hidden`): what model code may not see (`sandbox.hidden_paths`), the
+    dataset among it."""
+    from . import sandbox
+
+    return sandbox.hidden_paths([*_run_roots(Path(workdir)), *_data_roots()])
 
 
 def _data_roots() -> list[str]:
@@ -256,6 +262,7 @@ def finalize(ctx: Any) -> dict[str, Any]:
     history = ctx.read_json(HISTORY, []) or []
     code = str(turn.get("code") or "")
     fail_reason = ""
+    exec_error = None
     calls = int(turn.get("turn", 0))
     # run_multi's n_turns is its loop index + 1: a loop the budget stopped before a
     # call counts that turn too (codegen_agent.py:768).
@@ -270,11 +277,13 @@ def finalize(ctx: Any) -> dict[str, Any]:
         ok, err = _sandbox_run(ctx, item, code)
         if not ok:
             fail_reason = f"exec-error: {port.tail_line(err)}"
+            exec_error = err[:500]  # rollout.py:802-812
         elif not ctx.exists(PRED):
             fail_reason = "output-not-found"
     elapsed = time.time() - float(turn.get("start") or time.time())
     ctx.write_json(CONVERSATION, history[1:])
     ctx.write_json(FINAL, {"fail_reason": fail_reason, "n_turns": n_turns,
+                           **({"exec_error": exec_error} if exec_error is not None else {}),
                            "elapsed_s": round(elapsed, 3),
                            "backstop": elapsed > item_limit_s(), "limit_s": item_limit_s()})
     return {"finished": True}

@@ -341,7 +341,7 @@ class Normaliser:
             (r"\b[0-9a-f]{64}\b", "<HASH>"), (r"\b[0-9a-f]{40}\b", "<SHA>"), (r"\b[0-9a-f]{32}\b", "<UUID>"),
             (r"\b[0-9a-f]{7,12}\b", "<SHORT>"),
             (r"\d{4}-\d\d-\d\d[T ]\d\d:\d\d:\d\d(\.\d+)?(Z|[+-]\d\d:?\d\d)?", "<TIME>"),
-            (r"\b\d+(\.\d+)? ?s\b", "<S>s"), (r'("(?:s|elapsed_s|duration_s|seconds)": )[\d.]+', r"\1<S>"),
+            (r"\b\d+(\.\d+)? ?s\b", "<S>s"), (r'("(?:s|elapsed_s|duration_s|seconds|base_rerun_wall_s)": )[\d.]+', r"\1<S>"),
         ):
             text = re.sub(pattern, name, text)
         return text
@@ -769,6 +769,8 @@ def test_the_builder_is_told_to_run_the_self_checks_tests_on_each_runtime(runs, 
     for prompt in (first, fixup):
         assert "none yet" not in prompt and "Your targeted test command" not in prompt
         assert "Do not run the whole test suite: the full check runs after you finish" in prompt
+        assert "Do not wrap `refactory-targeted-tests` in `timeout`." in prompt
+        assert "twice the time stated" not in prompt
         assert "5m" not in prompt and "{{builder_tests}}" not in prompt
 
 

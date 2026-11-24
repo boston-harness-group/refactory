@@ -2096,6 +2096,7 @@ Documentation: [refactory/docs/optimization-profiles.md](../../../refactory/docs
     "max_steps": 2000,
     "max_tokens": null,
     "model": "",
+    "new_step_tools": true,
     "node_routes": {},
     "omit_steering": false,
     "optimizer": "autoresearch",
@@ -2510,6 +2511,17 @@ Documentation: [refactory/docs/optimization-profiles.md](../../../refactory/docs
       "required": false,
       "type": "string"
     },
+    "new_step_tools": {
+      "default": null,
+      "description": "",
+      "flags": [
+        "--new-step-tools"
+      ],
+      "nargs": null,
+      "positional": false,
+      "required": false,
+      "type": "integer"
+    },
     "node_routes": {
       "default": null,
       "description": "",
@@ -2867,7 +2879,7 @@ Documentation: [refactory/docs/optimization-profiles.md](../../../refactory/docs
     }
   },
   "purpose": "Preview a scored mode\u2019s effective optimization settings, immutable contract and worker provenance without launching a search. The validation gate is on whenever the parts manifest has val items (there is no switch). The selection option (with the gate) is checkpoint, single or pool; empty picks checkpoint for the default loop with a single-parent optimizer and pool otherwise, and pool_size (8) sizes the pool. The omit_steering option leaves graph controls and correction audits active while excluding the ledger from candidate model prompts. Under single and pool the candidate the optimizer edits is re-scored on each epoch's train sample with that epoch's seed, unless it was scored this epoch, so its evidence is fresh; its id and scores stay. Every default-loop proposal is first run on two of its parent's train items (the smoke check): one that fails there with an error is refused (E-smoke) and goes to the repair call. One proposal may bundle up to 4 changes, applied in order as one candidate and judged once; a structural edit, the edits that connect it and the tuning of the steps that read its output count as one change, and no proposal carries more than 12 edits. The strategy_option option (KEY=VALUE, repeatable) adds to a profile's strategy_options, as knob adds to its knobs; a strategy option the strategy does not read, an unknown setting or a value of the wrong type is refused. The parent_picker option (empty by default) pairs a parent picker (archive, evolutionary, islands, hill_climb, map_elites) with the optimizer: the picker chooses the candidate each step edits and the optimizer writes the edits against it; under the validation gate a population picker selects by val score under the pool selection. The portfolio option (off by default; prompt+pipeline, with the autoresearch optimizer) asks the model proposer each round for one prompt/knob-level and one pipeline-level candidate and evaluates both; the report counts the evaluations beyond batch_size. The run_ledger, lessons and step_review options (on by default) show the model proposer every candidate of the run with what its edits did (its kind only a label) and train fixed/broken counts, the memory note a per-epoch memory pass writes (one optimizer-model call comparing the previous and current candidate on 20 train items, or the unchanged incumbent and the round's rejected change on the items it moved, SkillOpt's meta skill, shown to every analyst, merge and proposal call and kept across a resume), and a review of each step the last round added (one optimizer-model call per step); structure_guidance (off by default) adds what makes a new step pay off. The integrity_judge option (off by default) has one optimizer-model call per proposal ask whether its benefit depends on how the data, grader or environment happen to be built: on (or veto) refuses an exploit or suspect verdict about what the change adds before evaluation (E-integrity) in every category by default (never an inherited finding, a judge error or a salvaged reply), flag (or warn) only shows the verdicts; an object with mode, default and a per-category policy (off, warn, veto) sets categories one by one; a run's per-category setting comes first, then a Task's integrity_allowances (off), then the run's default, which overrides a Task's integrity_policy. The analysts option (off by default) runs SkillOpt's per-round analysis before each model proposal: failure and success analysts read the edited candidate's train items in full in batches of analyst_group_size (8), one optimizer-model call per batch, and merges of analyst_merge_batch_size (8) lists rank their findings into one list that replaces the readers' summaries; analyst_max_batches (0, no limit) caps the analyst calls per round, failure batches first.",
-  "reviewed_schema": "73a32786532659098dd8dbc69af597636403b6dd0010393ffd1192afbe984219"
+  "reviewed_schema": "9825aeb6b704aec93246b3e995e2041c8415fa3309f02a1d910232d1cff403bf"
 }
 ```
 
@@ -3663,7 +3675,7 @@ Documentation: [refactory/docs/cli.md](../../../refactory/docs/cli.md)
 
 ## start
 
-Optimize a scored mode in a separate process; returns a durable run ID for status. Project defaults, profile and explicit settings resolve before launch. The omit_steering option leaves graph controls and correction audits active while excluding the ledger from candidate model prompts. The validation gate (on whenever the parts manifest has val items, with no switch; without val items the run selects on train scores and warns) selects on val, the last epoch's proposals are scored, and with a test part the final candidate's val check and the seed, best and final candidates' test scores are run and reported. With it, selection says how val selects: checkpoint (the default for the default loop with a single-parent optimizer: each round's change is applied unless its graph is broken -- refused, vetoed, failing its smoke check or its train run -- and only the applied candidate is scored on val, once; train rollouts use one seed for the run; the winner is the best checkpoint on val), single (SkillOpt's line: per-epoch train seeds, every candidate scored on val, the incumbent changes only on a strictly higher val score and is the only parent and the winner) or pool (the default otherwise: parents come from the pool_size, 8 by default, best candidates on val, ties at the edge kept). With it, early_stop_patience (0, off, by default) stops after that many epochs without a better best val score, and early_stop_at_full_val once the best val score is 1.0. The train_minibatch option (0, the whole train part, by default; it needs the validation gate) scores each epoch's candidates on that many train items sampled with the per-epoch seed, and the optimizer's evidence is that minibatch; val and test are not sampled. The allow_code_nodes option (on by default) lets an edit add a code node, an op or gate whose Python the optimizer writes, run sandboxed; off, or where the sandbox is unavailable, a new code node is refused (E-code-nodes). Under single and pool the candidate the optimizer edits is re-scored on each epoch's train sample with that epoch's seed, unless it was scored this epoch, so its evidence is fresh; its id and scores stay. Every default-loop proposal is first run on two of its parent's train items (the smoke check): one that fails there with an error is refused (E-smoke) and goes to the repair call. One proposal may bundle up to 4 changes, applied in order as one candidate and judged once; a structural edit, the edits that connect it and the tuning of the steps that read its output count as one change, and no proposal carries more than 12 edits. The strategy_option option (KEY=VALUE, repeatable) adds to a profile's strategy_options, as knob adds to its knobs; a strategy option the strategy does not read, an unknown setting or a value of the wrong type is refused. The parent_picker option (empty by default) pairs a parent picker (archive, evolutionary, islands, hill_climb, map_elites) with the optimizer: the picker chooses the candidate each step edits and the optimizer writes the edits against it; under the validation gate a population picker selects by val score under the pool selection. The portfolio option (off by default; prompt+pipeline, with the autoresearch optimizer) asks the model proposer each round for one prompt/knob-level and one pipeline-level candidate and evaluates both; the report counts the evaluations beyond batch_size. The run_ledger, lessons and step_review options (on by default) show the model proposer every candidate of the run with what its edits did (its kind only a label) and train fixed/broken counts, the memory note a per-epoch memory pass writes (one optimizer-model call comparing the previous and current candidate on 20 train items, or the unchanged incumbent and the round's rejected change on the items it moved, SkillOpt's meta skill, shown to every analyst, merge and proposal call and kept across a resume), and a review of each step the last round added (one optimizer-model call per step); structure_guidance (off by default) adds what makes a new step pay off. The integrity_judge option (off by default) has one optimizer-model call per proposal ask whether its benefit depends on how the data, grader or environment happen to be built: on (or veto) refuses an exploit or suspect verdict about what the change adds before evaluation (E-integrity) in every category by default (never an inherited finding, a judge error or a salvaged reply), flag (or warn) only shows the verdicts; an object with mode, default and a per-category policy (off, warn, veto) sets categories one by one; a run's per-category setting comes first, then a Task's integrity_allowances (off), then the run's default, which overrides a Task's integrity_policy. The analysts option (off by default) runs SkillOpt's per-round analysis before each model proposal: failure and success analysts read the edited candidate's train items in full in batches of analyst_group_size (8), one optimizer-model call per batch, and merges of analyst_merge_batch_size (8) lists rank their findings into one list that replaces the readers' summaries; analyst_max_batches (0, no limit) caps the analyst calls per round, failure batches first.
+Optimize a scored mode in a separate process; returns a durable run ID for status. Project defaults, profile and explicit settings resolve before launch. The omit_steering option leaves graph controls and correction audits active while excluding the ledger from candidate model prompts. The validation gate (on whenever the parts manifest has val items, with no switch; without val items the run selects on train scores and warns) selects on val, the last epoch's proposals are scored, and with a test part the final candidate's val check and the seed, best and final candidates' test scores are run and reported. With it, selection says how val selects: checkpoint (the default for the default loop with a single-parent optimizer: each round's change is applied unless its graph is broken -- refused, vetoed, failing its smoke check or its train run -- and only the applied candidate is scored on val, once; train rollouts use one seed for the run; the winner is the best checkpoint on val), single (SkillOpt's line: per-epoch train seeds, every candidate scored on val, the incumbent changes only on a strictly higher val score and is the only parent and the winner) or pool (the default otherwise: parents come from the pool_size, 8 by default, best candidates on val, ties at the edge kept). With it, early_stop_patience (0, off, by default) stops after that many epochs without a better best val score, and early_stop_at_full_val once the best val score is 1.0. The train_minibatch option (0, the whole train part, by default; it needs the validation gate) scores each epoch's candidates on that many train items sampled with the per-epoch seed, and the optimizer's evidence is that minibatch; val and test are not sampled. The allow_code_nodes option (on by default) lets an edit add a code node, an op or gate whose Python the optimizer writes, run sandboxed; off, or where the sandbox is unavailable, a new code node is refused (E-code-nodes). The new_step_tools option (on by default) lets a step an edit adds have tools, run sealed (only the files it reads, no network, no grader files); off, as an ablation, no tool step is offered and every new agent step with tools is refused (E-new-node-tools). Under single and pool the candidate the optimizer edits is re-scored on each epoch's train sample with that epoch's seed, unless it was scored this epoch, so its evidence is fresh; its id and scores stay. Every default-loop proposal is first run on two of its parent's train items (the smoke check): one that fails there with an error is refused (E-smoke) and goes to the repair call. One proposal may bundle up to 4 changes, applied in order as one candidate and judged once; a structural edit, the edits that connect it and the tuning of the steps that read its output count as one change, and no proposal carries more than 12 edits. The strategy_option option (KEY=VALUE, repeatable) adds to a profile's strategy_options, as knob adds to its knobs; a strategy option the strategy does not read, an unknown setting or a value of the wrong type is refused. The parent_picker option (empty by default) pairs a parent picker (archive, evolutionary, islands, hill_climb, map_elites) with the optimizer: the picker chooses the candidate each step edits and the optimizer writes the edits against it; under the validation gate a population picker selects by val score under the pool selection. The portfolio option (off by default; prompt+pipeline, with the autoresearch optimizer) asks the model proposer each round for one prompt/knob-level and one pipeline-level candidate and evaluates both; the report counts the evaluations beyond batch_size. The run_ledger, lessons and step_review options (on by default) show the model proposer every candidate of the run with what its edits did (its kind only a label) and train fixed/broken counts, the memory note a per-epoch memory pass writes (one optimizer-model call comparing the previous and current candidate on 20 train items, or the unchanged incumbent and the round's rejected change on the items it moved, SkillOpt's meta skill, shown to every analyst, merge and proposal call and kept across a resume), and a review of each step the last round added (one optimizer-model call per step); structure_guidance (off by default) adds what makes a new step pay off. The integrity_judge option (off by default) has one optimizer-model call per proposal ask whether its benefit depends on how the data, grader or environment happen to be built: on (or veto) refuses an exploit or suspect verdict about what the change adds before evaluation (E-integrity) in every category by default (never an inherited finding, a judge error or a salvaged reply), flag (or warn) only shows the verdicts; an object with mode, default and a per-category policy (off, warn, veto) sets categories one by one; a run's per-category setting comes first, then a Task's integrity_allowances (off), then the run's default, which overrides a Task's integrity_policy. The analysts option (off by default) runs SkillOpt's per-round analysis before each model proposal: failure and success analysts read the edited candidate's train items in full in batches of analyst_group_size (8), one optimizer-model call per batch, and merges of analyst_merge_batch_size (8) lists rank their findings into one list that replaces the readers' summaries; analyst_max_batches (0, no limit) caps the analyst calls per round, failure batches first.
 
 Documentation: [refactory/docs/optimization-profiles.md](../../../refactory/docs/optimization-profiles.md)
 
@@ -3722,6 +3734,7 @@ Documentation: [refactory/docs/optimization-profiles.md](../../../refactory/docs
     "max_steps": 2000,
     "max_tokens": null,
     "model": "",
+    "new_step_tools": true,
     "node_routes": {},
     "omit_steering": false,
     "optimizer": "autoresearch",
@@ -4139,6 +4152,17 @@ Documentation: [refactory/docs/optimization-profiles.md](../../../refactory/docs
       "required": false,
       "type": "string"
     },
+    "new_step_tools": {
+      "default": null,
+      "description": "",
+      "flags": [
+        "--new-step-tools"
+      ],
+      "nargs": null,
+      "positional": false,
+      "required": false,
+      "type": "integer"
+    },
     "node_routes": {
       "default": null,
       "description": "",
@@ -4506,8 +4530,8 @@ Documentation: [refactory/docs/optimization-profiles.md](../../../refactory/docs
       "type": "string"
     }
   },
-  "purpose": "Optimize a scored mode in a separate process; returns a durable run ID for status. Project defaults, profile and explicit settings resolve before launch. The omit_steering option leaves graph controls and correction audits active while excluding the ledger from candidate model prompts. The validation gate (on whenever the parts manifest has val items, with no switch; without val items the run selects on train scores and warns) selects on val, the last epoch's proposals are scored, and with a test part the final candidate's val check and the seed, best and final candidates' test scores are run and reported. With it, selection says how val selects: checkpoint (the default for the default loop with a single-parent optimizer: each round's change is applied unless its graph is broken -- refused, vetoed, failing its smoke check or its train run -- and only the applied candidate is scored on val, once; train rollouts use one seed for the run; the winner is the best checkpoint on val), single (SkillOpt's line: per-epoch train seeds, every candidate scored on val, the incumbent changes only on a strictly higher val score and is the only parent and the winner) or pool (the default otherwise: parents come from the pool_size, 8 by default, best candidates on val, ties at the edge kept). With it, early_stop_patience (0, off, by default) stops after that many epochs without a better best val score, and early_stop_at_full_val once the best val score is 1.0. The train_minibatch option (0, the whole train part, by default; it needs the validation gate) scores each epoch's candidates on that many train items sampled with the per-epoch seed, and the optimizer's evidence is that minibatch; val and test are not sampled. The allow_code_nodes option (on by default) lets an edit add a code node, an op or gate whose Python the optimizer writes, run sandboxed; off, or where the sandbox is unavailable, a new code node is refused (E-code-nodes). Under single and pool the candidate the optimizer edits is re-scored on each epoch's train sample with that epoch's seed, unless it was scored this epoch, so its evidence is fresh; its id and scores stay. Every default-loop proposal is first run on two of its parent's train items (the smoke check): one that fails there with an error is refused (E-smoke) and goes to the repair call. One proposal may bundle up to 4 changes, applied in order as one candidate and judged once; a structural edit, the edits that connect it and the tuning of the steps that read its output count as one change, and no proposal carries more than 12 edits. The strategy_option option (KEY=VALUE, repeatable) adds to a profile's strategy_options, as knob adds to its knobs; a strategy option the strategy does not read, an unknown setting or a value of the wrong type is refused. The parent_picker option (empty by default) pairs a parent picker (archive, evolutionary, islands, hill_climb, map_elites) with the optimizer: the picker chooses the candidate each step edits and the optimizer writes the edits against it; under the validation gate a population picker selects by val score under the pool selection. The portfolio option (off by default; prompt+pipeline, with the autoresearch optimizer) asks the model proposer each round for one prompt/knob-level and one pipeline-level candidate and evaluates both; the report counts the evaluations beyond batch_size. The run_ledger, lessons and step_review options (on by default) show the model proposer every candidate of the run with what its edits did (its kind only a label) and train fixed/broken counts, the memory note a per-epoch memory pass writes (one optimizer-model call comparing the previous and current candidate on 20 train items, or the unchanged incumbent and the round's rejected change on the items it moved, SkillOpt's meta skill, shown to every analyst, merge and proposal call and kept across a resume), and a review of each step the last round added (one optimizer-model call per step); structure_guidance (off by default) adds what makes a new step pay off. The integrity_judge option (off by default) has one optimizer-model call per proposal ask whether its benefit depends on how the data, grader or environment happen to be built: on (or veto) refuses an exploit or suspect verdict about what the change adds before evaluation (E-integrity) in every category by default (never an inherited finding, a judge error or a salvaged reply), flag (or warn) only shows the verdicts; an object with mode, default and a per-category policy (off, warn, veto) sets categories one by one; a run's per-category setting comes first, then a Task's integrity_allowances (off), then the run's default, which overrides a Task's integrity_policy. The analysts option (off by default) runs SkillOpt's per-round analysis before each model proposal: failure and success analysts read the edited candidate's train items in full in batches of analyst_group_size (8), one optimizer-model call per batch, and merges of analyst_merge_batch_size (8) lists rank their findings into one list that replaces the readers' summaries; analyst_max_batches (0, no limit) caps the analyst calls per round, failure batches first.",
-  "reviewed_schema": "2419d548b4dc3f37496e62cae4f781168bde23ea2f8afb630bd5eb319511c908"
+  "purpose": "Optimize a scored mode in a separate process; returns a durable run ID for status. Project defaults, profile and explicit settings resolve before launch. The omit_steering option leaves graph controls and correction audits active while excluding the ledger from candidate model prompts. The validation gate (on whenever the parts manifest has val items, with no switch; without val items the run selects on train scores and warns) selects on val, the last epoch's proposals are scored, and with a test part the final candidate's val check and the seed, best and final candidates' test scores are run and reported. With it, selection says how val selects: checkpoint (the default for the default loop with a single-parent optimizer: each round's change is applied unless its graph is broken -- refused, vetoed, failing its smoke check or its train run -- and only the applied candidate is scored on val, once; train rollouts use one seed for the run; the winner is the best checkpoint on val), single (SkillOpt's line: per-epoch train seeds, every candidate scored on val, the incumbent changes only on a strictly higher val score and is the only parent and the winner) or pool (the default otherwise: parents come from the pool_size, 8 by default, best candidates on val, ties at the edge kept). With it, early_stop_patience (0, off, by default) stops after that many epochs without a better best val score, and early_stop_at_full_val once the best val score is 1.0. The train_minibatch option (0, the whole train part, by default; it needs the validation gate) scores each epoch's candidates on that many train items sampled with the per-epoch seed, and the optimizer's evidence is that minibatch; val and test are not sampled. The allow_code_nodes option (on by default) lets an edit add a code node, an op or gate whose Python the optimizer writes, run sandboxed; off, or where the sandbox is unavailable, a new code node is refused (E-code-nodes). The new_step_tools option (on by default) lets a step an edit adds have tools, run sealed (only the files it reads, no network, no grader files); off, as an ablation, no tool step is offered and every new agent step with tools is refused (E-new-node-tools). Under single and pool the candidate the optimizer edits is re-scored on each epoch's train sample with that epoch's seed, unless it was scored this epoch, so its evidence is fresh; its id and scores stay. Every default-loop proposal is first run on two of its parent's train items (the smoke check): one that fails there with an error is refused (E-smoke) and goes to the repair call. One proposal may bundle up to 4 changes, applied in order as one candidate and judged once; a structural edit, the edits that connect it and the tuning of the steps that read its output count as one change, and no proposal carries more than 12 edits. The strategy_option option (KEY=VALUE, repeatable) adds to a profile's strategy_options, as knob adds to its knobs; a strategy option the strategy does not read, an unknown setting or a value of the wrong type is refused. The parent_picker option (empty by default) pairs a parent picker (archive, evolutionary, islands, hill_climb, map_elites) with the optimizer: the picker chooses the candidate each step edits and the optimizer writes the edits against it; under the validation gate a population picker selects by val score under the pool selection. The portfolio option (off by default; prompt+pipeline, with the autoresearch optimizer) asks the model proposer each round for one prompt/knob-level and one pipeline-level candidate and evaluates both; the report counts the evaluations beyond batch_size. The run_ledger, lessons and step_review options (on by default) show the model proposer every candidate of the run with what its edits did (its kind only a label) and train fixed/broken counts, the memory note a per-epoch memory pass writes (one optimizer-model call comparing the previous and current candidate on 20 train items, or the unchanged incumbent and the round's rejected change on the items it moved, SkillOpt's meta skill, shown to every analyst, merge and proposal call and kept across a resume), and a review of each step the last round added (one optimizer-model call per step); structure_guidance (off by default) adds what makes a new step pay off. The integrity_judge option (off by default) has one optimizer-model call per proposal ask whether its benefit depends on how the data, grader or environment happen to be built: on (or veto) refuses an exploit or suspect verdict about what the change adds before evaluation (E-integrity) in every category by default (never an inherited finding, a judge error or a salvaged reply), flag (or warn) only shows the verdicts; an object with mode, default and a per-category policy (off, warn, veto) sets categories one by one; a run's per-category setting comes first, then a Task's integrity_allowances (off), then the run's default, which overrides a Task's integrity_policy. The analysts option (off by default) runs SkillOpt's per-round analysis before each model proposal: failure and success analysts read the edited candidate's train items in full in batches of analyst_group_size (8), one optimizer-model call per batch, and merges of analyst_merge_batch_size (8) lists rank their findings into one list that replaces the readers' summaries; analyst_max_batches (0, no limit) caps the analyst calls per round, failure batches first.",
+  "reviewed_schema": "0d8ca2dd7060dc29dfdff12bbdfd1932e6020b6517cca105acfe16377e842c51"
 }
 ```
 
@@ -6029,7 +6053,7 @@ Documentation: [refactory/docs/models.md](../../../refactory/docs/models.md)
 
 ## cli:optimize
 
-Search a scored mode through the terminal with profile/project defaults and explicit overrides; resume retains the saved run identity. The command line takes a short list of flags: mode, profile and profile_version, project, runs_root, resume, verbose, seed, epochs, batch_size, max_evaluations, optimizer, preset, evaluator, strategy, strategy_option, knob, intent, seed_results, max_items_in_flight, provider, model and effort. Every other setting is set only in a saved profile (profile-save, then profile); its flag is refused, naming the profile key. Profile settings: omit_steering leaves graph controls and correction audits active while excluding the ledger from candidate model prompts. The validation gate (on whenever the parts manifest has val items, with no switch; without val items the run selects on train scores and warns) selects on val, the last epoch's proposals are scored, and with a test part the final candidate's val check and the seed, best and final candidates' test scores are run and reported. With it, selection says how val selects: checkpoint (the default for the default loop with a single-parent optimizer: each round's change is applied unless its graph is broken -- refused, vetoed, failing its smoke check or its train run -- and only the applied candidate is scored on val, once; train rollouts use one seed for the run; the winner is the best checkpoint on val), single (SkillOpt's line: per-epoch train seeds, every candidate scored on val, the incumbent changes only on a strictly higher val score and is the only parent and the winner) or pool (the default otherwise: parents come from the pool_size, 8 by default, best candidates on val, ties at the edge kept). With it, early_stop_patience (0, off, by default) stops after that many epochs without a better best val score, and early_stop_at_full_val once the best val score is 1.0. The train_minibatch option (0, the whole train part, by default; it needs the validation gate) scores each epoch's candidates on that many train items sampled with the per-epoch seed, and the optimizer's evidence is that minibatch; val and test are not sampled. The allow_code_nodes option (on by default) lets an edit add a code node, an op or gate whose Python the optimizer writes, run sandboxed; off, or where the sandbox is unavailable, a new code node is refused (E-code-nodes). Under single and pool the candidate the optimizer edits is re-scored on each epoch's train sample with that epoch's seed, unless it was scored this epoch, so its evidence is fresh; its id and scores stay. Every default-loop proposal is first run on two of its parent's train items (the smoke check): one that fails there with an error is refused (E-smoke) and goes to the repair call. One proposal may bundle up to 4 changes, applied in order as one candidate and judged once; a structural edit, the edits that connect it and the tuning of the steps that read its output count as one change, and no proposal carries more than 12 edits. The strategy_option option (KEY=VALUE, repeatable) adds to a profile's strategy_options, as knob adds to its knobs; a strategy option the strategy does not read, an unknown setting or a value of the wrong type is refused. The parent_picker option (empty by default) pairs a parent picker (archive, evolutionary, islands, hill_climb, map_elites) with the optimizer: the picker chooses the candidate each step edits and the optimizer writes the edits against it; under the validation gate a population picker selects by val score under the pool selection. The portfolio option (off by default; prompt+pipeline, with the autoresearch optimizer) asks the model proposer each round for one prompt/knob-level and one pipeline-level candidate and evaluates both; the report counts the evaluations beyond batch_size. The run_ledger, lessons and step_review options (on by default) show the model proposer every candidate of the run with what its edits did (its kind only a label) and train fixed/broken counts, the memory note a per-epoch memory pass writes (one optimizer-model call comparing the previous and current candidate on 20 train items, or the unchanged incumbent and the round's rejected change on the items it moved, SkillOpt's meta skill, shown to every analyst, merge and proposal call and kept across a resume), and a review of each step the last round added (one optimizer-model call per step); structure_guidance (off by default) adds what makes a new step pay off. The integrity_judge option (off by default) has one optimizer-model call per proposal ask whether its benefit depends on how the data, grader or environment happen to be built: on (or veto) refuses an exploit or suspect verdict about what the change adds before evaluation (E-integrity) in every category by default (never an inherited finding, a judge error or a salvaged reply), flag (or warn) only shows the verdicts; an object with mode, default and a per-category policy (off, warn, veto) sets categories one by one; a run's per-category setting comes first, then a Task's integrity_allowances (off), then the run's default, which overrides a Task's integrity_policy. The analysts option (off by default) runs SkillOpt's per-round analysis before each model proposal: failure and success analysts read the edited candidate's train items in full in batches of analyst_group_size (8), one optimizer-model call per batch, and merges of analyst_merge_batch_size (8) lists rank their findings into one list that replaces the readers' summaries; analyst_max_batches (0, no limit) caps the analyst calls per round, failure batches first.
+Search a scored mode through the terminal with profile/project defaults and explicit overrides; resume retains the saved run identity. The command line takes a short list of flags: mode, profile and profile_version, project, runs_root, resume, verbose, seed, epochs, batch_size, max_evaluations, optimizer, preset, evaluator, strategy, strategy_option, knob, intent, seed_results, max_items_in_flight, provider, model and effort. Every other setting is set only in a saved profile (profile-save, then profile); its flag is refused, naming the profile key. Profile settings: omit_steering leaves graph controls and correction audits active while excluding the ledger from candidate model prompts. The validation gate (on whenever the parts manifest has val items, with no switch; without val items the run selects on train scores and warns) selects on val, the last epoch's proposals are scored, and with a test part the final candidate's val check and the seed, best and final candidates' test scores are run and reported. With it, selection says how val selects: checkpoint (the default for the default loop with a single-parent optimizer: each round's change is applied unless its graph is broken -- refused, vetoed, failing its smoke check or its train run -- and only the applied candidate is scored on val, once; train rollouts use one seed for the run; the winner is the best checkpoint on val), single (SkillOpt's line: per-epoch train seeds, every candidate scored on val, the incumbent changes only on a strictly higher val score and is the only parent and the winner) or pool (the default otherwise: parents come from the pool_size, 8 by default, best candidates on val, ties at the edge kept). With it, early_stop_patience (0, off, by default) stops after that many epochs without a better best val score, and early_stop_at_full_val once the best val score is 1.0. The train_minibatch option (0, the whole train part, by default; it needs the validation gate) scores each epoch's candidates on that many train items sampled with the per-epoch seed, and the optimizer's evidence is that minibatch; val and test are not sampled. The allow_code_nodes option (on by default) lets an edit add a code node, an op or gate whose Python the optimizer writes, run sandboxed; off, or where the sandbox is unavailable, a new code node is refused (E-code-nodes). The new_step_tools option (on by default) lets a step an edit adds have tools, run sealed (only the files it reads, no network, no grader files); off, as an ablation, no tool step is offered and every new agent step with tools is refused (E-new-node-tools). Under single and pool the candidate the optimizer edits is re-scored on each epoch's train sample with that epoch's seed, unless it was scored this epoch, so its evidence is fresh; its id and scores stay. Every default-loop proposal is first run on two of its parent's train items (the smoke check): one that fails there with an error is refused (E-smoke) and goes to the repair call. One proposal may bundle up to 4 changes, applied in order as one candidate and judged once; a structural edit, the edits that connect it and the tuning of the steps that read its output count as one change, and no proposal carries more than 12 edits. The strategy_option option (KEY=VALUE, repeatable) adds to a profile's strategy_options, as knob adds to its knobs; a strategy option the strategy does not read, an unknown setting or a value of the wrong type is refused. The parent_picker option (empty by default) pairs a parent picker (archive, evolutionary, islands, hill_climb, map_elites) with the optimizer: the picker chooses the candidate each step edits and the optimizer writes the edits against it; under the validation gate a population picker selects by val score under the pool selection. The portfolio option (off by default; prompt+pipeline, with the autoresearch optimizer) asks the model proposer each round for one prompt/knob-level and one pipeline-level candidate and evaluates both; the report counts the evaluations beyond batch_size. The run_ledger, lessons and step_review options (on by default) show the model proposer every candidate of the run with what its edits did (its kind only a label) and train fixed/broken counts, the memory note a per-epoch memory pass writes (one optimizer-model call comparing the previous and current candidate on 20 train items, or the unchanged incumbent and the round's rejected change on the items it moved, SkillOpt's meta skill, shown to every analyst, merge and proposal call and kept across a resume), and a review of each step the last round added (one optimizer-model call per step); structure_guidance (off by default) adds what makes a new step pay off. The integrity_judge option (off by default) has one optimizer-model call per proposal ask whether its benefit depends on how the data, grader or environment happen to be built: on (or veto) refuses an exploit or suspect verdict about what the change adds before evaluation (E-integrity) in every category by default (never an inherited finding, a judge error or a salvaged reply), flag (or warn) only shows the verdicts; an object with mode, default and a per-category policy (off, warn, veto) sets categories one by one; a run's per-category setting comes first, then a Task's integrity_allowances (off), then the run's default, which overrides a Task's integrity_policy. The analysts option (off by default) runs SkillOpt's per-round analysis before each model proposal: failure and success analysts read the edited candidate's train items in full in batches of analyst_group_size (8), one optimizer-model call per batch, and merges of analyst_merge_batch_size (8) lists rank their findings into one list that replaces the readers' summaries; analyst_max_batches (0, no limit) caps the analyst calls per round, failure batches first.
 
 Documentation: [refactory/docs/optimization-profiles.md](../../../refactory/docs/optimization-profiles.md)
 
@@ -6070,6 +6094,7 @@ Documentation: [refactory/docs/optimization-profiles.md](../../../refactory/docs
     "max_steps": 2000,
     "max_tokens": null,
     "model": "",
+    "new_step_tools": true,
     "node_routes": {},
     "omit_steering": false,
     "optimizer": "autoresearch",
@@ -6374,8 +6399,8 @@ Documentation: [refactory/docs/optimization-profiles.md](../../../refactory/docs
       "type": "boolean"
     }
   },
-  "purpose": "Search a scored mode through the terminal with profile/project defaults and explicit overrides; resume retains the saved run identity. The command line takes a short list of flags: mode, profile and profile_version, project, runs_root, resume, verbose, seed, epochs, batch_size, max_evaluations, optimizer, preset, evaluator, strategy, strategy_option, knob, intent, seed_results, max_items_in_flight, provider, model and effort. Every other setting is set only in a saved profile (profile-save, then profile); its flag is refused, naming the profile key. Profile settings: omit_steering leaves graph controls and correction audits active while excluding the ledger from candidate model prompts. The validation gate (on whenever the parts manifest has val items, with no switch; without val items the run selects on train scores and warns) selects on val, the last epoch's proposals are scored, and with a test part the final candidate's val check and the seed, best and final candidates' test scores are run and reported. With it, selection says how val selects: checkpoint (the default for the default loop with a single-parent optimizer: each round's change is applied unless its graph is broken -- refused, vetoed, failing its smoke check or its train run -- and only the applied candidate is scored on val, once; train rollouts use one seed for the run; the winner is the best checkpoint on val), single (SkillOpt's line: per-epoch train seeds, every candidate scored on val, the incumbent changes only on a strictly higher val score and is the only parent and the winner) or pool (the default otherwise: parents come from the pool_size, 8 by default, best candidates on val, ties at the edge kept). With it, early_stop_patience (0, off, by default) stops after that many epochs without a better best val score, and early_stop_at_full_val once the best val score is 1.0. The train_minibatch option (0, the whole train part, by default; it needs the validation gate) scores each epoch's candidates on that many train items sampled with the per-epoch seed, and the optimizer's evidence is that minibatch; val and test are not sampled. The allow_code_nodes option (on by default) lets an edit add a code node, an op or gate whose Python the optimizer writes, run sandboxed; off, or where the sandbox is unavailable, a new code node is refused (E-code-nodes). Under single and pool the candidate the optimizer edits is re-scored on each epoch's train sample with that epoch's seed, unless it was scored this epoch, so its evidence is fresh; its id and scores stay. Every default-loop proposal is first run on two of its parent's train items (the smoke check): one that fails there with an error is refused (E-smoke) and goes to the repair call. One proposal may bundle up to 4 changes, applied in order as one candidate and judged once; a structural edit, the edits that connect it and the tuning of the steps that read its output count as one change, and no proposal carries more than 12 edits. The strategy_option option (KEY=VALUE, repeatable) adds to a profile's strategy_options, as knob adds to its knobs; a strategy option the strategy does not read, an unknown setting or a value of the wrong type is refused. The parent_picker option (empty by default) pairs a parent picker (archive, evolutionary, islands, hill_climb, map_elites) with the optimizer: the picker chooses the candidate each step edits and the optimizer writes the edits against it; under the validation gate a population picker selects by val score under the pool selection. The portfolio option (off by default; prompt+pipeline, with the autoresearch optimizer) asks the model proposer each round for one prompt/knob-level and one pipeline-level candidate and evaluates both; the report counts the evaluations beyond batch_size. The run_ledger, lessons and step_review options (on by default) show the model proposer every candidate of the run with what its edits did (its kind only a label) and train fixed/broken counts, the memory note a per-epoch memory pass writes (one optimizer-model call comparing the previous and current candidate on 20 train items, or the unchanged incumbent and the round's rejected change on the items it moved, SkillOpt's meta skill, shown to every analyst, merge and proposal call and kept across a resume), and a review of each step the last round added (one optimizer-model call per step); structure_guidance (off by default) adds what makes a new step pay off. The integrity_judge option (off by default) has one optimizer-model call per proposal ask whether its benefit depends on how the data, grader or environment happen to be built: on (or veto) refuses an exploit or suspect verdict about what the change adds before evaluation (E-integrity) in every category by default (never an inherited finding, a judge error or a salvaged reply), flag (or warn) only shows the verdicts; an object with mode, default and a per-category policy (off, warn, veto) sets categories one by one; a run's per-category setting comes first, then a Task's integrity_allowances (off), then the run's default, which overrides a Task's integrity_policy. The analysts option (off by default) runs SkillOpt's per-round analysis before each model proposal: failure and success analysts read the edited candidate's train items in full in batches of analyst_group_size (8), one optimizer-model call per batch, and merges of analyst_merge_batch_size (8) lists rank their findings into one list that replaces the readers' summaries; analyst_max_batches (0, no limit) caps the analyst calls per round, failure batches first.",
-  "reviewed_schema": "693377768c9b22a55eac18eb19c3cb9c63f73f86acb55cbe0fd968367b7764e8"
+  "purpose": "Search a scored mode through the terminal with profile/project defaults and explicit overrides; resume retains the saved run identity. The command line takes a short list of flags: mode, profile and profile_version, project, runs_root, resume, verbose, seed, epochs, batch_size, max_evaluations, optimizer, preset, evaluator, strategy, strategy_option, knob, intent, seed_results, max_items_in_flight, provider, model and effort. Every other setting is set only in a saved profile (profile-save, then profile); its flag is refused, naming the profile key. Profile settings: omit_steering leaves graph controls and correction audits active while excluding the ledger from candidate model prompts. The validation gate (on whenever the parts manifest has val items, with no switch; without val items the run selects on train scores and warns) selects on val, the last epoch's proposals are scored, and with a test part the final candidate's val check and the seed, best and final candidates' test scores are run and reported. With it, selection says how val selects: checkpoint (the default for the default loop with a single-parent optimizer: each round's change is applied unless its graph is broken -- refused, vetoed, failing its smoke check or its train run -- and only the applied candidate is scored on val, once; train rollouts use one seed for the run; the winner is the best checkpoint on val), single (SkillOpt's line: per-epoch train seeds, every candidate scored on val, the incumbent changes only on a strictly higher val score and is the only parent and the winner) or pool (the default otherwise: parents come from the pool_size, 8 by default, best candidates on val, ties at the edge kept). With it, early_stop_patience (0, off, by default) stops after that many epochs without a better best val score, and early_stop_at_full_val once the best val score is 1.0. The train_minibatch option (0, the whole train part, by default; it needs the validation gate) scores each epoch's candidates on that many train items sampled with the per-epoch seed, and the optimizer's evidence is that minibatch; val and test are not sampled. The allow_code_nodes option (on by default) lets an edit add a code node, an op or gate whose Python the optimizer writes, run sandboxed; off, or where the sandbox is unavailable, a new code node is refused (E-code-nodes). The new_step_tools option (on by default) lets a step an edit adds have tools, run sealed (only the files it reads, no network, no grader files); off, as an ablation, no tool step is offered and every new agent step with tools is refused (E-new-node-tools). Under single and pool the candidate the optimizer edits is re-scored on each epoch's train sample with that epoch's seed, unless it was scored this epoch, so its evidence is fresh; its id and scores stay. Every default-loop proposal is first run on two of its parent's train items (the smoke check): one that fails there with an error is refused (E-smoke) and goes to the repair call. One proposal may bundle up to 4 changes, applied in order as one candidate and judged once; a structural edit, the edits that connect it and the tuning of the steps that read its output count as one change, and no proposal carries more than 12 edits. The strategy_option option (KEY=VALUE, repeatable) adds to a profile's strategy_options, as knob adds to its knobs; a strategy option the strategy does not read, an unknown setting or a value of the wrong type is refused. The parent_picker option (empty by default) pairs a parent picker (archive, evolutionary, islands, hill_climb, map_elites) with the optimizer: the picker chooses the candidate each step edits and the optimizer writes the edits against it; under the validation gate a population picker selects by val score under the pool selection. The portfolio option (off by default; prompt+pipeline, with the autoresearch optimizer) asks the model proposer each round for one prompt/knob-level and one pipeline-level candidate and evaluates both; the report counts the evaluations beyond batch_size. The run_ledger, lessons and step_review options (on by default) show the model proposer every candidate of the run with what its edits did (its kind only a label) and train fixed/broken counts, the memory note a per-epoch memory pass writes (one optimizer-model call comparing the previous and current candidate on 20 train items, or the unchanged incumbent and the round's rejected change on the items it moved, SkillOpt's meta skill, shown to every analyst, merge and proposal call and kept across a resume), and a review of each step the last round added (one optimizer-model call per step); structure_guidance (off by default) adds what makes a new step pay off. The integrity_judge option (off by default) has one optimizer-model call per proposal ask whether its benefit depends on how the data, grader or environment happen to be built: on (or veto) refuses an exploit or suspect verdict about what the change adds before evaluation (E-integrity) in every category by default (never an inherited finding, a judge error or a salvaged reply), flag (or warn) only shows the verdicts; an object with mode, default and a per-category policy (off, warn, veto) sets categories one by one; a run's per-category setting comes first, then a Task's integrity_allowances (off), then the run's default, which overrides a Task's integrity_policy. The analysts option (off by default) runs SkillOpt's per-round analysis before each model proposal: failure and success analysts read the edited candidate's train items in full in batches of analyst_group_size (8), one optimizer-model call per batch, and merges of analyst_merge_batch_size (8) lists rank their findings into one list that replaces the readers' summaries; analyst_max_batches (0, no limit) caps the analyst calls per round, failure batches first.",
+  "reviewed_schema": "d03bd8e623195c33984d5ac6b816bd405d2cd1015a839aad01f92f2aa9f446e2"
 }
 ```
 
@@ -9514,7 +9539,7 @@ Build a software artifact from a brief, name and acceptance command, as commits 
       "id": "rerun_probes",
       "kind": "op",
       "knobs": [],
-      "notes": "rerun each probe file the verifier wrote on the attempt in a scratch clone (120 s each, 600 s in all); a failing probe is a blocking defect, a PROBED claim without a probe file of its own is unverified",
+      "notes": "rerun each probe file the verifier wrote on the attempt in a scratch clone (120 s each, 600 s total, shared with the base rerun); the same probes run on the base in parallel for discrimination (wall-clock seconds in probe-results.json); a failing probe is a blocking defect, a PROBED claim without a probe file of its own is unverified, a requirement no probe tells apart from the base is advisory",
       "role": "ceo"
     },
     {
@@ -10208,7 +10233,7 @@ Build a software artifact from a brief, name and acceptance command, as commits 
       "panel": "Mode picker; Run once executes enabled modes including authoring; Optimize requires a scored mode. Use chat for stepwise gates."
     },
     "purpose": "Build a software artifact from a brief, name and acceptance command, as commits on the run's own branch in a git worktree: of the repository `target` names, or of a new project when it names none. Research, strategy and the design go straight to the approval gate, with no design reviewer: the design is written once to a light template (Summary, Changes, Tests), a claims check lists what it cannot confirm, and only a design with no ## Changes goes back for a rewrite (`design_review_attempts`, default 1); everything else is shown on the approval card. Before research, a bounded change sizer (`size_change`, 600 s, read only) reads the code the change touches, and the research footprint rule turns its verdict into the research scope, full unless the code proves it small; a lean research whose footprint reaches further is widened once at full scope, and both scales are on the approval card. A scoped change (a refine, or one whose research footprint is small) skips the perspectives step, and a refine skips the sizer, research and pitfalls too: its design starts from the pull request's description and diff. The builder works in a prepared clone of the last attempt (installs, setup and generate done), where it changes the code and runs the tests its change touches and the brief's own example (the full check runs beside the reviews in fork_qa); the clone's diff becomes the attempt. Every attempt \u2014 first or fix-up \u2014 runs only the tests the change touches in the self-check. The full check runs beside the three reviews, the verifier and the early asks judge in fork_qa. gate_check composes one send-back from check failures and early-asks findings without spending an attempt (`self_check_fixups` times an attempt; past that, failures stop the attempt and not-built items alone go on to the reviews, listed for the QA judge and Overwatch), a fix-up's self-check runs the last failures and what the fix-up changed within `self_check_timeout_s`, and a failure the base shares is inherited unless the brief or a correction names it. The command runs in that worktree beside the separate QA reviews (on the commit both see, running the full check beside them) and stays binding; a QA judge then reads the reviews and decides whether the build goes on or back, and Overwatch judges acceptance with an audit of the person's gate corrections as evidence (a correction given after the approval is applied to the design before the builder's next round, because every send-back to the builder goes through the corrections step, and Overwatch does not pass the change while one is unapplied); final current validation evidence is required. Only an ask, a correction, a failed health check or a critical or high defect sends the build back, and a correction Overwatch finds unmet always does; other findings are listed on the pull request as follow-ups. A judge whose verdict cannot be read is asked again once (`judge_rereads`), with no builder round. Once they pass, the branch is delivered as a pull request (into the branch its base came from, or the default branch), which the approval gate's question names first (`pr=0` keeps it local, with its pull request text in pull-request.md and finishing commands in delivery.json; `refine` updates an open one, rewriting only the sections delivery wrote in its description). When a limit stops the build (the check's, the reviews', all attempts', or refused emissions') at an applied commit with current check evidence, that commit is delivered as a draft pull request listing what is unresolved, marked [check failing] when its check fails. Before sizing, a code knowledge graph of the worktree is built in the background (on by default; `code_graph=0`, --no-graph, REFACTORY_CODE_GRAPH=0 or the \"code_graph\" object in refactory.workers.json turn it off) (graphify, outside the checkout; `code_graph_timeout_s` and `code_graph_max_files` bound the build), and before sizing a code explorer (`explore_code`, 600 s, read only) waits up to `code_graph_wait_s` for it, maps the code the brief names with `refactory graph query|explain|path` (or, without a graph, from the files) into graph-context.md, headed by which it was made from; the sizer (told to confirm it in the code), research, strategy, design and the builder read it, and may query the graph for more; design.json counts the queries per node.",
-    "reviewed_schema": "8288b453e75aabe8e3e8666f6d17f96407af841350870a4b2a81d9e4af500aae"
+    "reviewed_schema": "0d0b0663b5349d230a8140476bcb6513dfcd419064d4769ebcef146d27570901"
   }
 }
 ```
@@ -14112,6 +14137,180 @@ draft, check, and let a person approve before publishing. Inspect declared ports
 }
 ```
 
+## spreadsheetbench/agent
+
+solve a SpreadsheetBench item as SkillOpt's Claude Code agent harness does (claude_code_exec, mode single): one sealed Claude Code session with Read and Bash, given SkillOpt's prompt byte for byte, works in a workspace holding the input, the skill as .agents/skills/skillopt-target/SKILL.md, task.md and run_solution.py, its commands seeing only that workspace and the pinned interpreter as python, and writes solution.py; that code (else the reply's first fenced block) is run against a copy of the input in the code sandbox and graded by SkillOpt's cell comparison (SB_GRADER=recalc by default). No gold feedback reaches the agent, as in SkillOpt's single path. The session ends on inactivity with no wall (SkillOpt: 600 s per item). Needs the claude_code worker in skip (bypassPermissions) mode; the thinking budget (16384) is a frozen knob. The skill is the only unfrozen knob; the graph around it is editable too. Requires SB_DATA. Optimize only when scored; higher is better.
+
+```json
+{
+  "description": "solve a SpreadsheetBench item as SkillOpt's Claude Code agent harness: one sealed Claude Code session with Read and Bash writes solution.py",
+  "edges": [
+    {
+      "condition": "skip",
+      "source": "has_case",
+      "target": "finalize"
+    },
+    {
+      "condition": "proceed",
+      "source": "has_case",
+      "target": "solve"
+    },
+    {
+      "condition": null,
+      "source": "prepare",
+      "target": "has_case"
+    },
+    {
+      "condition": null,
+      "source": "solve",
+      "target": "finalize"
+    }
+  ],
+  "gates": [
+    {
+      "id": "has_case",
+      "user": false
+    }
+  ],
+  "guidance": "The skill is written to the agent's SKILL.md, which it reads before writing solution.py for every item; the graph can be edited too -- the steps before and around the solve step (only data and finalize are protected). Keep every change general -- it must help on items no rollout saw.",
+  "id": "spreadsheetbench/agent",
+  "nodes": [
+    {
+      "call": "",
+      "id": "data",
+      "kind": "data",
+      "knobs": [
+        "data_parallelism"
+      ],
+      "notes": "",
+      "role": "ceo"
+    },
+    {
+      "call": "refactory_packages.spreadsheetbench.agent_ops:finalize",
+      "id": "finalize",
+      "kind": "op",
+      "knobs": [],
+      "notes": "run the solution and record the item's outcome before grading",
+      "role": "ceo"
+    },
+    {
+      "call": "refactory_packages.spreadsheetbench.ops:has_case",
+      "gate_kind": "fn",
+      "id": "has_case",
+      "kind": "gate",
+      "knobs": [],
+      "notes": "an item with no test case skips the call",
+      "role": "ceo"
+    },
+    {
+      "call": "refactory_packages.spreadsheetbench.agent_ops:prepare",
+      "id": "prepare",
+      "kind": "op",
+      "knobs": [
+        "skill"
+      ],
+      "notes": "record the item's start and write SkillOpt's workspace files",
+      "role": "ceo"
+    },
+    {
+      "call": "",
+      "id": "solve",
+      "kind": "agent",
+      "knobs": [
+        "solve__prompt_template",
+        "solve__system_prompt",
+        "max_thinking_tokens"
+      ],
+      "notes": "one sealed Claude Code session (Read, Bash) writes solution.py",
+      "role": "solver"
+    }
+  ],
+  "parameters": {
+    "data_parallelism": {
+      "default": 24,
+      "description": "concurrent items (SkillOpt's workers)",
+      "frozen": true,
+      "kind": "int",
+      "range": [
+        1,
+        64
+      ],
+      "value": 24,
+      "values": []
+    },
+    "max_thinking_tokens": {
+      "default": 16384,
+      "description": "the solve call's thinking budget (SkillOpt's --max-thinking-tokens)",
+      "frozen": true,
+      "kind": "int",
+      "range": [
+        1,
+        null
+      ],
+      "value": 16384,
+      "values": []
+    },
+    "skill": {
+      "default": "# Spreadsheet Manipulation Skill (xlsx)\n\n## Overview\nThis skill guides agents in manipulating Excel (.xlsx) spreadsheets using Python.\n\n**Primary libraries**: `openpyxl` (structure-preserving read/write), `pandas` (data transformation).\nNever use any other third-party libraries.\n\n---\n\n## Common Workflow\n\n1. **Explore** the input file: list sheets, inspect headers, check dimensions.\n2. **Write `solution.py`** with `INPUT_PATH` and `OUTPUT_PATH` defined at the top.\n3. **Execute** `python solution.py` and verify the output file was created.\n4. **Confirm** the target cells/range contain the expected values.\n\n---\n\n## Library Selection\n\n| Use case | Library |\n|----------|---------|\n| Preserve formulas, formatting, named ranges | `openpyxl` |\n| Bulk data transformation, aggregation, sorting | `pandas` \u2192 write back with `openpyxl` |\n| Simple cell read/write | `openpyxl` |\n\n**Warning**: `pandas.to_excel()` silently destroys existing formulas and named ranges.\nWhen writing back to a spreadsheet that contains formulas, always use `openpyxl.save()`.\n\n---\n\n## solution.py Template\n\n```python\nimport openpyxl\nimport pandas as pd\n\nINPUT_PATH  = \"...\"   # set to the actual input path\nOUTPUT_PATH = \"...\"   # set to the actual output path\n\nwb = openpyxl.load_workbook(INPUT_PATH)\nws = wb.active  # or wb[\"SheetName\"]\n\n# --- perform manipulation ---\n\nwb.save(OUTPUT_PATH)\n```\n\n---\n\n## Output Requirements\n\n- Save the result to `OUTPUT_PATH`.\n- Do not hardcode row counts or column letters \u2014 iterate over actual rows in the workbook.\n- Preserve sheets and cells not mentioned in the instruction.\n",
+      "description": "the skill, written to the agent's SKILL.md",
+      "frozen": false,
+      "kind": "str",
+      "range": [
+        null,
+        null
+      ],
+      "value": "# Spreadsheet Manipulation Skill (xlsx)\n\n## Overview\nThis skill guides agents in manipulating Excel (.xlsx) spreadsheets using Python.\n\n**Primary libraries**: `openpyxl` (structure-preserving read/write), `pandas` (data transformation).\nNever use any other third-party libraries.\n\n---\n\n## Common Workflow\n\n1. **Explore** the input file: list sheets, inspect headers, check dimensions.\n2. **Write `solution.py`** with `INPUT_PATH` and `OUTPUT_PATH` defined at the top.\n3. **Execute** `python solution.py` and verify the output file was created.\n4. **Confirm** the target cells/range contain the expected values.\n\n---\n\n## Library Selection\n\n| Use case | Library |\n|----------|---------|\n| Preserve formulas, formatting, named ranges | `openpyxl` |\n| Bulk data transformation, aggregation, sorting | `pandas` \u2192 write back with `openpyxl` |\n| Simple cell read/write | `openpyxl` |\n\n**Warning**: `pandas.to_excel()` silently destroys existing formulas and named ranges.\nWhen writing back to a spreadsheet that contains formulas, always use `openpyxl.save()`.\n\n---\n\n## solution.py Template\n\n```python\nimport openpyxl\nimport pandas as pd\n\nINPUT_PATH  = \"...\"   # set to the actual input path\nOUTPUT_PATH = \"...\"   # set to the actual output path\n\nwb = openpyxl.load_workbook(INPUT_PATH)\nws = wb.active  # or wb[\"SheetName\"]\n\n# --- perform manipulation ---\n\nwb.save(OUTPUT_PATH)\n```\n\n---\n\n## Output Requirements\n\n- Save the result to `OUTPUT_PATH`.\n- Do not hardcode row counts or column letters \u2014 iterate over actual rows in the workbook.\n- Preserve sheets and cells not mentioned in the instruction.\n",
+      "values": []
+    },
+    "solve__prompt_template": {
+      "default": "Use the workspace files to solve the task. Read task.md and the skill at .agents/skills/skillopt-target/SKILL.md before answering. If ATTACHMENTS.md exists, read it and inspect the listed local files. Do not call a Skill tool; the ReflACT guidance is a local markdown file. Do not ask for permission. You may modify files in the workspace when the task asks you to create an artifact. Return only the final answer text, keeping any required <answer>...</answer> tags exactly.\n\nRead `.agents/skills/skillopt-target/SKILL.md` directly; do not call a Skill tool.\nRead `task.md`, inspect `input.xlsx` if useful, and write the final solution to `solution.py`.\nYou may run `python run_solution.py` to validate the script locally.\nIn your final response, briefly confirm whether `solution.py` was written and summarize the approach.",
+      "description": "the solve call's prompt (frozen; use the skill knob)",
+      "frozen": true,
+      "kind": "str",
+      "range": [
+        null,
+        null
+      ],
+      "value": "Use the workspace files to solve the task. Read task.md and the skill at .agents/skills/skillopt-target/SKILL.md before answering. If ATTACHMENTS.md exists, read it and inspect the listed local files. Do not call a Skill tool; the ReflACT guidance is a local markdown file. Do not ask for permission. You may modify files in the workspace when the task asks you to create an artifact. Return only the final answer text, keeping any required <answer>...</answer> tags exactly.\n\nRead `.agents/skills/skillopt-target/SKILL.md` directly; do not call a Skill tool.\nRead `task.md`, inspect `input.xlsx` if useful, and write the final solution to `solution.py`.\nYou may run `python run_solution.py` to validate the script locally.\nIn your final response, briefly confirm whether `solution.py` was written and summarize the approach.",
+      "values": []
+    },
+    "solve__system_prompt": {
+      "default": "",
+      "description": "text appended to Claude Code's system prompt for the solve call: none, as SkillOpt's CLI (frozen; use the skill knob)",
+      "frozen": true,
+      "kind": "str",
+      "range": [
+        null,
+        null
+      ],
+      "value": "",
+      "values": []
+    }
+  },
+  "ports": [],
+  "scored": true,
+  "usage": {
+    "doc": "refactory/docs/spreadsheetbench.md",
+    "examples": [
+      {
+        "explanation": "Solve SpreadsheetBench Verified 400 items as SkillOpt's Claude Code agent harness does: one Claude Code session per item, with Read and Bash, in a sealed workspace holding input.xlsx, the skill as SKILL.md, task.md and run_solution.py, writes solution.py, which is run and graded. Route it to the claude_code worker in skip (bypassPermissions) mode, claude-opus-4-6 at effort medium. Set SB_DATA to the extracted spreadsheetbench_verified_400 directory; build the pinned interpreter once with python -m refactory_packages.spreadsheetbench.interpreter.",
+        "knobs": {
+          "data_parallelism": 24,
+          "max_thinking_tokens": 16384
+        }
+      }
+    ],
+    "interfaces": {
+      "chat": "wf_open mode=spreadsheetbench/agent; use refactory help topic=spreadsheetbench/agent first",
+      "cli": "refactory ceo spreadsheetbench/agent",
+      "panel": "Mode picker; Run once executes enabled modes including authoring; Optimize requires a scored mode. Use chat for stepwise gates."
+    },
+    "purpose": "solve a SpreadsheetBench item as SkillOpt's Claude Code agent harness does (claude_code_exec, mode single): one sealed Claude Code session with Read and Bash, given SkillOpt's prompt byte for byte, works in a workspace holding the input, the skill as .agents/skills/skillopt-target/SKILL.md, task.md and run_solution.py, its commands seeing only that workspace and the pinned interpreter as python, and writes solution.py; that code (else the reply's first fenced block) is run against a copy of the input in the code sandbox and graded by SkillOpt's cell comparison (SB_GRADER=recalc by default). No gold feedback reaches the agent, as in SkillOpt's single path. The session ends on inactivity with no wall (SkillOpt: 600 s per item). Needs the claude_code worker in skip (bypassPermissions) mode; the thinking budget (16384) is a frozen knob. The skill is the only unfrozen knob; the graph around it is editable too. Requires SB_DATA. Optimize only when scored; higher is better.",
+    "reviewed_schema": "bbe8e9a0aef2f04d174b651aeba8e1e5610018929d7734d6879f044e88074217"
+  }
+}
+```
+
 ## spreadsheetbench/solver
 
 solve a SpreadsheetBench item as SkillOpt's SpreadsheetBench target agent does (multi mode): each turn one claude -p call whose prompt is the whole conversation in a History: block, its first fenced block run against a copy of the input by a pinned interpreter in a sandbox that cannot see the answer, an execution error as the next message, up to 30 turns, each call ending on inactivity with no wall (SkillOpt: 600 s per item), an item past the harness backstop (REFACTORY_MODEL_BACKSTOP_S) a harness incident; graded by SkillOpt's cell comparison, with a LibreOffice-recalculated copy when the answer cells hold formulas (SB_GRADER=recalc, default; cached is SkillOpt's alone; a failed recalculation is a harness incident). On a train evaluation that asks for gold feedback (the SkillOpt strategy's train rollout, and the default loop's own train evaluations) a wrong clean run is told which cells are wrong and gets another turn, its train score staying its first attempt's. The skill is the only unfrozen knob; the graph around it is editable too. Requires SB_DATA. Optimize only when scored; higher is better.
@@ -14374,6 +14573,382 @@ solve a SpreadsheetBench item as SkillOpt's SpreadsheetBench target agent does (
     },
     "purpose": "solve a SpreadsheetBench item as SkillOpt's SpreadsheetBench target agent does (multi mode): each turn one claude -p call whose prompt is the whole conversation in a History: block, its first fenced block run against a copy of the input by a pinned interpreter in a sandbox that cannot see the answer, an execution error as the next message, up to 30 turns, each call ending on inactivity with no wall (SkillOpt: 600 s per item), an item past the harness backstop (REFACTORY_MODEL_BACKSTOP_S) a harness incident; graded by SkillOpt's cell comparison, with a LibreOffice-recalculated copy when the answer cells hold formulas (SB_GRADER=recalc, default; cached is SkillOpt's alone; a failed recalculation is a harness incident). On a train evaluation that asks for gold feedback (the SkillOpt strategy's train rollout, and the default loop's own train evaluations) a wrong clean run is told which cells are wrong and gets another turn, its train score staying its first attempt's. The skill is the only unfrozen knob; the graph around it is editable too. Requires SB_DATA. Optimize only when scored; higher is better.",
     "reviewed_schema": "1c86b068e599311e8cae50fde837f9f23bfef14e25026760a1de47abe7c9803e"
+  }
+}
+```
+
+## spreadsheetbench_v2/agent
+
+solve a SpreadsheetBench 2 task with SkillOpt's Claude Code agent harness (the graph of spreadsheetbench/agent): one sealed Claude Code session with Read and Bash, given SkillOpt's prompt and a task.md holding V2's instruction, input file and output path, writes solution.py, which is run on a copy of the input in the code sandbox; the output is recalculated by LibreOffice as V2's open_spreadsheet.py does and graded by V2's evaluation.py (1% tolerance, 99.8% of unchanged cells). Items are the 277 file-graded tasks of the prepared release, split by workbook/project (66 train, 38 val, 173 test). No gold feedback; no wall-clock or turn cap. Needs the claude_code worker in skip (bypassPermissions) mode, SB2_DATA (a prepared directory) and LibreOffice. The skill is the only unfrozen knob; the graph around it is editable too. Optimize only when scored; higher is better.
+
+```json
+{
+  "description": "solve a SpreadsheetBench 2 task with SkillOpt's Claude Code agent harness: one sealed Claude Code session with Read and Bash writes solution.py",
+  "edges": [
+    {
+      "condition": "skip",
+      "source": "has_case",
+      "target": "finalize"
+    },
+    {
+      "condition": "proceed",
+      "source": "has_case",
+      "target": "solve"
+    },
+    {
+      "condition": null,
+      "source": "prepare",
+      "target": "has_case"
+    },
+    {
+      "condition": null,
+      "source": "solve",
+      "target": "finalize"
+    }
+  ],
+  "gates": [
+    {
+      "id": "has_case",
+      "user": false
+    }
+  ],
+  "guidance": "The skill is written to the agent's SKILL.md, which it reads before writing solution.py for every item; the graph can be edited too -- the steps before and around the solve step (only data and finalize are protected). Keep every change general -- it must help on items no rollout saw.",
+  "id": "spreadsheetbench_v2/agent",
+  "nodes": [
+    {
+      "call": "",
+      "id": "data",
+      "kind": "data",
+      "knobs": [
+        "data_parallelism"
+      ],
+      "notes": "",
+      "role": "ceo"
+    },
+    {
+      "call": "refactory_packages.spreadsheetbench_v2.agent_ops:finalize",
+      "id": "finalize",
+      "kind": "op",
+      "knobs": [],
+      "notes": "run the solution and record the item's outcome before grading",
+      "role": "ceo"
+    },
+    {
+      "call": "refactory_packages.spreadsheetbench.ops:has_case",
+      "gate_kind": "fn",
+      "id": "has_case",
+      "kind": "gate",
+      "knobs": [],
+      "notes": "an item with no test case skips the call",
+      "role": "ceo"
+    },
+    {
+      "call": "refactory_packages.spreadsheetbench_v2.agent_ops:prepare",
+      "id": "prepare",
+      "kind": "op",
+      "knobs": [
+        "skill"
+      ],
+      "notes": "record the item's start and write SkillOpt's workspace files",
+      "role": "ceo"
+    },
+    {
+      "call": "",
+      "id": "solve",
+      "kind": "agent",
+      "knobs": [
+        "solve__prompt_template",
+        "solve__system_prompt",
+        "max_thinking_tokens"
+      ],
+      "notes": "one sealed Claude Code session (Read, Bash) writes solution.py",
+      "role": "solver"
+    }
+  ],
+  "parameters": {
+    "data_parallelism": {
+      "default": 8,
+      "description": "concurrent items",
+      "frozen": true,
+      "kind": "int",
+      "range": [
+        1,
+        64
+      ],
+      "value": 8,
+      "values": []
+    },
+    "max_thinking_tokens": {
+      "default": 16384,
+      "description": "the solve call's thinking budget (SkillOpt's --max-thinking-tokens)",
+      "frozen": true,
+      "kind": "int",
+      "range": [
+        1,
+        null
+      ],
+      "value": 16384,
+      "values": []
+    },
+    "skill": {
+      "default": "# Spreadsheet Manipulation Skill (xlsx)\n\n## Overview\nThis skill guides agents in manipulating Excel (.xlsx) spreadsheets using Python.\n\n**Primary libraries**: `openpyxl` (structure-preserving read/write), `pandas` (data transformation).\nNever use any other third-party libraries.\n\n---\n\n## Common Workflow\n\n1. **Explore** the input file: list sheets, inspect headers, check dimensions.\n2. **Write `solution.py`** with `INPUT_PATH` and `OUTPUT_PATH` defined at the top.\n3. **Execute** `python solution.py` and verify the output file was created.\n4. **Confirm** the target cells/range contain the expected values.\n\n---\n\n## Library Selection\n\n| Use case | Library |\n|----------|---------|\n| Preserve formulas, formatting, named ranges | `openpyxl` |\n| Bulk data transformation, aggregation, sorting | `pandas` \u2192 write back with `openpyxl` |\n| Simple cell read/write | `openpyxl` |\n\n**Warning**: `pandas.to_excel()` silently destroys existing formulas and named ranges.\nWhen writing back to a spreadsheet that contains formulas, always use `openpyxl.save()`.\n\n---\n\n## solution.py Template\n\n```python\nimport openpyxl\nimport pandas as pd\n\nINPUT_PATH  = \"...\"   # set to the actual input path\nOUTPUT_PATH = \"...\"   # set to the actual output path\n\nwb = openpyxl.load_workbook(INPUT_PATH)\nws = wb.active  # or wb[\"SheetName\"]\n\n# --- perform manipulation ---\n\nwb.save(OUTPUT_PATH)\n```\n\n---\n\n## Output Requirements\n\n- Save the result to `OUTPUT_PATH`.\n- Do not hardcode row counts or column letters \u2014 iterate over actual rows in the workbook.\n- Preserve sheets and cells not mentioned in the instruction.\n",
+      "description": "the skill, written to the agent's SKILL.md",
+      "frozen": false,
+      "kind": "str",
+      "range": [
+        null,
+        null
+      ],
+      "value": "# Spreadsheet Manipulation Skill (xlsx)\n\n## Overview\nThis skill guides agents in manipulating Excel (.xlsx) spreadsheets using Python.\n\n**Primary libraries**: `openpyxl` (structure-preserving read/write), `pandas` (data transformation).\nNever use any other third-party libraries.\n\n---\n\n## Common Workflow\n\n1. **Explore** the input file: list sheets, inspect headers, check dimensions.\n2. **Write `solution.py`** with `INPUT_PATH` and `OUTPUT_PATH` defined at the top.\n3. **Execute** `python solution.py` and verify the output file was created.\n4. **Confirm** the target cells/range contain the expected values.\n\n---\n\n## Library Selection\n\n| Use case | Library |\n|----------|---------|\n| Preserve formulas, formatting, named ranges | `openpyxl` |\n| Bulk data transformation, aggregation, sorting | `pandas` \u2192 write back with `openpyxl` |\n| Simple cell read/write | `openpyxl` |\n\n**Warning**: `pandas.to_excel()` silently destroys existing formulas and named ranges.\nWhen writing back to a spreadsheet that contains formulas, always use `openpyxl.save()`.\n\n---\n\n## solution.py Template\n\n```python\nimport openpyxl\nimport pandas as pd\n\nINPUT_PATH  = \"...\"   # set to the actual input path\nOUTPUT_PATH = \"...\"   # set to the actual output path\n\nwb = openpyxl.load_workbook(INPUT_PATH)\nws = wb.active  # or wb[\"SheetName\"]\n\n# --- perform manipulation ---\n\nwb.save(OUTPUT_PATH)\n```\n\n---\n\n## Output Requirements\n\n- Save the result to `OUTPUT_PATH`.\n- Do not hardcode row counts or column letters \u2014 iterate over actual rows in the workbook.\n- Preserve sheets and cells not mentioned in the instruction.\n",
+      "values": []
+    },
+    "solve__prompt_template": {
+      "default": "Use the workspace files to solve the task. Read task.md and the skill at .agents/skills/skillopt-target/SKILL.md before answering. If ATTACHMENTS.md exists, read it and inspect the listed local files. Do not call a Skill tool; the ReflACT guidance is a local markdown file. Do not ask for permission. You may modify files in the workspace when the task asks you to create an artifact. Return only the final answer text, keeping any required <answer>...</answer> tags exactly.\n\nRead `.agents/skills/skillopt-target/SKILL.md` directly; do not call a Skill tool.\nRead `task.md`, inspect `input.xlsx` if useful, and write the final solution to `solution.py`.\nYou may run `python run_solution.py` to validate the script locally.\nIn your final response, briefly confirm whether `solution.py` was written and summarize the approach.",
+      "description": "the solve call's prompt (frozen; use the skill knob)",
+      "frozen": true,
+      "kind": "str",
+      "range": [
+        null,
+        null
+      ],
+      "value": "Use the workspace files to solve the task. Read task.md and the skill at .agents/skills/skillopt-target/SKILL.md before answering. If ATTACHMENTS.md exists, read it and inspect the listed local files. Do not call a Skill tool; the ReflACT guidance is a local markdown file. Do not ask for permission. You may modify files in the workspace when the task asks you to create an artifact. Return only the final answer text, keeping any required <answer>...</answer> tags exactly.\n\nRead `.agents/skills/skillopt-target/SKILL.md` directly; do not call a Skill tool.\nRead `task.md`, inspect `input.xlsx` if useful, and write the final solution to `solution.py`.\nYou may run `python run_solution.py` to validate the script locally.\nIn your final response, briefly confirm whether `solution.py` was written and summarize the approach.",
+      "values": []
+    },
+    "solve__system_prompt": {
+      "default": "",
+      "description": "text appended to Claude Code's system prompt for the solve call: none, as SkillOpt's CLI (frozen; use the skill knob)",
+      "frozen": true,
+      "kind": "str",
+      "range": [
+        null,
+        null
+      ],
+      "value": "",
+      "values": []
+    }
+  },
+  "ports": [],
+  "scored": true,
+  "usage": {
+    "doc": "refactory/docs/spreadsheetbench.md",
+    "examples": [
+      {
+        "explanation": "Solve SpreadsheetBench 2 tasks (277 file-graded Debugging, Financial_Model and Template tasks, split by workbook) with SkillOpt's Claude Code agent harness: one sealed Claude Code session per item with Read and Bash writes solution.py, which is run and graded by V2's pipeline (LibreOffice recalculation, then V2's evaluation.py). Route it to the claude_code worker in skip (bypassPermissions) mode, claude-opus-4-6 at effort medium. Prepare the release once with python -m refactory_packages.spreadsheetbench_v2.prepare prepare SOURCE OUT then python -m refactory_packages.spreadsheetbench_v2.prepare check --grades OUT (required), and set SB2_DATA to OUT; LibreOffice must be installed (or named by SB_SOFFICE).",
+        "knobs": {
+          "data_parallelism": 8,
+          "max_thinking_tokens": 16384
+        }
+      }
+    ],
+    "interfaces": {
+      "chat": "wf_open mode=spreadsheetbench_v2/agent; use refactory help topic=spreadsheetbench_v2/agent first",
+      "cli": "refactory ceo spreadsheetbench_v2/agent",
+      "panel": "Mode picker; Run once executes enabled modes including authoring; Optimize requires a scored mode. Use chat for stepwise gates."
+    },
+    "purpose": "solve a SpreadsheetBench 2 task with SkillOpt's Claude Code agent harness (the graph of spreadsheetbench/agent): one sealed Claude Code session with Read and Bash, given SkillOpt's prompt and a task.md holding V2's instruction, input file and output path, writes solution.py, which is run on a copy of the input in the code sandbox; the output is recalculated by LibreOffice as V2's open_spreadsheet.py does and graded by V2's evaluation.py (1% tolerance, 99.8% of unchanged cells). Items are the 277 file-graded tasks of the prepared release, split by workbook/project (66 train, 38 val, 173 test). No gold feedback; no wall-clock or turn cap. Needs the claude_code worker in skip (bypassPermissions) mode, SB2_DATA (a prepared directory) and LibreOffice. The skill is the only unfrozen knob; the graph around it is editable too. Optimize only when scored; higher is better.",
+    "reviewed_schema": "5ebf8a40be0067bbf492cf4e297d08d426124e6b498dd016c56912e0bcfb819c"
+  }
+}
+```
+
+## spreadsheetbench_v2/swe
+
+solve a SpreadsheetBench 2 task with V2's own agent setup (SWE-agent/config/spreadsheet.yaml ported to one sealed Claude Code session): V2's instance template as the prompt (Bash for bash, view_xlsx run as a command, submit meaning ending the turn) and V2's system template appended to Claude Code's; the session has Claude Code's Bash, view_xlsx and LibreOffice on its PATH and a /tmp of its own, edits the workbook and writes output.xlsx, which is recalculated by LibreOffice as V2's open_spreadsheet.py does and graded by V2's evaluation.py; no output.xlsx fails the item. Same 277 items and split as spreadsheetbench_v2/agent. Turn cap 50 (V2's call cap, Claude Code's --max-turns), 60 s per Bash command and 10,000 characters of output shown (V2's); a session stopped at the cap is graded on what it left and its record says so. No gold feedback. Needs the claude_code worker in skip (bypassPermissions) mode, SB2_DATA (a prepared directory), LibreOffice and Linux. The skill (empty by default, then not mentioned) is the only unfrozen knob; the graph around it is editable too. Optimize only when scored; higher is better.
+
+```json
+{
+  "description": "solve a SpreadsheetBench 2 task with V2's own agent setup (its SWE-agent prompt and tools): one sealed Claude Code session edits the workbook and writes output.xlsx",
+  "edges": [
+    {
+      "condition": "skip",
+      "source": "has_case",
+      "target": "finalize"
+    },
+    {
+      "condition": "proceed",
+      "source": "has_case",
+      "target": "solve"
+    },
+    {
+      "condition": null,
+      "source": "prepare",
+      "target": "has_case"
+    },
+    {
+      "condition": null,
+      "source": "solve",
+      "target": "finalize"
+    }
+  ],
+  "gates": [
+    {
+      "id": "has_case",
+      "user": false
+    }
+  ],
+  "guidance": "The skill is written to the agent's SKILL.md, which the prompt tells it to read before it edits the workbook (an empty skill is not mentioned); the graph can be edited too -- the steps before and around the solve step (only data and finalize are protected). Keep every change general -- it must help on items no rollout saw.",
+  "id": "spreadsheetbench_v2/swe",
+  "nodes": [
+    {
+      "call": "",
+      "id": "data",
+      "kind": "data",
+      "knobs": [
+        "data_parallelism"
+      ],
+      "notes": "",
+      "role": "ceo"
+    },
+    {
+      "call": "refactory_packages.spreadsheetbench_v2.swe_ops:finalize",
+      "id": "finalize",
+      "kind": "op",
+      "knobs": [],
+      "notes": "take the session's output.xlsx as the item's output",
+      "role": "ceo"
+    },
+    {
+      "call": "refactory_packages.spreadsheetbench.ops:has_case",
+      "gate_kind": "fn",
+      "id": "has_case",
+      "kind": "gate",
+      "knobs": [],
+      "notes": "an item with no test case skips the call",
+      "role": "ceo"
+    },
+    {
+      "call": "refactory_packages.spreadsheetbench_v2.swe_ops:prepare",
+      "id": "prepare",
+      "kind": "op",
+      "knobs": [
+        "skill"
+      ],
+      "notes": "record the item's start and lay the session's workspace files",
+      "role": "ceo"
+    },
+    {
+      "call": "",
+      "id": "solve",
+      "kind": "agent",
+      "knobs": [
+        "solve__prompt_template",
+        "solve__system_prompt",
+        "max_turns",
+        "bash_timeout_ms",
+        "bash_output_chars"
+      ],
+      "notes": "one sealed Claude Code session (Bash) writes output.xlsx",
+      "role": "solver"
+    }
+  ],
+  "parameters": {
+    "bash_output_chars": {
+      "default": 10000,
+      "description": "the most of a command's output the model sees (V2's max_observation_length)",
+      "frozen": true,
+      "kind": "int",
+      "range": [
+        1,
+        null
+      ],
+      "value": 10000,
+      "values": []
+    },
+    "bash_timeout_ms": {
+      "default": 60000,
+      "description": "each Bash command's timeout in ms (V2's execution_timeout)",
+      "frozen": true,
+      "kind": "int",
+      "range": [
+        1,
+        null
+      ],
+      "value": 60000,
+      "values": []
+    },
+    "data_parallelism": {
+      "default": 8,
+      "description": "concurrent items",
+      "frozen": true,
+      "kind": "int",
+      "range": [
+        1,
+        64
+      ],
+      "value": 8,
+      "values": []
+    },
+    "max_turns": {
+      "default": 50,
+      "description": "the session's turn cap (V2's per_instance_call_limit, Claude Code's --max-turns)",
+      "frozen": true,
+      "kind": "int",
+      "range": [
+        1,
+        null
+      ],
+      "value": 50,
+      "values": []
+    },
+    "skill": {
+      "default": "",
+      "description": "the skill, written to the agent's SKILL.md; empty, the prompt does not mention it",
+      "frozen": false,
+      "kind": "str",
+      "range": [
+        null,
+        null
+      ],
+      "value": "",
+      "values": []
+    },
+    "solve__prompt_template": {
+      "default": "<task_context>\n\n## Important\n- When completing spreadsheet tasks, strictly avoid altering any cells that already contain values unless explicitly instructed. Modify only the cells that are required for the task.\n- You need to complete the instructions and ensure that the original formatting is preserved as much as possible.\n\n## Tools\nYou are provided with four tools: `Bash`, `view_xlsx` and `submit`. You must use these tools to complete the target task.\n**Important: You can only call ONE tool at a time per response.**\n- `Bash`: run shell commands (e.g., file operations, calling Python scripts with `python3`)\n- `view_xlsx`: inspect `.xlsx` files (list sheets, view sheet contents, see original formulas and values); a command on your PATH: run it with `Bash`\n- `submit`: finalize and submit your solution after verification; to submit, end your turn with a short final reply (there is no `submit` command)\n\n## Environment\nYou can complete the corresponding spreadsheet tasks using the following Python environment:\n`Pandas`, `openpyxl`, `numpy` and `LibreOffice`\nYou can use these environments to manipulate the spreadsheet data.\n\n## Recommended Workflow\n1. **Inspect**: Use `view_xlsx` to inspect the data. This will allow you to understand the structure and contents of the spreadsheet.\n   - You must choose mode `list` or `content` to inspect the data.\n   - List all sheets: `view_xlsx {{spreadsheet_path}} list`\n   - View specific sheet: `view_xlsx {{spreadsheet_path}} content \"Sheet1\"`\n   - View row range: `view_xlsx {{spreadsheet_path}} content \"Sheet1\" 1 50`\n\n2. **Plan**: Decide how to manipulate the data using `openpyxl` or `LibreOffice`.\n\n3. **Implement**: Create a python script (e.g., `process_data.py`) that performs the edit.\n   - You can use `Bash` tool to write Python code directly, e.g., cat > /tmp/script.py << 'EOF' ... EOF), which can then be used to verify syntax correctness.\n\n4. **Execute**: Run the python script using `python3 /tmp/script.py`\n\n5. **Verify**: Check the output file exists, ensure the answer is correct.\n   - Do NOT combine verify and submit commands (e.g., `python3 script.py && submit`). Run them separately to ensure verification is complete before submission.\n   - Ensure the existing structure, layout, and formatting of the model are preserved throughout the process.\n\n6. **Submit**: When verification is successful, submit: end your turn with a short final reply.\n\n{{skill_section}}</task_context>\n\n<instructions>\n\n## Task instructions\nYou need to process a spreadsheet file based on specific instructions.\n**Instruction:** {{instruction}}\n\n## Input and Output\nYou are provided with an input spreadsheet file and you need to generate an output spreadsheet file based on the output_path.\n**Input File:** {{spreadsheet_path}}\n**Output Path:** {{output_path}}\n\n</instructions>",
+      "description": "the solve call's prompt, V2's instance template (frozen; use the skill knob)",
+      "frozen": true,
+      "kind": "str",
+      "range": [
+        null,
+        null
+      ],
+      "value": "<task_context>\n\n## Important\n- When completing spreadsheet tasks, strictly avoid altering any cells that already contain values unless explicitly instructed. Modify only the cells that are required for the task.\n- You need to complete the instructions and ensure that the original formatting is preserved as much as possible.\n\n## Tools\nYou are provided with four tools: `Bash`, `view_xlsx` and `submit`. You must use these tools to complete the target task.\n**Important: You can only call ONE tool at a time per response.**\n- `Bash`: run shell commands (e.g., file operations, calling Python scripts with `python3`)\n- `view_xlsx`: inspect `.xlsx` files (list sheets, view sheet contents, see original formulas and values); a command on your PATH: run it with `Bash`\n- `submit`: finalize and submit your solution after verification; to submit, end your turn with a short final reply (there is no `submit` command)\n\n## Environment\nYou can complete the corresponding spreadsheet tasks using the following Python environment:\n`Pandas`, `openpyxl`, `numpy` and `LibreOffice`\nYou can use these environments to manipulate the spreadsheet data.\n\n## Recommended Workflow\n1. **Inspect**: Use `view_xlsx` to inspect the data. This will allow you to understand the structure and contents of the spreadsheet.\n   - You must choose mode `list` or `content` to inspect the data.\n   - List all sheets: `view_xlsx {{spreadsheet_path}} list`\n   - View specific sheet: `view_xlsx {{spreadsheet_path}} content \"Sheet1\"`\n   - View row range: `view_xlsx {{spreadsheet_path}} content \"Sheet1\" 1 50`\n\n2. **Plan**: Decide how to manipulate the data using `openpyxl` or `LibreOffice`.\n\n3. **Implement**: Create a python script (e.g., `process_data.py`) that performs the edit.\n   - You can use `Bash` tool to write Python code directly, e.g., cat > /tmp/script.py << 'EOF' ... EOF), which can then be used to verify syntax correctness.\n\n4. **Execute**: Run the python script using `python3 /tmp/script.py`\n\n5. **Verify**: Check the output file exists, ensure the answer is correct.\n   - Do NOT combine verify and submit commands (e.g., `python3 script.py && submit`). Run them separately to ensure verification is complete before submission.\n   - Ensure the existing structure, layout, and formatting of the model are preserved throughout the process.\n\n6. **Submit**: When verification is successful, submit: end your turn with a short final reply.\n\n{{skill_section}}</task_context>\n\n<instructions>\n\n## Task instructions\nYou need to process a spreadsheet file based on specific instructions.\n**Instruction:** {{instruction}}\n\n## Input and Output\nYou are provided with an input spreadsheet file and you need to generate an output spreadsheet file based on the output_path.\n**Input File:** {{spreadsheet_path}}\n**Output Path:** {{output_path}}\n\n</instructions>",
+      "values": []
+    },
+    "solve__system_prompt": {
+      "default": "You are a helpful Spreadsheet Automation Engineer that interacts with a computer shell to solve data tasks.\nYou operate in a REPL (Read-Eval-Print Loop) environment where you must issue exactly ONE command at a time.",
+      "description": "text appended to Claude Code's system prompt: V2's system template (frozen)",
+      "frozen": true,
+      "kind": "str",
+      "range": [
+        null,
+        null
+      ],
+      "value": "You are a helpful Spreadsheet Automation Engineer that interacts with a computer shell to solve data tasks.\nYou operate in a REPL (Read-Eval-Print Loop) environment where you must issue exactly ONE command at a time.",
+      "values": []
+    }
+  },
+  "ports": [],
+  "scored": true,
+  "usage": {
+    "doc": "refactory/docs/spreadsheetbench.md",
+    "examples": [
+      {
+        "explanation": "Solve SpreadsheetBench 2 tasks with V2's own agent setup (its SWE-agent prompt and tools): one sealed Claude Code session per item with Claude Code's Bash, view_xlsx and LibreOffice on its PATH, edits the workbook and writes output.xlsx, which is graded by V2's pipeline (LibreOffice recalculation, then V2's evaluation.py). Route it to the claude_code worker in skip (bypassPermissions) mode. Prepare the release once with python -m refactory_packages.spreadsheetbench_v2.prepare prepare SOURCE OUT then python -m refactory_packages.spreadsheetbench_v2.prepare check --grades OUT (required), and set SB2_DATA to OUT; LibreOffice must be installed (or named by SB_SOFFICE). Linux only (the sessions get a /tmp of their own).",
+        "knobs": {
+          "bash_output_chars": 10000,
+          "bash_timeout_ms": 60000,
+          "data_parallelism": 8,
+          "max_turns": 50
+        }
+      }
+    ],
+    "interfaces": {
+      "chat": "wf_open mode=spreadsheetbench_v2/swe; use refactory help topic=spreadsheetbench_v2/swe first",
+      "cli": "refactory ceo spreadsheetbench_v2/swe",
+      "panel": "Mode picker; Run once executes enabled modes including authoring; Optimize requires a scored mode. Use chat for stepwise gates."
+    },
+    "purpose": "solve a SpreadsheetBench 2 task with V2's own agent setup (SWE-agent/config/spreadsheet.yaml ported to one sealed Claude Code session): V2's instance template as the prompt (Bash for bash, view_xlsx run as a command, submit meaning ending the turn) and V2's system template appended to Claude Code's; the session has Claude Code's Bash, view_xlsx and LibreOffice on its PATH and a /tmp of its own, edits the workbook and writes output.xlsx, which is recalculated by LibreOffice as V2's open_spreadsheet.py does and graded by V2's evaluation.py; no output.xlsx fails the item. Same 277 items and split as spreadsheetbench_v2/agent. Turn cap 50 (V2's call cap, Claude Code's --max-turns), 60 s per Bash command and 10,000 characters of output shown (V2's); a session stopped at the cap is graded on what it left and its record says so. No gold feedback. Needs the claude_code worker in skip (bypassPermissions) mode, SB2_DATA (a prepared directory), LibreOffice and Linux. The skill (empty by default, then not mentioned) is the only unfrozen knob; the graph around it is editable too. Optimize only when scored; higher is better.",
+    "reviewed_schema": "91569525525546ec4910f87ad83fda04fe1568aebd9bd4b59ac64a343a72a3e3"
   }
 }
 ```

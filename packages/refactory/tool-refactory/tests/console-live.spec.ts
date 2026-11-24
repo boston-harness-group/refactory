@@ -198,6 +198,7 @@ describe('the refactory tool against the real loop', () => {
     expect(summary).toContain('or wf_open to drive it node by node')
     expect(summary).toContain('gate_strategy (user)')
     expect(summary).toContain('knobs: ')
-    expect(summary.split('\n').length).toBeLessThan(50)
+    // About one line per mode: a dumped payload runs to hundreds; the catalogue grows.
+    expect(summary.split('\n').length).toBeLessThan(60)
   }, 120_000)
 })

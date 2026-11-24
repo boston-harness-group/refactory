@@ -285,6 +285,23 @@ class _View:
             f"{node_id} {kind}{self._route(node_id)}", f"sees {sees}" if sees else "", f"told {told}" if told else "",
             f"-> {', '.join(outs)}" if outs else "") if part)
 
+    def _item_files(self, data: Any) -> str:
+        """``; item files: path seen by step, ...`` for the files a data node's Task lays into
+        each pass (`Task.item_files`) and the steps that read each; nothing when it lays
+        none, or its Task cannot be read (the validator says why)."""
+        from refactory_dsh.task import task_item_files
+
+        try:
+            files = task_item_files(data.task_ref or "")
+        except Exception:  # noqa: BLE001 - a view is drawn whatever the Task's state
+            return ""
+        parts = []
+        for path in sorted(files.values()):
+            readers = sorted(n for n, taken in self.inputs.items()
+                             if n != data.id and ("file", path) in taken)
+            parts.append(f"{path} seen by {', '.join(readers) or 'no step'}")
+        return f"; item files: {'; '.join(parts)}" if parts else ""
+
     def _route(self, node_id: str) -> str:
         """`` on model=...``: the route of its own a step runs on, or nothing."""
         route = self.graph.nodes[node_id].route
@@ -545,7 +562,7 @@ class _View:
                 self.shown.add(node_id)
                 out.append(Line(node_id, depth, f"per item ({node_id}"
                                 + (f" -> {', '.join(node.writes)}" if node.writes else "")
-                                + ") {", within, "step"))
+                                + self._item_files(node) + ") {", within, "step"))
                 self._chain(node.subgraph_entry, None, depth + 1, f"per item {node_id}", out)
                 out.append(Line(f"{node_id}/", depth, "}", within, "step"))
             elif node.kind == "fork" and map_of(g, node_id):
@@ -628,7 +645,7 @@ FORMS = {
     "route": "route(after step, judge ..., {label: step})",
     "fallback": FALLBACK_LINE.format(step="step", to="step"),
     "map": MAP_LINE.format(steps="step … step", over="list", cap="N"),
-    "per item": "per item (data) { ... }",
+    "per item": "per item (data -> its writes; item files: path seen by step, ...) { ... }",
     "step route": "step agent " + ROUTE_LINE.format(fields="model=M effort=E "
                                                            "max_completion_tokens=N"),
 }

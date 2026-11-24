@@ -55,9 +55,11 @@ RULES: dict[str, str] = {
     "V11": "every declared port must be a file some node on a path writes",
     "V12": "a fork's targets, a join's sources and a data node's subgraph must name "
            "nodes that exist; a data node's entry reaches its exit, which is not a gate and "
-           "has no out-edge (its pass ends there); and a pass is entered only through its "
+           "has no out-edge (its pass ends there); a pass is entered only through its "
            "data node, never by an edge from the data node or from outside, and never "
-           "leads back to it",
+           "leads back to it; and a data node declares in its writes each item file its "
+           "Task lays into the pass (Task.item_files: what the item gives its solver, never "
+           "a file the grader reads or writes)",
     "V13": "a data node must not appear inside a fork branch",
     "V14": "every field binding must name a declared knob of the field's kind, once per "
            "field, and the field must be in the bindable allowlist",
@@ -390,6 +392,8 @@ def validate(
                     )
         if node.kind == "data":
             issues.extend(_data_pass_issues(graph, node))
+            if resolve_calls and node.task_ref:
+                issues.extend(_item_file_issues(node))
         # Both runtimes end an item's pass once its exit has run, so a node wired
         # after the exit would never run as part of it.
         if node.kind == "data" and node.subgraph_exit in graph.nodes:
@@ -445,6 +449,11 @@ def validate(
         "parallelism": "int",
         "code": "str",
         "optional": "bool",
+        "route.max_completion_tokens": "int",
+        "route.max_thinking_tokens": "int",
+        "route.max_turns": "int",
+        "route.bash_timeout_ms": "int",
+        "route.bash_output_chars": "int",
     }
     branch_heads = {t for n in graph.nodes.values() if n.kind == "fork" for t in n.targets}
 
@@ -466,6 +475,9 @@ def validate(
             elif field_name == "optional" and node_id not in branch_heads:
                 issues.append(Issue("V14", "optional binding is only for a fork branch's first "
                                            "step", node=node_id))
+            elif field_name.startswith("route.") and node.kind != "agent":
+                issues.append(Issue("V14", f"{field_name} binding is only for agent nodes",
+                                    node=node_id))
             elif field_name == "parallelism" and node.kind != "data":
                 issues.append(
                     Issue(
@@ -890,6 +902,26 @@ def _branch_ends(graph: Graph, branch: set[str], join: str) -> set[str]:
     """The members a run of a branch can end at: an edge to the join, or no out-edge."""
     return {member for member in branch
             if not graph.out_edges(member) or any(e.target == join for e in graph.out_edges(member))}
+
+
+def _item_file_issues(data: Node) -> list[Issue]:
+    """V12: a data node declares in its writes each item file its Task lays into the pass
+    (`Task.item_files`): what makes the file one a step of the pass may read (V6), a
+    sealed step's reads included, and keeps a run-level file of the same name from being
+    linked over it. A Task whose item files fail their check (`task.checked_item_files`:
+    never a file the grader reads or writes) is refused here too. A Task that cannot be
+    imported is another rule's to report."""
+    from refactory_dsh.task import TaskError, task_item_files
+
+    try:
+        files = task_item_files(data.task_ref or "")
+    except TaskError as exc:
+        return [Issue("V12", str(exc), node=data.id)]
+    except Exception:  # noqa: BLE001 - an unloadable Task is another rule's to report
+        return []
+    return [Issue("V12", f"its Task lays item file {path!r} ({role}) into each pass, and the "
+                         "data node does not declare it in its writes", node=data.id)
+            for role, path in sorted(files.items()) if path not in data.writes]
 
 
 def _data_pass_issues(graph: Graph, data: Node) -> list[Issue]:

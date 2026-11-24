@@ -57,7 +57,7 @@ from typing import Any, Iterator, Mapping
 from refactory_dsh import git_exe
 from refactory_dsh.emitted_paths import unprintable_refusal
 from refactory_dsh.nn.graph import workspace_declaration
-from refactory_dsh.seal import SEALED_TOOLS
+from refactory_dsh.seal import CLAUDE_CODE_TOOLS, SEALED_TOOLS
 
 #: Where a run keeps its workspaces, one directory per node.
 ROOT = Path(".refactory") / "workspaces"
@@ -65,13 +65,33 @@ ROOT = Path(".refactory") / "workspaces"
 
 def is_sealed(node: Any) -> bool:
     """Whether an agent node (a `Node` or its state) runs sealed: a ``tools`` list from
-    `SEALED_TOOLS`, no other tool policy, in a ``scratch`` workspace."""
+    `SEALED_TOOLS` (DSH's shell) or from `CLAUDE_CODE_TOOLS` (Claude Code's Read and Bash,
+    `sealed_backend`), no other tool policy, in a ``scratch`` workspace."""
     get = node.get if isinstance(node, dict) else lambda key: getattr(node, key, None)
     tools = list(get("tools") or ())
     declared = workspace_declaration(get("workspace"))
-    return (get("kind") == "agent" and bool(tools) and set(tools) <= set(SEALED_TOOLS)
+    return (get("kind") == "agent" and bool(tools) and sealed_backend(tools) != ""
             and get("tool_policy") is None and declared is not None
             and declared["kind"] == "scratch")
+
+
+def sealed_backend(tools: Any) -> str:
+    """The worker backend a sealed step with ``tools`` runs on: ``dsh`` for tools from
+    `SEALED_TOOLS`, ``claude_code`` for tools from `CLAUDE_CODE_TOOLS` (Claude Code's own,
+    confined by the adapter's hook, `seal`), "" for any other list (never a mix)."""
+    tools = set(tools or ())
+    if tools and tools <= set(SEALED_TOOLS):
+        return "dsh"
+    if tools and tools <= set(CLAUDE_CODE_TOOLS):
+        return "claude_code"
+    return ""
+
+
+#: The permission modes a sealed Claude Code step runs under: Claude Code's own
+#: ``bypassPermissions`` (``skip`` is its name on every backend), as a harness running
+#: ``claude -p --permission-mode bypassPermissions`` does; the seal, not a permission
+#: prompt, is what confines its tools.
+CLAUDE_SEALED_MODES = ("skip", "bypassPermissions")
 
 #: Refactory's own directory inside a workspace: the agent's HOME and the files of its
 #: session live there, inside the folder the sandbox lets it write, and none of it is
@@ -180,10 +200,24 @@ class Workspace:
     generate_owned: dict[str, str] = field(default_factory=dict)
     #: Files in ``generate_owned`` the agent then changed, which it is told about.
     prepared_edits: tuple[str, ...] = ()
+    #: A sealed step's cap on the whole of what its commands start (`seal.step_cap`):
+    #: whether it has one, and what it is or why not.
+    whole_step_cap: tuple[bool, str] | None = None
+    #: A sealed step's own cgroup, where a delegated one caps it (`seal.step_cap`): removed
+    #: once its processes are ended (`release_cgroup`); "" for any other.
+    cgroup: str = ""
     #: A sealed step's tools (`is_sealed`), and the runner each of its commands runs
     #: under (`seal.runner_command`); empty for any other workspace.
     tools: tuple[str, ...] = ()
     runner: tuple[str, ...] = ()
+    #: The backend that puts the runner in front of a sealed step's commands
+    #: (`sealed_backend`): ``dsh`` (its sandbox provider) or ``claude_code`` (the
+    #: adapter's hook); "" for any other workspace.
+    backend: str = ""
+    #: A sealed step's tool environment, where the item's Task declares one
+    #: (`task.Task.tool_environment`): the Task, what the request says of it, and the
+    #: interpreter its commands run as ``python3``; empty otherwise.
+    tool_environment: dict[str, str] = field(default_factory=dict)
 
     def describe(self) -> dict[str, Any]:
         """The workspace as the execution contract and the receipt record it."""
@@ -191,6 +225,12 @@ class Workspace:
             "kind": self.kind, **({"of": self.of} if self.of else {}), "collect": self.collect,
             "path": str(self.path), **({"base": self.base} if self.base else {}),
             **({"sealed": True, "tools": list(self.tools)} if self.runner else {}),
+            **({"backend": self.backend} if self.runner and self.backend == "claude_code" else {}),
+            **({"whole_step_cap": self.whole_step_cap[0], "cap": self.whole_step_cap[1]}
+               if self.runner and self.whole_step_cap is not None else {}),
+            **({"cgroup": self.cgroup} if self.runner and self.cgroup else {}),
+            **({"tool_environment": dict(self.tool_environment)}
+               if self.runner and self.tool_environment else {}),
             "sandbox": ("sealed: its files only, no network" if self.runner
                         else self.confine and f"workspace-write ({self.confine})"
                         or f"not confined: {self.unconfined}"),
@@ -264,6 +304,7 @@ def dispatched(workdir: Path, node: str, declaration: Any, *, knobs: dict[str, A
         fcntl.flock(lock, fcntl.LOCK_EX)
         try:
             if fresh:
+                _release_recorded(root)
                 # Keep the lock inode: removing it would let another dispatch acquire
                 # a new lock while this one is still preparing the replacement.
                 for entry in root.iterdir():
@@ -275,8 +316,26 @@ def dispatched(workdir: Path, node: str, declaration: Any, *, knobs: dict[str, A
                             raise WorkspaceError(f"cannot discard timed-out workspace {entry}: {failures[0]}")
                     else:
                         entry.unlink()
-            yield prepare(workdir, node, declared, knobs=knobs, facts=facts, route=route,
-                          runtime_root=runtime_root, budget=budget, tools=tools, reads=reads)
+            place = prepare(workdir, node, declared, knobs=knobs, facts=facts, route=route,
+                            runtime_root=runtime_root, budget=budget, tools=tools, reads=reads)
+            try:
+                yield place
+            finally:
+                # However the dispatch ended (collected, failed, timed out): a sealed step's
+                # cgroup goes with it, once what it left running is ended.
+                if place is not None and place.cgroup:
+                    release_cgroup(place.path, place.cgroup)
+                # The copies a sealed Claude Code step's Reads were given (the adapter's
+                # hook, `<workspace>.reads`) go with the dispatch too.
+                if place is not None and place.backend == "claude_code":
+                    for reads in root.glob("*.reads"):
+                        shutil.rmtree(reads, ignore_errors=True)
+                    # And the adapter's session facts beside it, collected or not.
+                    for facts in root.glob(f"*{SESSION_SUFFIX}"):
+                        facts.unlink(missing_ok=True)
+                # And the step's own /tmp (`task.ToolEnvironment.private_tmp`).
+                if place is not None and place.runner:
+                    shutil.rmtree(root / SEAL_TMP, ignore_errors=True)
         finally:
             fcntl.flock(lock, fcntl.LOCK_UN)
 
@@ -298,6 +357,8 @@ def prepare(workdir: Path, node: str, declaration: Any, *, knobs: dict[str, Any]
     workdir = Path(workdir).resolve()
     root = workdir / ROOT / _slug(node)
     root.mkdir(parents=True, exist_ok=True)
+    # An earlier dispatch's cgroup that outlived it (its runner or its run died) goes first.
+    _release_recorded(root)
     route = route or {}
     if route.get("worker_backend") == "openshell" and not _opted_in(OPENSHELL_OPT_IN):
         raise WorkspaceError(
@@ -386,15 +447,27 @@ def sealed_step(model: Any, node_id: str, node: Mapping[str, Any]) -> tuple[bool
             client = client.for_node(node_id, role=str(node.get("role") or "ceo"))
         if node.get("route") and callable(getattr(client, "with_step_route", None)):
             client = client.with_step_route(node["route"])
-        for_sealed_step(client, node_id, True)
+        for_sealed_step(client, node_id, True, node.get("tools") or ())
     except (WorkspaceError, ValueError) as exc:
         return False, str(exc)
     return True, ""
 
 
-def for_sealed_step(client: Any, node: str, sealed: bool) -> Any:
+def for_sealed_step(client: Any, node: str, sealed: bool, tools: Any = ()) -> Any:
     """``client`` for agent node ``node``'s dispatch: moved to the sealed route
-    (`sealed_steps`) when it runs its tools sealed (``sealed``, `is_sealed`), else as it is."""
+    (`sealed_steps`) when it runs its tools sealed (``sealed``, `is_sealed`), else as it is.
+    A step with Claude Code's tools (`sealed_backend` ``claude_code``) stays on its route,
+    which must be the claude_code backend in a mode `CLAUDE_SEALED_MODES` names
+    (`DshModelClient.for_claude_sealed`); a client without routes (a test's scripted model)
+    runs it where it is."""
+    if sealed and sealed_backend(tools) == "claude_code":
+        check = getattr(client, "for_claude_sealed", None)
+        if not callable(check):
+            return client
+        try:
+            return check()
+        except ValueError as exc:
+            raise WorkspaceError(f"agent node {node!r} runs Claude Code's tools sealed: {exc}") from None
     if sealed and callable(getattr(client, "for_sealed", None)):
         try:
             return client.for_sealed()
@@ -408,12 +481,21 @@ def _check_sealed(node: str, declared: dict[str, str], tools: tuple[str, ...],
     """Refuse a sealed step that cannot run sealed here: never run it with less."""
     from refactory_dsh import seal
 
-    outside = [tool for tool in tools if tool not in SEALED_TOOLS]
-    if outside or declared["kind"] != "scratch":
+    backend = sealed_backend(tools)
+    if not backend or declared["kind"] != "scratch":
         raise WorkspaceError(
             f"agent node {node!r} lists tools {list(tools)}: a step runs only tools from "
-            f"{', '.join(SEALED_TOOLS)}, sealed in a 'scratch' workspace")
-    if (route.get("worker_backend") or "dsh") != "dsh" or (route.get("permission_mode") or "skip") != "skip":
+            f"{', '.join(SEALED_TOOLS)} (or Claude Code's {', '.join(CLAUDE_CODE_TOOLS)}), "
+            "sealed in a 'scratch' workspace")
+    if backend == "claude_code":
+        if route and (route.get("worker_backend") != "claude_code"
+                      or (route.get("permission_mode") or "skip") not in CLAUDE_SEALED_MODES):
+            raise WorkspaceError(
+                f"agent node {node!r} runs Claude Code's tools sealed, which only the claude_code "
+                f"worker backend in {' or '.join(map(repr, CLAUDE_SEALED_MODES))} permission mode "
+                f"can do; this route is {route.get('worker_backend')!r} "
+                f"({route.get('permission_mode') or 'skip'})")
+    elif (route.get("worker_backend") or "dsh") != "dsh" or (route.get("permission_mode") or "skip") != "skip":
         raise WorkspaceError(
             f"agent node {node!r} runs its tools sealed, which only the dsh worker backend in "
             f"'skip' permission mode can do; this route is {route.get('worker_backend')!r} "
@@ -464,7 +546,83 @@ def _seal(workspace: Workspace, workdir: Path, tools: tuple[str, ...], reads: An
         finally:
             os.close(fd)
     workspace.tools = tools
-    workspace.runner = tuple(seal.runner_command(workspace.path))
+    workspace.backend = sealed_backend(tools)
+    tool_path = _tool_path(workspace, workdir)
+    cap = seal.step_cap(workspace.path)
+    try:
+        workspace.runner = tuple(seal.runner_command(workspace.path, cap, tool_path))
+    except BaseException:
+        if cap.cgroup:
+            release_cgroup(workspace.path, cap.cgroup)
+        raise
+    workspace.whole_step_cap = (cap.capped, cap.how)
+    workspace.cgroup = cap.cgroup
+    # What the runner records beside the workspace belongs to this dispatch alone.
+    from refactory_dsh.seal_reaper import incidents_path, notes_path
+
+    for record in (incidents_path(str(workspace.path)), notes_path(str(workspace.path)),
+                   session_path(workspace.path)):
+        Path(record).unlink(missing_ok=True)
+
+
+#: Beside a sealed step's workspaces: the folder holding its Task's interpreter as
+#: ``python3`` and ``python`` (`seal.tool_path`).
+TOOL_BIN = "tool-bin"
+#: The declared write a sealed Claude Code step's session facts are collected under: the
+#: Claude Code adapter writes them beside the workspace (`session_path`), where no sealed
+#: command can read or write them, never inside it; a file of this name the session left in
+#: its workspace is never collected.
+SEALED_SESSION = ".refactory-session.json"
+#: What follows the workspace's path in the adapter's file beside it.
+SESSION_SUFFIX = ".session.json"
+
+
+def session_path(workspace: str | Path) -> Path:
+    """Where the Claude Code adapter leaves a sealed session's facts: beside its workspace
+    (the adapter's ``recordSealedSession``)."""
+    return Path(os.path.realpath(workspace) + SESSION_SUFFIX)
+
+
+#: Beside it: the step's own folder bound at ``/tmp`` where the Task asks for one
+#: (`task.ToolEnvironment.private_tmp`).
+SEAL_TMP = "seal-tmp"
+
+
+def _tool_path(workspace: Workspace, workdir: Path) -> Any:
+    """The tool environment the Task of the item's pass ``workdir`` declares for its sealed
+    steps (`task.pass_tool_environment`), made ready for ``workspace`` (`seal.tool_path`)
+    and recorded on it; ``None`` outside a pass or for a Task that declares none. One that
+    cannot be given (its interpreter is missing, fails the Task's check, or runs from a
+    folder the seal must not show) is refused: never run with less than declared."""
+    from refactory_dsh import seal
+    from refactory_dsh.task import TaskError, pass_tool_environment
+
+    try:
+        found = pass_tool_environment(workdir)
+    except (TaskError, ImportError) as exc:
+        raise WorkspaceError(f"agent node {workspace.node!r}: the Task's tool environment "
+                             f"cannot be read: {exc}") from exc
+    if found is None:
+        return None
+    ref, environment = found
+    from refactory_dsh.items import run_roots
+
+    try:
+        python = environment.python()
+        hidden = list(environment.hidden(workdir)) if environment.hidden is not None else []
+        commands = dict(environment.commands()) if environment.commands is not None else {}
+        reads = list(environment.reads()) if environment.reads is not None else []
+        tool_path = seal.tool_path(python, workspace.root / TOOL_BIN, workspace=workspace.path,
+                                   runs=run_roots(workdir), hidden=hidden, commands=commands,
+                                   reads=reads, tmp=(workspace.root / SEAL_TMP
+                                                     if environment.private_tmp else None))
+    except Exception as exc:  # noqa: BLE001 - the Task's own check, said with its reason
+        raise WorkspaceError(f"agent node {workspace.node!r} runs its tools sealed with Task "
+                             f"{ref!r}'s tool environment, which cannot be given: "
+                             f"{type(exc).__name__}: {exc}") from exc
+    workspace.tool_environment = {"task": ref, "summary": environment.summary,
+                                  "python": tool_path.python}
+    return tool_path
 
 
 def _opted_in(opt_in: tuple[str, str]) -> bool:
@@ -664,8 +822,20 @@ def ask(workspace: Workspace, client: Any, prompt: str, *, workdir: Path, system
             raise WorkspaceError(f"agent node {workspace.node!r} runs its tools sealed, and its "
                                  "model client cannot seal them: its complete() takes no seal")
         kwargs["confine"] = True
-        kwargs["seal"] = {"tools": list(workspace.tools), "runner": list(workspace.runner)}
-    return str(client.complete(prompt, **kwargs))
+        kwargs["seal"] = {"tools": list(workspace.tools), "runner": list(workspace.runner),
+                          **({"backend": workspace.backend}
+                             if workspace.backend == "claude_code" else {})}
+    try:
+        return str(client.complete(prompt, **kwargs))
+    except Exception:
+        if workspace.runner:
+            # A seal that failed while the session ran (a Claude Code step whose tool call
+            # passed no hook, the adapter's `sealGuard`) is the harness's failure, not the
+            # model's: said as one (`SealFailed`) wherever the session's own error came from.
+            from refactory_dsh.seal_reaper import incidents_path
+
+            _raise_seal_incidents(workspace.node, Path(incidents_path(str(workspace.path))))
+        raise
 
 
 def agent_env(workspace: Workspace, route: dict[str, Any]) -> dict[str, str | None]:
@@ -999,6 +1169,102 @@ def _same_as(path: Path, base: str, names: list[str]) -> set[str]:
     return same
 
 
+def _read_lines(path: Path, key: str) -> list[str]:
+    """Each JSON line's ``key`` of a runner's record beside a workspace, which is then
+    removed: a record belongs to the one dispatch that made it."""
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except FileNotFoundError:
+        return []
+    path.unlink(missing_ok=True)
+    out = []
+    for line in lines:
+        try:
+            out.append(str(json.loads(line).get(key) or "unknown"))
+        except (ValueError, AttributeError):
+            out.append(line.strip() or "unknown")
+    return out
+
+
+def release_cgroup(path: Path | str, cgroup: str) -> None:
+    """End every process still sealed in the workspace at ``path`` (as it was prepared;
+    `seal_reaper.reap`), then remove its step's ``cgroup`` (`seal_cgroup.remove`): at the
+    end of its dispatch, at the next prepare of its node, and at the run's end. One that
+    cannot be removed is warned about, never raised: the step's outcome stands."""
+    if not cgroup:
+        return
+    from refactory_dsh.seal_reaper import reap
+
+    sealed = str(path).removesuffix(".collected")
+    if sealed:
+        reap(sealed)
+    _remove_cgroup(f"the sealed workspace {sealed}", cgroup)
+
+
+def _remove_cgroup(whose: str, cgroup: str) -> None:
+    from refactory_dsh import seal_cgroup
+
+    left = seal_cgroup.remove(cgroup)
+    if left:
+        _warn(f"{whose}: its step's cgroup was left: {left}")
+
+
+def _release_recorded(root: Path) -> None:
+    """Release the cgroup the last dispatch in node directory ``root`` recorded, if any."""
+    record = _json(root / "dispatch.json")
+    if not record.get("cgroup"):
+        return
+    if not _recorded_cgroup_is_its_own(root, record):
+        return
+    release_cgroup(str(record["path"]), str(record["cgroup"]))
+
+
+def _recorded_cgroup_is_its_own(root: Path, record: dict[str, Any]) -> bool:
+    """Whether a dispatch record's ``cgroup`` is the one `seal_cgroup.make` gives its own
+    workspace, a sealed scratch folder of ``root``, in this process's delegated cgroup
+    (`seal_cgroup.delegated_base`), its path resolved: a record anything else wrote (a
+    step with tools in the run directory) never names another step's cgroup or workspace,
+    another unit's cgroup, or one reached through ``..`` or a link, for ending and removal."""
+    from refactory_dsh import seal_cgroup
+
+    path, cgroup = Path(str(record.get("path") or "")), Path(str(record["cgroup"]))
+    name = path.name.removesuffix(".collected")
+    try:
+        base = seal_cgroup.delegated_base().resolve()
+    except seal_cgroup.Unavailable:
+        base = None
+    if (base is None or path.parent != Path(root).resolve() or not name.startswith("scratch-")
+            or cgroup.name != seal_cgroup.step_name(path.parent / name)
+            or cgroup.resolve().parent != base):
+        _warn(f"{root}: its dispatch record names a cgroup that is not its own sealed step's "
+              f"({cgroup}), so it was left")
+        return False
+    return True
+
+
+def _record_seal_notes(workspace: Workspace, notes: Path) -> None:
+    """Put what the runner noted of how the step's commands ran (`seal_reaper.record_note`:
+    one ran without the whole-step cap) in the step's dispatch record."""
+    found = _read_lines(notes, "note")
+    if not found:
+        return
+    workspace.whole_step_cap = (False, found[0])
+    _write_json(workspace.root / "dispatch.json", workspace.describe())
+
+
+def _raise_seal_incidents(node: str, incidents: Path) -> None:
+    """Raise `incidents.SealFailed` when a command of the sealed step could not start in
+    its seal (`seal_reaper.record_incident`): the step then ran without what it asked
+    for, so its outcome is the harness's failure, on both runtimes (`node_retry.deliver`
+    collects for each)."""
+    reasons = _read_lines(incidents, "reason")
+    if reasons:
+        from refactory_dsh.incidents import HARNESS_INCIDENT_TEXT, SealFailed
+
+        raise SealFailed(f"{HARNESS_INCIDENT_TEXT}agent node {node!r}: {len(reasons)} sealed "
+                         f"command(s) could not start in the seal: {reasons[0]}")
+
+
 def collect(workspace: Workspace, workdir: Path, writes: list[str], *,
             final_response: str | None = None) -> dict[str, Any]:
     """Make ``workspace``'s work the node's declared outputs, before delivery checks them.
@@ -1010,19 +1276,30 @@ def collect(workspace: Workspace, workdir: Path, writes: list[str], *,
     write the node declares is its final response, unless the agent wrote it.
     ``files``: each declared write found in the workspace is copied to the run directory;
     one that is, or lies under, a link is refused, so nothing outside the workspace is
-    copied out of it. A sealed workspace is collected after every process its commands
+    copied out of it. A sealed Claude Code step (`sealed_backend`) answers in its reply,
+    which is its first write (captured as a DSH step's is), so that one is never taken
+    from its workspace; each later write is a file it may leave there (`optional_writes`),
+    and one it did not leave is absent from the run directory too, never an earlier
+    visit's copy. A sealed workspace is collected after every process its commands
     left is ended and it is moved off the one path its sandbox may write, so nothing
     sealed changes it while it is read.
     """
     from refactory_dsh.agent_delivery import _path
 
+    session = session_path(workspace.path)
     if workspace.runner:
-        from refactory_dsh.seal_reaper import reap
+        from refactory_dsh.seal_reaper import incidents_path, notes_path, reap
 
+        incidents = Path(incidents_path(str(workspace.path)))
+        notes = Path(notes_path(str(workspace.path)))
         reap(str(workspace.path))
         moved = workspace.path.with_name(workspace.path.name + ".collected")
         os.rename(workspace.path, moved)
         workspace.path = moved
+        # Its PID namespace is killed and reaped: its cgroup can go.
+        _remove_cgroup(f"agent node {workspace.node!r}", workspace.cgroup)
+        _record_seal_notes(workspace, notes)
+        _raise_seal_incidents(workspace.node, incidents)
         size = _tree_bytes(workspace.path)
         if size > SEALED_WORKSPACE_MAX_BYTES:
             raise WorkspaceError(f"agent node {workspace.node!r} left {size >> 20} MiB in its sealed "
@@ -1075,9 +1352,16 @@ def collect(workspace: Workspace, workdir: Path, writes: list[str], *,
         summary["files"] = len(re.findall(r"^===(?:FILE|DELETE): ", emission, re.MULTILINE))
     else:
         copied = []
+        left = optional_writes(workspace.describe(), writes)
+        replies = workspace.runner and workspace.backend == "claude_code"
         root = os.open(workspace.path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
         try:
-            for name in writes:
+            for name in (writes[1:] if replies else writes):
+                if replies and name == SEALED_SESSION:
+                    # The adapter's record of the session, from beside the workspace: what
+                    # the session left inside it under this name is never taken.
+                    _collect_session(session, _path(workdir, name))
+                    continue
                 relative = Path(name)
                 if relative.is_absolute() or ".." in relative.parts or not relative.parts:
                     raise WorkspaceError(f"output {name!r} must be relative")
@@ -1088,6 +1372,12 @@ def collect(workspace: Workspace, workdir: Path, writes: list[str], *,
                                          "symlink, or under one; an output is a file or a directory of "
                                          "files") from None
                 if source is None:
+                    if name in left:
+                        stale = _path(workdir, name)
+                        if stale.is_dir() and not stale.is_symlink():
+                            shutil.rmtree(stale)
+                        else:
+                            stale.unlink(missing_ok=True)
                     continue
                 destination = _path(workdir, name)
                 destination.parent.mkdir(parents=True, exist_ok=True)
@@ -1109,6 +1399,32 @@ def collect(workspace: Workspace, workdir: Path, writes: list[str], *,
         summary["copied"] = copied
     _write_json(workspace.root / "collected.json", summary)
     return summary
+
+
+def _collect_session(source: Path, destination: Path) -> None:
+    """Copy the adapter's session facts to ``destination`` (a regular file, never through a
+    link), or leave ``destination`` absent when the adapter wrote none. The source goes with
+    the dispatch (`dispatched`)."""
+    destination.unlink(missing_ok=True)
+    try:
+        fd = os.open(source, os.O_RDONLY | _NOFOLLOW)
+    except FileNotFoundError:
+        return
+    try:
+        if stat.S_ISREG(os.fstat(fd).st_mode):
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            _copy_file(fd, destination)
+    finally:
+        os.close(fd)
+
+
+def optional_writes(workspace: Mapping[str, Any] | None, writes: list[str]) -> tuple[str, ...]:
+    """The declared writes of a dispatch in ``workspace`` (`Workspace.describe`) that it may
+    leave out: a sealed Claude Code step's after its first (its reply), files it leaves in
+    its workspace when it makes them (`collect`); none for any other step."""
+    if (workspace or {}).get("sealed") and (workspace or {}).get("backend") == "claude_code":
+        return tuple(writes[1:])
+    return ()
 
 
 #: The most a sealed step may leave in its workspace (copied inputs included); beyond it
@@ -1246,6 +1562,7 @@ def sweep(workdir: Path) -> None:
                 fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
             except BlockingIOError:
                 continue
+            _release_recorded(entry)
             failures = _remove_tree(entry)
             if failures:
                 left.append(f"{entry}: {failures[0]}")

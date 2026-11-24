@@ -35,10 +35,12 @@ from __future__ import annotations
 import importlib
 import inspect
 import json
+import re
+import unicodedata
 from dataclasses import dataclass, field
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from types import MappingProxyType
-from typing import Any, Mapping, Sequence
+from typing import Any, Callable, Mapping, Sequence
 
 
 class TaskError(ValueError):
@@ -52,6 +54,41 @@ class TaskInstance:
     id: str
     path: str | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class ToolEnvironment:
+    """What the commands of a Task's sealed tool steps run with (`Task.tool_environment`):
+    an interpreter put first on their PATH as ``python3`` and ``python``, and any further
+    commands the Task names, with the folders they run from."""
+
+    #: The facts the optimizer's request states about it, in plain words: what
+    #: ``python3`` is and what it holds (``"python3 (and python) = Python 3.12 with
+    #: openpyxl 3.1.5"``). Never advice.
+    summary: str
+    #: Returns the interpreter's path, checked as the Task checks it wherever else it
+    #: runs; raises when there is none or it is not the one declared.
+    python: Callable[[], str]
+    #: Given the item's pass, the grader-side paths (the dataset, its answers, secrets)
+    #: that no folder of the environment may hold or lie inside, beside the run's roots and
+    #: refactory's own directory, which are always refused (`seal.tool_path`). It must list
+    #: the Task's grader-side data whenever the interpreter could sit near it: the seal
+    #: binds the folders the interpreter reports running from, so an interpreter installed
+    #: inside the dataset (``<x>/dataset/python``) would show the dataset unless it is
+    #: named here. None: nothing more.
+    hidden: Callable[[Path], Sequence[str]] | None = None
+    #: Further commands on the same PATH, by name: each the text of a script written beside
+    #: ``python3`` (``#!/usr/bin/env python3`` there runs the interpreter). Raises when one
+    #: cannot be given. None: none.
+    commands: Callable[[], Mapping[str, str]] | None = None
+    #: Further folders those commands run from, each bound read only and refused as the
+    #: interpreter's folders are (`seal.tool_path`). Raises when one cannot be given.
+    #: None: none.
+    reads: Callable[[], Sequence[str]] | None = None
+    #: Whether the commands get a ``/tmp`` of the step's own, writable and kept across its
+    #: commands (a folder beside its workspace), as LibreOffice needs: it puts its pipe in
+    #: ``/tmp`` or ``/var/tmp`` only. Linux only (`seal.tool_path`). Default: a read-only one.
+    private_tmp: bool = False
 
 
 @dataclass(frozen=True)
@@ -83,6 +120,22 @@ class Task:
     #: it reads them (`nn.core_ops`). Default: none declared, so a take-over of any name
     #: is taken (the Task may score it).
     graded_files: tuple[str, ...] = ()
+    #: The files ``setup`` lays into each item's pass, by role: ``{role: path}``, each
+    #: path relative to the pass and the same for every item (``item/input.xlsx``: keep
+    #: the extension a reader needs). The data node declares each in its ``writes`` (rule
+    #: V12), so any step of the pass, a sealed one included, can list it in ``reads`` and
+    #: is given it; an op opens one through ``ctx.item_file(role)``, which refuses a file
+    #: the op does not declare. Only what the item gives its solver belongs here, never
+    #: its answer: a path the grader reads or writes is refused (`checked_item_files`),
+    #: and ``setup`` must lay each as a regular file (`check_laid_item_files`). An item
+    #: without one (it has no such input) leaves it out. Default: none.
+    item_files: Mapping[str, str] = MappingProxyType({})
+    #: What the commands of a sealed tool step in an item's pass run with
+    #: (`ToolEnvironment`): its interpreter first on their PATH, its directories readable
+    #: inside the seal, read only (`seal.tool_path`). Both runtimes read it from the class
+    #: of the pass's Task (`pass_tool_environment`). Default: none, so such a command runs
+    #: the machine's own programs only.
+    tool_environment: ToolEnvironment | None = None
     #: What the integrity judge (`optim.integrity`, ``LoopConfig.integrity_judge``) is to
     #: treat as legitimate for this task: ``{category: why, in plain words}``, e.g.
     #: ``{"answer_leak": "the task is to recall facts about these items"}``. A category
@@ -98,11 +151,23 @@ class Task:
     #: the item, never its answer. A name also in ``grader_fields`` is never shown.
     #: Default: none.
     item_metadata: tuple[str, ...] = ()
+    #: What the optimizer's analysts and proposer are shown in full under each item's
+    #: header, after its input, as text the item's solver was given that the record's
+    #: model calls do not carry (SpreadsheetBench's agent harness: the workbook preview,
+    #: which SkillOpt's analysts see): the names `item_context_values` returns. A name
+    #: also in ``grader_fields`` is never shown. Default: none.
+    item_context: tuple[str, ...] = ()
 
     def item_meta(self, metadata: Mapping[str, Any]) -> dict[str, Any]:
         """The values ``item_metadata`` names for one item, from its metadata: by default
         the item's own fields of those names (a Task may derive them instead)."""
         return {name: metadata[name] for name in self.item_metadata
+                if metadata.get(name) not in (None, "", [], {})}
+
+    def item_context_values(self, metadata: Mapping[str, Any]) -> dict[str, Any]:
+        """The values ``item_context`` names for one item, from its metadata: by default
+        the item's own fields of those names (a Task may derive them instead)."""
+        return {name: metadata[name] for name in self.item_context
                 if metadata.get(name) not in (None, "", [], {})}
 
     def instances(
@@ -202,6 +267,152 @@ def grader_outputs(ref: str) -> tuple[str, ...]:
     if not isinstance(cls, type) or not issubclass(cls, Task):
         return ()
     return tuple(str(name) for name in (getattr(cls, "grader_outputs", ()) or ()))
+
+
+#: What an item file's role may be called: a word.
+_ROLE = re.compile(r"[A-Za-z][A-Za-z0-9_]*")
+
+
+def _task_class(ref: str) -> type[Task] | None:
+    """The Task class a reference names, without building it (a Task may load its items
+    when built); ``None`` when it names none. An import that fails raises."""
+    ref = (ref or "").strip()
+    if ":" in ref:
+        module_name, _, attribute = ref.partition(":")
+        cls = getattr(importlib.import_module(module_name), attribute, None)
+    else:
+        cls = TASKS.get(ref)
+    return cls if isinstance(cls, type) and issubclass(cls, Task) else None
+
+
+def _folded(text: str) -> str:
+    """``text`` as names are compared: NFKC, without invisible format characters, and
+    case-folded, so ``Answer.txt`` or a full-width form names ``answer.txt``."""
+    kept = "".join(c for c in unicodedata.normalize("NFKC", text)
+                   if unicodedata.category(c) != "Cf")
+    return kept.casefold()
+
+
+def checked_item_files(task: Task | type[Task]) -> dict[str, str]:
+    """``task``'s item files (`Task.item_files`) as ``{role: path}``, each checked: a role
+    is a word; a path is relative, normalised and inside the pass (no ``..``, no ``.``
+    part, not the folder of another item file), outside the runtime's own records
+    (``.refactory/``, the pass's read-through and grading files, ``current_item.json``),
+    and none of the files the grader reads or writes (``graded_files``,
+    ``grader_outputs``). Anything else raises `TaskError`: an item file is what the item
+    gives its solver, never what it is graded on."""
+    from refactory_dsh.items import FACTS, GRADER_FILES, PASS_INFRA
+    from refactory_dsh.nn.executor import CURRENT_ITEM
+
+    # One declaration for the class and every instance, read the one way: the validator
+    # and the view read the class, the runtimes an instance.
+    cls = task if isinstance(task, type) else type(task)
+    name = getattr(cls, "name", "") or cls.__name__
+    if not isinstance(task, type) and any(
+            key in vars(task) for key in ("item_files", "graded_files", "grader_outputs")):
+        raise TaskError(f"Task {name!r} sets item_files, graded_files or grader_outputs on an "
+                        "instance; they are class attributes, read the same everywhere")
+    declared = getattr(cls, "item_files", None) or {}
+    if not isinstance(declared, Mapping):
+        raise TaskError(f"Task {name!r} item_files is {{role: path}}, not {declared!r}")
+    grader = {_folded(str(n)) for n in (*(getattr(cls, "graded_files", ()) or ()),
+                                        *(getattr(cls, "grader_outputs", ()) or ()))}
+    runtime = {_folded(n) for n in (CURRENT_ITEM, FACTS, *GRADER_FILES, *PASS_INFRA)}
+    out: dict[str, str] = {}
+    for role, path in declared.items():
+        if not isinstance(role, str) or not _ROLE.fullmatch(role):
+            raise TaskError(f"Task {name!r} item_files: role {role!r} is not a word")
+        if not isinstance(path, str) or not path.strip():
+            raise TaskError(f"Task {name!r} item_files[{role!r}] is not a path")
+        pure = PurePosixPath(path)
+        if (pure.is_absolute() or str(pure) != path or "\\" in path
+                or any(part in ("", ".", "..") for part in pure.parts)):
+            raise TaskError(f"Task {name!r} item_files[{role!r}] = {path!r} is not a normalised "
+                            "path inside the item's pass")
+        if any(unicodedata.category(c) in ("Cc", "Cf") for c in path):
+            raise TaskError(f"Task {name!r} item_files[{role!r}] = {path!r} holds a control or "
+                            "invisible character")
+        folded = _folded(path)
+        if _folded(pure.parts[0]) == ".refactory" or folded in runtime:
+            raise TaskError(f"Task {name!r} item_files[{role!r}] = {path!r} is one of the "
+                            "runtime's own files")
+        if folded in grader or _folded(pure.name) in grader:
+            raise TaskError(f"Task {name!r} item_files[{role!r}] = {path!r} is a file the grader "
+                            "reads or writes (graded_files, grader_outputs): an item file is "
+                            "what the item gives its solver, never what it is graded on")
+        out[role] = path
+    paths = sorted(_folded(p) for p in out.values())
+    for index, path in enumerate(paths):
+        if path in paths[index + 1:] or any(other.startswith(path + "/") for other in paths):
+            raise TaskError(f"Task {name!r} item_files: {path!r} is named twice or is the "
+                            "folder of another item file")
+    return out
+
+
+def task_item_files(ref: str) -> dict[str, str]:
+    """The item files (`checked_item_files`) of the Task ``ref`` names, read from its class;
+    ``{}`` when it names none. A declaration that fails the check raises `TaskError`."""
+    cls = _task_class(ref)
+    return checked_item_files(cls) if cls is not None else {}
+
+
+def task_tool_environment(ref: str) -> ToolEnvironment | None:
+    """The `Task.tool_environment` of the Task ``ref`` names, read from its class; ``None``
+    when it names none or declares none. A declaration of anything else raises
+    `TaskError`."""
+    cls = _task_class(ref)
+    declared = getattr(cls, "tool_environment", None) if cls is not None else None
+    if declared is None:
+        return None
+    if not isinstance(declared, ToolEnvironment) or not callable(declared.python):
+        raise TaskError(f"Task {ref!r} tool_environment is a ToolEnvironment, not {declared!r}")
+    return declared
+
+
+def pass_tool_environment(workdir: Path) -> tuple[str, ToolEnvironment] | None:
+    """``(task ref, its tool environment)`` for the item's pass ``workdir`` is, read from
+    the pass's marker (`items.PASS_MARKER`) as both runtimes write it; ``None`` outside a
+    pass or when its Task declares none."""
+    from refactory_dsh.items import PASS_MARKER
+
+    try:
+        ref = str(json.loads((Path(workdir) / PASS_MARKER).read_text()).get("task") or "")
+    except (OSError, ValueError, AttributeError):
+        return None
+    environment = task_tool_environment(ref) if ref else None
+    return (ref, environment) if environment is not None else None
+
+
+def check_laid_item_files(task: Task | None, workspace: Path) -> None:
+    """After ``setup``: each item file ``task`` declares that is there is a regular file of
+    the pass, reached through no link, so a step that reads it reads what the Task laid
+    in and nothing it points at. Both runtimes call this after every ``setup``; anything
+    else raises `TaskError`, which fails the item."""
+    import os
+    import stat
+
+    if task is None:
+        return
+    root = Path(workspace)
+    for role, path in checked_item_files(task).items():
+        target = root / path
+        if not os.path.lexists(target):
+            continue
+        current = root
+        for part in PurePosixPath(path).parts:
+            current = current / part
+            mode = os.lstat(current).st_mode
+            if stat.S_ISLNK(mode) or (current != target and not stat.S_ISDIR(mode)):
+                raise TaskError(f"item file {path!r} ({role}) is reached through a link: "
+                                "setup must lay it into the pass as a file of its own")
+        found = os.lstat(target)
+        if not stat.S_ISREG(found.st_mode):
+            raise TaskError(f"item file {path!r} ({role}) is not a regular file")
+        if found.st_nlink > 1:
+            # A hard link shares its content with a file outside the pass (the answer's,
+            # say): a copy of its own is what a step may read.
+            raise TaskError(f"item file {path!r} ({role}) is a hard link to another file: "
+                            "setup must lay it into the pass as a file of its own")
 
 
 def graded_files(state: Mapping[str, Any]) -> tuple[str, ...] | None:
@@ -316,11 +527,14 @@ def integrity_declaration(state: dict[str, Any]) -> dict[str, dict[str, str]]:
     return {"policy": policy, "allowances": allowances}
 
 
-def item_metadata_reader(state: dict[str, Any]) -> Any:
+def item_metadata_reader(state: dict[str, Any], *, context: bool = False) -> Any:
     """How a train record's declared metadata is read (``Task.item_metadata``,
-    ``Task.item_meta``) for the graph's Tasks: a function of a record returning
+    ``Task.item_meta``; with ``context``, ``Task.item_context`` and
+    ``Task.item_context_values``) for the graph's Tasks: a function of a record returning
     ``{name: value}``, never a name any Task lists in ``grader_fields``; ``None`` when no
     Task declares any. A Task that cannot be loaded declares nothing."""
+    declared_names, values_of = (("item_context", "item_context_values") if context
+                                 else ("item_metadata", "item_meta"))
     from refactory_dsh.nn.graph import Graph
 
     try:
@@ -336,7 +550,7 @@ def item_metadata_reader(state: dict[str, Any]) -> Any:
         except Exception:  # noqa: BLE001 - an unloadable Task is another check's to report
             continue
         hidden |= {str(name) for name in getattr(task, "grader_fields", ()) or ()}
-        if getattr(task, "item_metadata", ()):
+        if getattr(task, declared_names, ()):
             tasks.append(task)
     if not tasks:
         return None
@@ -346,11 +560,11 @@ def item_metadata_reader(state: dict[str, Any]) -> Any:
         out: dict[str, Any] = {}
         for task in tasks:
             try:
-                found = task.item_meta(meta)
+                found = getattr(task, values_of)(meta)
             except Exception:  # noqa: BLE001 - a header is a nicety, never a failure
                 continue
             for name, value in (found or {}).items():
-                if (str(name) not in hidden and str(name) in task.item_metadata
+                if (str(name) not in hidden and str(name) in getattr(task, declared_names)
                         and value not in (None, "", [], {})):
                     out.setdefault(str(name), value)
         return out

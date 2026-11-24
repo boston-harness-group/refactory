@@ -2098,6 +2098,7 @@ def _full_check(ctx: Any, command: str, check_timeout: int, prev_record: dict[st
     # Record exactly what the builder will be given (feedback re-fill reads it).
     _inherited_list = sorted(filtered.inherited) if found is not None else []
     _base_reset_list = getattr(ctx, '_base_reset', [])
+    _judge_reasons = filtered.reasons if (found is not None and filtered is not None) else None
     _cr_fail: dict[str, Any] = {
         "status": "fail",
         "validation": detail[:4000],
@@ -2111,6 +2112,8 @@ def _full_check(ctx: Any, command: str, check_timeout: int, prev_record: dict[st
         "inherited": _inherited_list,
         "commit": str(ctx.facts.get("commit", "")),
     }
+    if _judge_reasons:
+        _cr_fail["reasons"] = _judge_reasons
     if _base_reset_list:
         _cr_fail["base_reset"] = _base_reset_list
     ctx.write_json("check-record.json", _cr_fail)
@@ -2502,16 +2505,50 @@ def _the_changes_failures(ctx: Any, command: str, failing: list[str], check_time
     found = worktree.recorded(ctx.workdir)
     if found is None:
         return failing, [], "no base: the run has no worktree"
-    on_base = [test_id for test_id in failing if _on_the_base(Path(found.path), found.base, test_id)]
-    if not on_base:
-        return failing, [], "not run on the base: each failure is in a file the attempt added"
-    result, source = base_check.targeted_base_failures(
-        ctx, command, sorted(on_base), prepare_timeout=check_timeout, timeout=limit_s)
-    if result.environment_failure:
-        return failing, [], f"unavailable, so nothing is inherited: {result.environment_failure}"
-    inherited = base_check.design_comparison(result.failures, set(on_base), _named_text(ctx)).inherited
-    return ([test_id for test_id in failing if test_id not in inherited], sorted(inherited),
-            f"compared with {source}")
+    root = Path(found.path)
+    on_base = [test_id for test_id in failing if _on_the_base(root, found.base, test_id)]
+    base_failures: set[str] = set()
+    base_signatures: dict[str, str | None] = {}
+    said = "not run on the base: each failure is in a file the attempt added"
+    if on_base:
+        result, source = base_check.targeted_base_failures(
+            ctx, command, sorted(on_base), prepare_timeout=check_timeout, timeout=limit_s)
+        if result.environment_failure:
+            return failing, [], f"unavailable, so nothing is inherited: {result.environment_failure}"
+        base_failures, said = set(result.failures), f"compared with {source}"
+        base_signatures = dict(result.signatures or {})
+    # The same confirmation as the whole check's (`base_check.filter_check`): what the
+    # base does not fail runs again on the attempt, alone and then in its file's order,
+    # where the self-check ran it, and a failure that does not reproduce is not charged.
+    # A base failure in a test file the change touched runs again too, for its signature:
+    # it is inherited only when it fails the same way on both (correction 3).
+    changed = base_check._all_changed_files(root, found.base)
+    touched = {test_id for test_id in base_failures
+               if (name := base_check._test_file(test_id))
+               and any(path == name or path.endswith("/" + name) for path in changed)}
+    t_attempt_set: set[str] | None = None
+    attempt_signatures: dict[str, str | None] = {}
+    rerun = sorted((set(failing) - base_failures) | touched)
+    if rerun:
+        home = repo_change._check_home(ctx)
+        try:
+            t_attempt_set = base_check.targeted_attempt_failures(
+                ctx, command, rerun, timeout=limit_s,
+                place=(root, worktree.check_environment(root, home), home),
+                signatures=attempt_signatures)
+        except Exception:
+            t_attempt_set = None
+    jr = base_check.judge_failures(
+        set(failing), set(),
+        named_text=_named_text(ctx),
+        changed_files=changed,
+        targeted_base_failures_set=base_failures,
+        targeted_attempt_failures=t_attempt_set,
+        attempt_signatures=attempt_signatures,
+        base_signatures=base_signatures,
+    )
+    inherited = sorted(jr.excused)
+    return ([test_id for test_id in failing if test_id not in jr.excused], inherited, said)
 
 
 def _self_checks(ctx: Any) -> list[dict[str, Any]]:
@@ -2606,8 +2643,25 @@ def _record_prepared(ctx: Any, attempt: str, targeted_command: str | None) -> No
 def _record_check_verdict(ctx: Any, attempt: str, verdict: Any) -> None:
     # The command it ran: a decision stands for this attempt only while the check is
     # the same command (`graph-control amend-command` changes it).
-    ctx.write_json(CHECK_VERDICT, {"attempt": attempt, "command": str(ctx.facts.get("check") or ""),
-                                   "verdict": str(verdict), "reason": getattr(verdict, "reason", "")})
+    data: dict[str, Any] = {
+        "attempt": attempt,
+        "command": str(ctx.facts.get("check") or ""),
+        "verdict": str(verdict),
+        "reason": getattr(verdict, "reason", ""),
+    }
+    # Correction 4: show charged and excused IDs separately.
+    # Read from the check-record that _full_check just wrote.
+    cr = ctx.read_json("check-record.json", {}) if ctx.exists("check-record.json") else {}
+    if cr.get("inherited") is not None:
+        data["excused"] = cr["inherited"]
+    if cr.get("reasons"):
+        data["reasons"] = cr["reasons"]
+        # Charged: failures with reasons that are not in inherited.
+        excused_set = set(cr.get("inherited") or [])
+        data["charged"] = sorted(
+            tid for tid, reason in cr["reasons"].items() if tid not in excused_set
+        )
+    ctx.write_json(CHECK_VERDICT, data)
 
 
 def _decided(ctx: Any, attempt: str) -> dict[str, Any]:
@@ -3509,7 +3563,8 @@ def synthesize_qa(ctx: Any) -> dict[str, Any]:
         body += (f"\n\n## {RESULTS_MD} (the verifier's probe files, rerun by the runtime)\n\n"
                  "A failing probe is a defect the QA gate sends back unless the QA judge names "
                  "it a brief conflict; a PROBED claim with no probe file of its own is "
-                 "UNVERIFIED.\n\n" + probe_text + "\n")
+                 "UNVERIFIED; a requirement whose probes all pass on the base too is "
+                 "listed for the person (advisory).\n\n" + probe_text + "\n")
     body += _not_built_section(ctx)
     body += _updated_tests_section(ctx)
     ctx.write_text(QA_SYNTHESIS, body)
@@ -3926,7 +3981,9 @@ def gate_qa(ctx: Any) -> Any:
     any remaining must-fix items go to the pull request. A judge file that is missing or
     is not one JSON verdict is reread once (`_read_judge`); if it is still unreadable the
     change goes on with a note in the gate's status and the follow-ups, because the
-    overwatch still judges it.
+    overwatch still judges it. A requirement none of whose probes fails with the change
+    reverted (`probe_rerun.base_revert_findings`) is a follow-up on every path: never a
+    send-back and never a coverage re-run.
 
     Before the judge is read, two things are structural rather than judged, as they were:
     a review that left no report, or whose sign-off is not current for this attempt, sends
@@ -3964,7 +4021,10 @@ def gate_qa(ctx: Any) -> Any:
 
     from refactory_dsh import probe_rerun
 
-    failing = probe_rerun.defects(probe_rerun.read_results(ctx))
+    probe_results = probe_rerun.read_results(ctx)
+    failing = probe_rerun.defects(probe_results)
+    # A requirement no probe verified against the base: advisory, for the pull request.
+    not_on_base = probe_rerun.base_revert_findings(probe_results)
     conflicts = judges.brief_conflicts(judgment) if judgment is not None else {}
     settle = [(item, conflicts[Path(item["where"]).name]) for item in failing
               if Path(item["where"]).name in conflicts]
@@ -3988,7 +4048,7 @@ def gate_qa(ctx: Any) -> Any:
                                 "reloop: " + judges.feedback(judgment, "QA judge"), into=QA_DRAFT)
             if isinstance(ctx.facts.get(QA_DRAFT), dict):
                 # On as a draft: the judge's non-blocking items still go to the pull request.
-                record_follow_ups(ctx, "qa", [*judgment.follow_ups, *brief_conflicts])
+                record_follow_ups(ctx, "qa", [*judgment.follow_ups, *brief_conflicts, *not_on_base])
             return routed
         # Nothing holds the change back. The items the judge named go to the pull request.
         held = ("the QA judge asked for a redo, but nothing it named holds the change back: "
@@ -4004,6 +4064,7 @@ def gate_qa(ctx: Any) -> Any:
         note = _quoting(ctx, note + "; the change went on to the overwatch without it",
                         judges.QA_JUDGE)
         follow, summary, dismissed = [note], note, []
+    follow = [*follow, *not_on_base]
     # Nothing the QA judge named holds the change back any more.
     _note_unresolved(ctx, QA_UNRESOLVED, "QA judge", [])
     _note_unresolved(ctx, QA_UNRESOLVED, "QA gate", [])

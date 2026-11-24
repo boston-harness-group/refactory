@@ -1285,7 +1285,10 @@ these are generic by design (no dataset hints); SkillOpt's batches always hold 8
 (here a batch holds fewer when 8 whole items would not fit one call; no trace is cut,
 except one longer than the room on its own, counted); SkillOpt shows
 each item's task type (here the fields the item's Task declares, `Task.item_metadata`,
-with its input and its choices when it has them); and SkillOpt's analysts never
+with its input and its choices when it has them, and in full after the input what the
+Task declares its solver was given that no model call of the record carries,
+`Task.item_context`: SpreadsheetBench's agent harness shows the workbook preview, as
+SkillOpt's analysts see it); and SkillOpt's analysts never
 see an errored item (it has no conversation to show), while here it is a failure shown
 with its error. A failure finding here may also say how the steps took part (`steps`),
 which SkillOpt's single-skill analysts have no use for; the SkillOpt strategy's own
@@ -1681,6 +1684,98 @@ the strategy optimizes the single `skill` knob exactly as before.
 - **Trajectories.** LiveMath's trajectory view labels each message with the step that
   wrote it (`[compare] …`) when a record has several steps.
 
+## GEPA (`--strategy gepa`)
+
+`refactory_packages/gepa` ports `gepa.optimize` (gepa-ai/gepa 0.1.4, MIT) with its
+default configuration. Each iteration:
+
+1. Draw a parent from the per-instance Pareto frontier.
+2. Roll it out on a minibatch of 3 train items.
+3. Ask the reflection model (`--model`) to rewrite one component, using GEPA's own
+   prompt with each item's prompt, response and grader feedback.
+4. Keep the child only if its minibatch sum strictly beats the parent's.
+5. Score a kept child on the whole Pareto set.
+
+The result is the program with the highest Pareto-set mean. When the parts manifest has
+a test part, the seed and the result are then scored on test with the run's seed,
+through `FinalEvaluation` as SkillOpt is (`eval_test`, on by default). The report gives
+`test_eval`, `baseline_test`, `best_test` and `best_test_delta`. The module docstring
+(`refactory_packages/gepa/loop.py`) cites GEPA's source for each step.
+
+- **Components.** A component is an open text knob. By default GEPA rewrites the knobs
+  that exactly one agent node renders and that are not its system prompt: the per-node
+  instructions, as DSPy's components are its predictors' instructions. To choose others,
+  set `components=a,b`. Components are rewritten round robin, one per iteration; set
+  `module_selector=all` to rewrite every component each iteration. `module_selector=all`
+  and `use_merge` set every component in one proposal, so a mode with more components
+  than a proposal may edit (4) is refused before the run spends anything.
+- **The Pareto set.**
+  - `pareto_set=val` is the default, as upstream GEPA and `dspy.GEPA` are run with a
+    valset. Val is rolled out whole, and the strategy reads per-item scores through
+    `Run.part_item_scores`. That keys each item by an HMAC under a per-run secret,
+    journaled so a resumed run keys items the same way, in the manifest's order. No val
+    item reaches the reflection model.
+  - `pareto_set=train` holds `pareto_size` train ids out instead (half by default). The
+    seed and the Pareto-best are then scored on val, and the Pareto-best is the result
+    only if it beats the seed there.
+- **GEPA reads more of val than the other strategies.** With `pareto_set=val`, every
+  accepted program is scored on all of val, and GEPA picks parents and its result from
+  those per-item scores. The default loop and SkillOpt see val only as one score per
+  candidate, at their val gate. A comparison of GEPA with them should state this
+  difference, or run GEPA with `pareto_set=train`.
+- **Budget.**
+  - A metric call is an item rollout, counted by the run (`Run.rollouts_spent`).
+  - GEPA's `max_metric_calls` is the `max_metric_calls` option, or else
+    `--max-rollouts`. It is checked at the top of each iteration, so the last iteration
+    may overshoot by a few rollouts, as GEPA's does.
+  - A minibatch that repeats an item rolls it out once per occurrence. The sampler
+    repeats items to pad an epoch's last batch.
+  - With `pareto_set=train`, the rollouts needed to score the result on val are held
+    back.
+  - `--max-evaluations` (64 by default) counts evaluations, about two per iteration.
+    The run warns at the start when that limit would end the search first.
+  - The report's `stopped_by` names the budget that ended the search.
+  - Refactory refuses every rollout, test included, once `--max-rollouts` is spent. To
+    keep headroom for the test rollouts, set `max_metric_calls` below it: twice the test
+    part's size, plus a val rollout for the overshoot. Without that headroom the test
+    phase ends `incomplete`, as SkillOpt's does.
+- **Options.** The other options are GEPA's own, with GEPA's defaults:
+  - `seed` (the run's `--seed`; GEPA's default is 0)
+  - `reflection_minibatch_size` (3)
+  - `candidate_selection_strategy` (`pareto` or `current_best`)
+  - `skip_perfect_score`, `perfect_score`
+  - `use_merge` (off), `max_merge_invocations`, `merge_val_overlap_floor`
+  - `reflection_prompt_template`
+
+  These options are refactory's:
+  - `feedback`: `details` (the default) gives the grader's text; `score` gives only the
+    score sentence.
+  - `max_failed_iterations`: see the deviations below.
+  - `eval_test` (on): score the seed and the result on test after the search.
+- **As in GEPA.**
+  - A reflection call that fails all three attempts drops the iteration's whole
+    proposal, and no child is rolled out.
+  - A proposal whose texts all come back unchanged is still rolled out on the minibatch.
+    So is one that rebuilds a program the search already holds.
+- **Deviations.**
+  - **Merge cost.** A merge with `pareto_set=val` is rolled out on all of val, since val
+    cannot be subsampled. It is still judged on GEPA's 5 sampled instances, and costs
+    `|val|` rollouts, not 5.
+  - **A dead endpoint stops the run.** The run stops after `max_failed_iterations` (3)
+    iterations in a row in which every reflection call failed. GEPA has no such stop.
+    Without it, a dead endpoint would spend a minibatch of parent rollouts every
+    iteration until the budget ran out.
+  - **No duplicate programs.** A candidate is its state, so an accepted program the pool
+    already holds is recorded as `duplicate` and not added again. GEPA adds a copy and
+    scores it on the whole Pareto set.
+  - **Zero-score ancestors.** When every common ancestor of a merge pair scores 0, the
+    ancestor is drawn uniformly; GEPA's weighted draw raises there.
+  - **Unscored items.** Minibatch sums skip items that a harness incident left
+    unscored.
+- **Trace.** `gepa_trace.jsonl` in the run directory holds every reflection call and
+  decision. The strategy state is saved at the top of each iteration, so a resumed run
+  continues GEPA's random draws where they stopped.
+
 ## Structure edits: what an accepted edit guarantees
 
 A structure edit reaches the search only through `Optimizer.attempt` (which `Run.attempt`
@@ -1733,10 +1828,43 @@ state is promised, on any graph shape:
   outside its workspace and the system's programs (no other item, no grader file, no gold
   answer, no other process's environment), writes only its workspace, has no network, and
   starts with an environment of its own (no credential) and, on Linux, an empty session
-  keyring of its own. On Linux each command runs in a systemd user scope capped at 8 GiB
-  of memory and 256 processes where the person's user manager can make one, else with
-  128 processes and 8 GiB of address space per process; it dies with the DSH process
-  that started it. Before its outputs are collected, every process still sealed in its
+  keyring of its own. On Linux the whole step (every command and all it starts) is capped
+  at 8 GiB of memory, none of it in swap, and 256 processes (`seal_reaper.STEP_MEMORY_MAX`,
+  `STEP_SWAP_MAX`, `STEP_TASKS_MAX`), by the first of these that works (`seal.step_cap`):
+  1. a systemd user scope, where the person's user manager can make one and runs as long
+     as the run does (the run is in one of the person's sessions or in the manager, or the
+     person lingers);
+  2. else a cgroup of the step's own, `refactory-seal-<hash>`, in the cgroup systemd
+     delegated to the run (`seal_cgroup`). The first sealed step moves the run's own
+     processes into a leaf, `<unit>/main`, and turns on the memory and pids controllers
+     (cgroup v2 refuses that while a process sits in the cgroup), once, under a lock; each
+     step's runner moves itself into its cgroup before the seal starts. The cgroup goes
+     once its processes are killed and reaped: when the step is collected or its dispatch
+     ends, else at the node's next dispatch or the run's end;
+  3. else no whole-step cap: 128 processes and 8 GiB of address space per process.
+
+  A command dies with the DSH process that started it. A manager that stops with the
+  person's last session would kill a scope's commands mid-step, so a run outside the
+  person's sessions (a system service, a container's shell) uses no scope; one that goes
+  away anyway drops that step's later commands to the per-process limits, and the next step
+  is probed afresh. **A run launched as a system service gets the cap through option 2 when
+  it is launched with `-p Delegate=yes`** (for example `sudo systemd-run --unit=<name>
+  -p User=<user> -p Delegate=yes ...`); without it the step runs with per-process limits.
+  Each step's dispatch record says whether it had a whole-step cap and what it was, or why
+  not (`whole_step_cap`, `cap`): `"a systemd user scope (...)"`, `"a delegated cgroup
+  (memory.max=8589934592, memory.swap.max=0, pids.max=256) at <path>"` with that path in
+  `cgroup`, or the reasons neither worked (no delegation, a missing controller, EBUSY). A
+  runner that cannot join its cgroup runs the command under the per-process limits and the
+  record says so; the step never fails for it. The step's limit files (`memory.max` and the
+  rest) belong to the run's own user, so the cap holds only because the seal hides `/sys`
+  and lets the command make no user or cgroup namespace of its own: a seal change that
+  exposes either lets a step lift its own cap. The run's report says once when sealed
+  steps ran without a whole-step cap. The runner waits on the seal and is told, on a descriptor the
+  command never holds, when the command starts: a seal that fails before that (a
+  session keyring, the sandbox, its own setup exiting 97, a failing `unshare` or
+  `systemd-run`) is recorded beside the workspace for that one dispatch, and the step is
+  a harness incident (`SealFailed`), never an answer from commands that silently did
+  nothing. Whatever the command itself exits with is its own. Before its outputs are collected, every process still sealed in its
   workspace is killed (Linux: the runner and its PID namespace; macOS: `seal_reaper`), a
   workspace over 4 GiB is not collected, and each output is opened one name at a time
   relative to its folder's descriptor without following a link, so nothing it leaves or
@@ -1746,6 +1874,58 @@ state is promised, on any graph shape:
   The step runs only on the dsh worker backend in `skip` mode, where the seal runs
   (`seal.available`); elsewhere it is refused, never run with less, and the request does
   not show a tool step. A node whose id the seed has keeps the seed's policy.
+  **A Task's tool environment.** A Task may declare what its sealed steps' commands run
+  with (`Task.tool_environment`, a `ToolEnvironment`: a summary in plain words and a
+  function returning its checked interpreter). In an item's pass whose Task declares one,
+  both runtimes (the walker's dispatch and the spine's `worker_node`, through
+  `workspace.prepare`, from the pass's `.refactory/pass.json`) put that interpreter first on
+  the command's PATH as `python3` and `python` (two-line scripts in a `tool-bin` folder
+  beside the workspace) and bind read only only the folders it reports running from (its
+  prefixes and the folder its executable resolves to, never one guessed from where it is
+  named; `seal.interpreter_dirs`, `seal.tool_path`). A folder that holds or lies inside the
+  run's roots (the run every item's pass is in, and the outer loop's root), refactory's own
+  directory or a path the Task names as grader-side (`ToolEnvironment.hidden`;
+  SpreadsheetBench names what model code may not see, `sandbox.hidden_paths`, its dataset
+  among it), or that holds the home directory, is refused (`seal.refused_binding`, which
+  the model-code sandbox uses too). A Task must list its grader-side data in `hidden`
+  whenever its interpreter could sit near it: an interpreter installed inside the dataset
+  with no `hidden` would bind the dataset. An interpreter that is missing or fails the Task's
+  check fails the step; it never runs with the machine's python instead. The dispatch
+  record says which (`tool_environment`). SpreadsheetBench declares the pinned interpreter
+  its model code runs under (`interpreter.interpreter`, `SB_PYTHON`). A Task that declares
+  none runs as before. Where the run offers a tool step, the request's operator lines (the
+  proposer's and the analysts') state the summary as a fact.
+  A mode's own step may list Claude Code's tools instead (`seal.CLAUDE_CODE_TOOLS`: `Read`
+  and `Bash`, for a harness that runs Claude Code with `--tools Read,Bash`, as
+  `spreadsheetbench/agent` does). It stays on its claude_code route, in `skip`
+  (`bypassPermissions`) mode, and is refused on any other (`DshModelClient.
+  for_claude_sealed`). Its workspace is made and sealed as above; the patched adapter offers
+  and allows those tools only, loads no settings or MCP servers, and a `PreToolUse` hook
+  runs each Bash command under the same runner (the runner, `--`, `/bin/bash -c` and the
+  command) and refuses a Read whose real path is outside the workspace (or Claude Code's own
+  folders for this session only, where it saves a large tool result for the model to read
+  back; another session's of the same folder name is refused, and the session's own are
+  removed with it), a Read of a path starting with `~`, and any other tool. It fails
+  closed: a tool result for a call the hook never decided (a Claude Code that ignored it)
+  is recorded as a seal incident and the step fails as a harness incident (`SealFailed`),
+  never graded; Claude Code's own refusal of a call before any tool ran (an unoffered
+  tool, input that does not validate, `<tool_use_error>`) is the model's error, which it
+  sees and goes on from. A search never binds a step's route setting to a knob of its own
+  (`E-route`): only to a knob the seed froze, at its value.
+  Its prompt is sent alone (no execution contract: the harness's prompt names its files),
+  its reply is its first output, and each later output is a file it may leave in its
+  workspace, collected when it does and absent when it does not
+  (`workspace.optional_writes`). Where the item's Task declares a tool environment
+  (`Task.tool_environment`), its interpreter is `python` there too, with the Task's `hidden`
+  paths refused as for any sealed step. A Read runs in Claude
+  Code's own process, so on Linux the hook opens the file itself without following a last
+  link, checks the opened descriptor's own path is still inside the workspace, and gives
+  the Read a copy taken from it, beside the workspace (`<workspace>.reads/`): a link a
+  sealed command swaps in after the check is never followed. On macOS the Read opens the
+  resolved path it was judged by, so a link swapped in between could be followed. The
+  copies go with the dispatch. Since `workspace.is_sealed` takes these tools, a step the
+  search adds with them in a fresh workspace is judged as a sealed step on its route
+  (`E-new-node-tools` when the run cannot run one, or when `new_step_tools` is off).
 - **Protected nodes are untouched.** A mode names them in `Mode.protected_nodes()`
   (default none). An edit that removes one, changes its declaration or out-edges, moves a
   knob it reads, or lets a run finish without one that every run used to visit is refused
@@ -2147,7 +2327,48 @@ whose default is a copy of one) keeps its tools only in a fresh workspace of its
 (`scratch`): the attempt path lets a new agent run with the same tools a step of the seed
 runs with when it works in such a workspace (`E-new-node-tools` otherwise; a step listing
 its own tools runs sealed instead). A step that uses tools in the run directory is not run
-beside a copy of itself, rewired or merged; the refusal says to give it a workspace.
+beside a copy of itself, rewired or merged; the refusal says to give it a workspace. A step
+of the seed keeps its own tool rules (a `refused` solve step stays refused), but a step an
+edit adds may still have tools, and the request says so. `new_step_tools` off
+(`LoopConfig.new_step_tools`, on by default; an ablation) offers no tool step and refuses
+every new agent step with tools, `E-new-node-tools`, naming the setting. A run that keeps
+the default produces the same digest as before, so it still resumes.
+
+**Item files.** A Task may lay files into each item's pass under fixed names
+(`Task.item_files`, `{role: path}`, e.g. SpreadsheetBench's `{"input": "item/input.xlsx"}`).
+The data node declares each in its `writes` (V12), so any step of the pass can read one:
+a step names it in `sees` (or names the data node). A new sealed tool step inside a pass
+whose inputs the proposal does not name (no `sees` for a core operator's step, no `reads`
+in a node object written out whole) is given the pass's item files in its declared
+`reads` by default (`core_ops._with_item_files`, `core_ops.default_item_inputs`; the edit
+recorded holds them), so it gets a copy of each in its workspace. A default, never a
+limit: a step whose inputs are named keeps exactly those, and a rewire sees exactly what
+it says. The candidate's notes say, for each sealed tool step the proposal adds or changes
+in a pass, `<step> (tools, in the per-item part) has the item's input file(s) ...` or
+`... does not see the item's input file(s) ...`. A tool step outside a pass, or a step
+without tools, gets nothing it did not name. An op opens one through `ctx.item_file(role)`, which refuses (at run time, on
+both runtimes) a file the op does not list in its `reads`, as do the context's
+`read_text`, `read_json` and `exists`. An item file is what the item gives its solver,
+never its answer: a path the grader reads or writes is refused when the Task is checked
+(names compared case- and width-folded), `item_files` is a class attribute read the same
+way everywhere, and `setup` must lay each as a regular file of its own (a symbolic or hard
+link is refused and fails the item); grader-only fields stay out of the pass as before.
+
+**Saved states of an earlier version.** A mode may upgrade a state an earlier version of
+it saved (`Mode.upgrade_state`): only declarations its own ops now need, never what an
+edit chose. Both runtimes apply it (`Mode.load_state_dict` on the walker,
+`dsh_runtime.evaluate_on_dsh` on the spine), warn, and record each change in the run's
+`.refactory/state-upgrades.json`. SpreadsheetBench uses it so a candidate saved before
+its input was an item file (its protected data node does not declare `item/input.xlsx`)
+declares it and runs as it did; a state this version saved is never changed. The pipeline view's
+`per item` line names each item file and the steps that read it.
+
+**`to` an agent whose prompt is no knob.** `insert` (and `branch`, `map`) with `to` naming
+an agent step whose prompt is a template rather than a knob (SpreadsheetBench's
+`solve`, whose prompt is `{{solver_prompt}}`, a fact `frame` builds) re-slots that step's
+prompt in place, as `rewire` does: a `## <Fact>` section with the new step's `{{fact}}`
+goes after it, and the prompt becomes the step's own `<id>__task` knob. A frozen knob
+stays frozen: `to` naming one is still refused (`E-wiring`).
 
 **Each kind tried, against the noise.** A kind tried once with a small result read as a
 run-long ban: after one loop broke 2 items, S1-s43's note said "AVOID loops"; S4-s44's,
@@ -2544,6 +2765,11 @@ deferred, with why in `coverage.DECISIONS["deferred"]`.
 | bindable field: `max_iterations` | `add_node`, `wrap`, `loop`, `route` | `set_knob` | - |
 | bindable field: `parallelism` | *grader-side* | `set_knob` | - |
 | bindable field: `optional` | `branch` | `set_knob` | - |
+| bindable field: `route.max_completion_tokens` | `add_node`, `insert_after`, `insert_before`, `wrap`, `split`, `parallel`, `loop`, `insert`, `parallelize`, `branch`, `route`, `merge` | `set_knob` | - |
+| bindable field: `route.max_thinking_tokens` | `add_node`, `insert_after`, `insert_before`, `wrap`, `split`, `parallel`, `loop`, `insert`, `parallelize`, `branch`, `route`, `merge` | `set_knob` | - |
+| bindable field: `route.max_turns` | `add_node`, `insert_after`, `insert_before`, `wrap`, `split`, `parallel`, `loop`, `insert`, `parallelize`, `branch`, `route`, `merge` | `set_knob` | - |
+| bindable field: `route.bash_timeout_ms` | `add_node`, `insert_after`, `insert_before`, `wrap`, `split`, `parallel`, `loop`, `insert`, `parallelize`, `branch`, `route`, `merge` | `set_knob` | - |
+| bindable field: `route.bash_output_chars` | `add_node`, `insert_after`, `insert_before`, `wrap`, `split`, `parallel`, `loop`, `insert`, `parallelize`, `branch`, `route`, `merge` | `set_knob` | - |
 | node field: `id` | `add_node`, `insert_after`, `insert_before`, `wrap`, `split`, `parallel`, `loop`, `insert`, `parallelize`, `branch`, `route`, `merge` | *identity* | - |
 | node field: `kind` | `add_node`, `insert_after`, `insert_before`, `wrap`, `split`, `parallel`, `loop`, `insert`, `parallelize`, `branch`, `route`, `merge` | *identity* | - |
 | node field: `call` | `add_node`, `insert_after`, `insert_before`, `wrap`, `split`, `parallel`, `loop`, `insert`, `parallelize`, `branch`, `route`, `merge` | `split` | - |

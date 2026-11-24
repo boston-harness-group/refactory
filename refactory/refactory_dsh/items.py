@@ -84,6 +84,26 @@ _MAX_ID_BYTES = 200
 #: directory as a pass, so a write through one of its read-through links is
 #: detached first (:func:`detach_read_through`), on either runtime.
 PASS_MARKER = ".refactory/pass.json"
+
+
+def run_roots(workdir: Path) -> list[str]:
+    """The run an item's pass belongs to and, above it, the outer loop's root (every
+    candidate's records): what neither model code nor a sealed step may see. A concurrent
+    pass works through an alias (``.refactory/live/<node>/<item>``), so the pass is
+    resolved first; outside a pass, the directory itself."""
+    from refactory_dsh.history import JOURNAL, RUN_FILE
+
+    real = Path(workdir).resolve()
+    # ``<run>/passes/<node>/<item>``, else the directory itself; a pass nested in an outer
+    # pass climbs on to the run the outermost pass belongs to.
+    run = real
+    while (run / PASS_MARKER).exists() and len(run.parents) > 2:
+        run = run.parents[2]
+    roots = [str(run)]
+    for parent in run.parents:
+        if (parent / RUN_FILE).exists() or (parent / JOURNAL).exists():
+            roots.append(str(parent))
+    return roots
 #: When an item's pass started (seconds since the epoch), stamped once as the pass is
 #: prepared, on both runtimes (`prepare_pass_dir`): its record's ``duration_s`` is
 #: measured from it (`make_item_record`).
@@ -1299,6 +1319,11 @@ def command_begin(node: Node, workdir: Path, index: int, *, concurrent: bool = F
                 instance_of(item), pass_dir,
                 **part_seed_kwargs(task.setup, part=subset_part, seed=subset_seed),
             )
+            # What it laid in as item files is files of the pass (`Task.item_files`), as
+            # on the walker.
+            from refactory_dsh.task import check_laid_item_files
+
+            check_laid_item_files(task, pass_dir)
         except (KeyboardInterrupt, SystemExit):
             raise
         except Exception as exc:

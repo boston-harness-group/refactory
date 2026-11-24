@@ -7,14 +7,33 @@
 #
 # Arguments: refactory-seal, the workspace, the caller's uid and gid, the ulimit
 # options, the close step's file, the paths to bind (colon-separated), the names of
-# /usr/local to keep (colon-separated, glob patterns), the command's PATH and locale;
-# then whatever DSH appends, its command after "--".
+# /usr/local to keep (colon-separated, glob patterns), the command's PATH and locale,
+# pivot_root's path (resolved by refactory: a service's PATH may lack /usr/sbin), and the
+# folders of the Task's tool environment to bind read only (colon-separated, maybe none:
+# `seal.tool_path`), and the step's own folder to bind writable at /tmp (maybe none:
+# `seal.ToolPath.tmp`); then whatever DSH appends, its command after "--".
 [ "$1" = refactory-seal ] || { echo "refactory-seal: bad arguments" >&2; exit 97; }
 ws="$2"; uid="$3"; gid="$4"; limits="$5"; closer="$6"; reads="$7"; kept="$8"
-cmd_path="$9"; locale="${10}"
-shift 10
+cmd_path="$9"; locale="${10}"; pivot="${11}"; tools="${12}"; tmp="${13}"
+shift 13
 fail() { echo "refactory-seal: $1" >&2; exit 97; }
 exec 3<"$ws" || fail "cannot open the workspace"
+# The step's /tmp folder, opened now too: it may be under the /tmp covered below.
+tmp_fd=
+if [ -n "$tmp" ]; then
+    [ -d "$tmp" ] || fail "no folder $tmp"
+    exec {tmp_fd}<"$tmp" || fail "cannot open $tmp"
+fi
+# The tool environment's folders, opened now (as the workspace is): /tmp is covered below,
+# and one of them may be under it. Each must be there.
+IFS=: read -r -a tool_dirs <<< "$tools"
+tool_fds=()
+for d in "${tool_dirs[@]}"; do
+    [ -n "$d" ] || continue
+    [ -d "$d" ] || fail "no folder $d"
+    exec {fd}<"$d" || fail "cannot open $d"
+    tool_fds+=("$fd")
+done
 # The close step's code, read now: it runs as `bash -c` (a script file would hold a
 # descriptor of its own open) in the nested namespace, past anything that rewrites
 # arguments.
@@ -26,6 +45,13 @@ mount -n -t tmpfs -o mode=0755,size=1m seal /tmp || fail "cannot mount /tmp"
 r=/tmp/root
 { mkdir "$r" && mount -n -t tmpfs -o mode=0755,size=16m seal "$r"; } || fail "cannot make the new root"
 mkdir -p "$r/etc" || fail "cannot make /etc"
+# The step's /tmp first: anything bound below under /tmp (the workspace, a tool folder)
+# is then mounted over it, as it would be over the read-only one.
+if [ -n "$tmp_fd" ]; then
+    { mkdir -p "$r/tmp" && mount -n --bind "/proc/self/fd/$tmp_fd" "$r/tmp"; } \
+        || fail "cannot bind the step's /tmp"
+    exec {tmp_fd}<&- || fail "cannot close $tmp"
+fi
 # Each bound alone (--bind, not --rbind), so nothing mounted inside it comes along with
 # flags of its own, then made read only.
 IFS=: read -r -a binds <<< "$reads"
@@ -55,6 +81,14 @@ for e in "$r"/usr/local/* "$r"/usr/local/.[!.]*; do
         mount -n --bind /dev/null "$e" && mount -n -o remount,bind,ro "$e"
     fi || fail "cannot cover $e"
 done
+i=0
+for d in "${tool_dirs[@]}"; do
+    [ -n "$d" ] || continue
+    fd="${tool_fds[$i]}"; i=$((i + 1))
+    { mkdir -p "$r$d" && mount -n --bind "/proc/self/fd/$fd" "$r$d" \
+        && mount -n -o remount,bind,ro "$r$d"; } || fail "cannot bind $d"
+    exec {fd}<&- || fail "cannot close $d"
+done
 mkdir -p "$r/dev" "$r/proc" "$r/tmp" || fail "cannot make the mount points"
 for n in null zero random urandom; do
     { touch "$r/dev/$n" && mount -n --bind "/dev/$n" "$r/dev/$n"; } || fail "cannot bind /dev/$n"
@@ -65,10 +99,11 @@ done
 mount -n -t proc proc "$r/proc" || fail "cannot mount /proc"
 { mkdir -p "$r$ws" && mount -n --bind /proc/self/fd/3 "$r$ws"; } || fail "cannot bind the workspace"
 exec 3<&-
-{ cd "$r" && mkdir .old && pivot_root . .old; } || fail "cannot pivot to the new root"
+{ cd "$r" && mkdir .old && "$pivot" . .old; } || fail "cannot pivot to the new root"
 { cd / && umount -n -l /.old && rmdir /.old; } || fail "cannot detach the old root"
 # The new root itself (/, /tmp, the folders above the workspace) is read only, as
-# macOS's is: the workspace is the one place a sealed command writes.
+# macOS's is: the workspace is the one place a sealed command writes, and the step's own
+# /tmp where its Task asks for one.
 mount -n -o remount,bind,ro / || fail "cannot make the new root read only"
 # shellcheck disable=SC2086  # $limits is several options
 ulimit $limits || fail "cannot set limits"

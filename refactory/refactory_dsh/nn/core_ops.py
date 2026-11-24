@@ -53,6 +53,7 @@ from __future__ import annotations
 
 import json
 import re
+from contextvars import ContextVar
 from typing import Any, Collection, Iterable, Mapping, Sequence
 
 from refactory_dsh.seal import SEALED_TOOLS
@@ -543,6 +544,10 @@ def _step_nodes(graph: Graph, state: Mapping[str, Any], spec: dict, node_id: str
             node["workspace"] = {"kind": "scratch"}
             if files:
                 node["reads"] = files
+        if (tools or (like is not None and _uses_tools(like))) and spec.get("sees") is None \
+                and not spec.get("reads"):
+            # Wired by default, so given the item's input files by default too.
+            _default_wired(node_id)
         carried = _carried_knobs("agent", text, node["system_prompt_template"], knobs)
         if carried:
             node["knobs"] = carried
@@ -661,6 +666,11 @@ def _respec(state: Mapping[str, Any], node_id: str, new_state: dict[str, Any],
     value, which it is declared again at (a rewire's new prompt, holding its new slots)."""
     graph = _edits()._graph(state)
     node = graph.nodes[node_id]
+    if new_state.get("kind") == "agent" and "tool_policy" not in new_state \
+            and node.tool_policy is None:
+        # An agent that runs with tools keeps them: a state leaves out a policy of None,
+        # which `add_node` would read as a new agent's default, no tools.
+        new_state = {**new_state, "tool_policy": None}
     knobs = state.get("knobs") or {}
     readers = graph.knob_consumers()
     steps: list[dict] = [{"op": "remove_node", "id": node_id}]
@@ -902,7 +912,16 @@ def _place(state: Mapping[str, Any], fact: str, *, readers: Sequence[str],
             knob = knob_to if knob_to in filled else (filled[0] if len(filled) == 1 else None)
             if knob is None and to is None and filled:
                 return []  # it fills several prompts: which one is the proposer's to say
+        section = f"## {_heading(fact)}\n{{{{{fact}}}}}"
+        if guarded or ("fact", fact) not in avail.get(reader, set()):
+            section = f"{{% if {fact} %}}{section}{{% endif %}}"
         if knob is None:
+            if to is not None and knob_to is None and node is not None \
+                    and node.kind == "agent" and _task_knob(node) is None:
+                # An agent 'to' names whose prompt is no knob (a template a step's fact
+                # fills, say) is re-slotted in place, as `rewire` re-slots one: the same
+                # step, with a section for the fact after its prompt.
+                return _reslotted(state, node, fact, section)
             if to is not None:
                 raise edits.EditError(f"step {reader!r} has no prompt knob of its own to put "
                                       f"{{{{{fact}}}}} in; name the knob with 'to'",
@@ -911,11 +930,22 @@ def _place(state: Mapping[str, Any], fact: str, *, readers: Sequence[str],
         current = str(((state.get("knobs") or {}).get(knob) or {}).get("value") or "")
         if re.search(r"\{\{\s*" + re.escape(fact) + r"\s*\}\}", current):
             return []
-        section = f"## {_heading(fact)}\n{{{{{fact}}}}}"
-        if guarded or ("fact", fact) not in avail.get(reader, set()):
-            section = f"{{% if {fact} %}}{section}{{% endif %}}"
         return [{"op": "set_knob", "name": knob, "value": f"{current.rstrip()}\n\n{section}".lstrip()}]
     return []
+
+
+def _reslotted(state: Mapping[str, Any], node: Node, fact: str, section: str) -> list[dict]:
+    """The steps that give agent ``node``, whose prompt is no knob, ``section`` (the slot
+    for ``fact``) after its prompt, in place (`_respec`): its id, outputs, settings and
+    place in any fork, join, loop or pass stay; its prompt becomes a knob of its own
+    (``<id>__task``) when it is added again (`edits._own_bindings`), as a rewired one's
+    does. Nothing when the prompt already fills ``fact``."""
+    text = str(node.prompt_template or "")
+    if re.search(r"\{\{\s*" + re.escape(fact) + r"\s*\}\}", text):
+        return []
+    new_state = node.to_state()
+    new_state["prompt_template"] = f"{text.rstrip()}\n\n{section}".lstrip()
+    return _respec(state, node.id, new_state)
 
 
 def _place_all(build: _Steps, facts: Sequence[str], *, after: str, to: str | None = None,
@@ -1132,7 +1162,7 @@ def _pre_insert(edit: dict, state: dict) -> str | None:
         if spec["kind"] == "agent" and not spec.get("tools") and len(target.writes) > 1:
             raise _Refused(f"{target.id!r} writes {len(target.writes)} files, and a new agent "
                            "step without tools writes only its reply; take it over with a "
-                           "code step, or with 'tools'")
+                           f"code step{TOOLS_HINTS[0]}")
     return None
 
 
@@ -2256,12 +2286,19 @@ def _expand_rewire(edit: dict, state: dict) -> list[dict]:
     keep = set(facts) | set(state.get("knobs") or {})
     if helper is not None:
         build.add(_bypass(build.state, helper))
-    if files:
+    from refactory_dsh.workspace import is_sealed
+
+    # A sealed step reads its files in its own workspace, as a new one does (`_step_nodes`):
+    # they are its reads, exactly what 'sees' says, never a collect step's text.
+    sealed = is_sealed(node)
+    if files and not sealed:
         keep.add(gather)
         facts.append(gather)
     new_text = _with_sections(_strip_unseen(text, keep), facts)
     for key in ("reads", "required_reads", "inputs"):
         new_state.pop(key, None)
+    if sealed and files:
+        new_state["reads"] = files
     # Its prompt as a knob carries the new slots (the field too, so the knob's slot check
     # holds); a prompt that is not a knob is re-slotted in place: data wiring, no new text.
     new_state["prompt_template"] = new_text
@@ -2270,7 +2307,7 @@ def _expand_rewire(edit: dict, state: dict) -> list[dict]:
     own_knob = knob is not None and knob.startswith(f"{node.id}__")
     build.add(_respec(build.state, node.id, new_state,
                       values={knob: new_text} if own_knob else None))
-    if files:
+    if files and not sealed:
         build.add(_renamed(build.state, node.id, [gather], joins=False))
         build.add([{"op": "add_node", "position": {"before": node.id},
                     "node": collect_node(gather, files, gather,
@@ -2824,6 +2861,8 @@ def _expand_map(edit: dict, state: dict) -> list[dict]:
             node.update({"tool_policy": None, "tools": list(tools),
                          "workspace": {"kind": "scratch"},
                          "prompt_template": MAP_ELEMENT_TOOLS_PROMPT.format(file=element)})
+            if edit.get("sees") is None:
+                _default_wired(copy)
         if anchor.kind == "agent" and anchor.role:
             node["role"] = anchor.role
         if route:
@@ -2861,8 +2900,8 @@ def _fallback_spec(edit: dict, step: Node) -> dict:
     spec = _spec({k: v for k, v in edit.items() if k not in ("op", "step")})
     if spec["kind"] == "agent" and not spec.get("tools") and len(step.writes) > 1:
         raise _Refused(f"{step.id!r} writes {len(step.writes)} files, and a new agent step "
-                       "without tools writes only its reply; give it a code step, or "
-                       "'tools'")
+                       "without tools writes only its reply; give it a code step"
+                       f"{TOOLS_HINTS[1]}")
     return spec
 
 
@@ -3232,12 +3271,79 @@ def _guarded(check):
 
 def _guarded_expand(expand):
     def run(edit: dict, state: dict) -> list[dict]:
+        token = _DEFAULT_WIRED.set(set())
         try:
             steps = expand(edit, state)
+            wired = _DEFAULT_WIRED.get()
         except _Refused as exc:
             raise _edits().EditError(str(exc), code="E-precondition") from exc
-        return steps + _settle_optional(state, steps)
+        finally:
+            _DEFAULT_WIRED.reset(token)
+        steps = steps + _settle_optional(state, steps)
+        return steps + _with_item_files(state, steps, wired)
     return run
+
+
+# ── a tool step's item files ──────────────────────────────────────────────
+
+
+def item_files_before(graph: Graph, state: Mapping[str, Any], node_id: str) -> list[str]:
+    """The item's input files (`task.Task.item_files`) of the per-item pass ``node_id``
+    runs in -- its innermost data node's Task's -- that are there before it on every path;
+    none at the top level, or where the Task declares none or cannot be read (another
+    rule's to say). Never a grader-side file: an item file is checked never to be one."""
+    from refactory_dsh.task import TaskError, task_item_files
+
+    data_id = _pass_of(graph, node_id)
+    if data_id is None:
+        return []
+    try:
+        files = task_item_files(graph.nodes[data_id].task_ref or "")
+    except (TaskError, ImportError):
+        return []
+    there = _readable(graph, state, set(_available(graph).get(node_id, set())))
+    return sorted(path for path in files.values() if ("file", path) in there)
+
+
+#: The new steps an operator's expansion wired by default (no 'sees' or 'reads' given
+#: for them): only these are given the item's input files by default (`_with_item_files`).
+_DEFAULT_WIRED: ContextVar[set[str] | None] = ContextVar("default_wired", default=None)
+
+
+def _default_wired(node_id: str) -> None:
+    found = _DEFAULT_WIRED.get()
+    if found is not None:
+        found.add(node_id)
+
+
+def _with_item_files(start: Mapping[str, Any], steps: Sequence[dict],
+                     wired: Collection[str]) -> list[dict]:
+    """Steps that give each new sealed tool step (`workspace.is_sealed`) the operator wired
+    by default (``wired``: the proposer gave no 'sees' or 'reads' for it) the item's input
+    files of the pass it runs in (`item_files_before`) in its declared ``reads``, beside
+    what it reads already: a default, never a limit. A step whose inputs the proposer named
+    keeps exactly those (the candidate's notes say when it does not see the item's input
+    files, `item_input_notes`)."""
+    from refactory_dsh.workspace import is_sealed
+
+    if not wired:
+        return []
+    end = _simulate(start, steps)
+    new = _edits()._graph(end)
+    out: list[dict] = []
+    for node_id in sorted(set(wired) & set(new.nodes)):
+        node = new.nodes[node_id]
+        if not is_sealed(node):
+            continue
+        missing = [path for path in item_files_before(new, end, node_id)
+                   if path not in node.reads]
+        if not missing:
+            continue
+        more = _respec(end, node_id, {**node.to_state(), "reads": [*node.reads, *missing]})
+        out += more
+        end = _simulate(end, more)
+        new = _edits()._graph(end)
+    return out
 
 
 def _settle_optional(start: Mapping[str, Any], steps: Sequence[dict]) -> list[dict]:
@@ -3306,7 +3412,8 @@ def _settle_optional(start: Mapping[str, Any], steps: Sequence[dict]) -> list[di
 
 #: Where a new step's output goes (`_place`): one phrase for every operator that says it.
 REACHES = ("its output goes into the nearest prompt {where} that can take it -- an agent's own "
-           "prompt knob, or the one text knob an op fills facts into -- or where 'to' says; "
+           "prompt knob, or the one text knob an op fills facts into -- or where 'to' says (a "
+           "prompt knob, or a step: an agent whose prompt is no knob gets a section for it); "
            "with neither, refused unless a step reads it")
 
 #: The field a new agent step names its own route in (`Node.route`).
@@ -3323,6 +3430,37 @@ def route_field_line(offered: Mapping[str, Sequence[str]]) -> str:
             + json.dumps({ROUTE_FIELD: {key: vals[0] for key, vals in offered.items()}}))
 
 
+#: What the insert line says of 'tools', and the map line: dropped from the request, with
+#: the 'tools' field, in a run that offers no tool step (`without_tools`).
+INSERT_TOOLS = ("; 'tools' (an agent): e.g. " + json.dumps(list(SEALED_TOOLS))
+                + "; a new step may have them though the steps beside it have none or refuse "
+                "theirs (an existing step keeps its own tool rules); it runs sealed: only the "
+                "files it sees (in the per-item part, without 'sees', the item's input files "
+                "too), no network, no grader files")
+MAP_TOOLS = "; 'tools' as insert's: each run sealed"
+
+
+#: How a refusal ends that names tools as the other way to write several files (a
+#: take-over's, a fallback's): said only where the run offers a tool step
+#: (`refusal_without_tools`).
+TOOLS_HINTS = (", or with 'tools'", ", or 'tools'")
+
+
+def refusal_without_tools(reason: str) -> str:
+    """A refusal as a run that offers no tool step says it: without `TOOLS_HINTS`."""
+    for hint in TOOLS_HINTS:
+        reason = reason.replace(hint, "")
+    return reason
+
+
+def without_tools(description: str, fields: Sequence[str]) -> tuple[str, list[str]]:
+    """An operator's request line and fields with no offer of tools: for a run where a new
+    step has none (no seal, or ``new_step_tools`` off)."""
+    for clause in (INSERT_TOOLS, MAP_TOOLS):
+        description = description.replace(clause, "")
+    return description, [f for f in fields if f != "tools"]
+
+
 #: Each operator: its catalogue fields, its one line for the request, and one example
 #: with placeholders (``<step>``, ``<next step>``, ``<fork>``, ``<gate>``).
 OPERATORS: dict[str, dict[str, Any]] = {
@@ -3334,8 +3472,7 @@ OPERATORS: dict[str, dict[str, Any]] = {
                 "'system' its system prompt), code (text = Python) or op (with 'call' and "
                 "'reads'); it sees what that step sees plus its outputs; "
                 + REACHES.format(where="after it")
-                + "; 'tools' (an agent): e.g. " + json.dumps(list(SEALED_TOOLS))
-                + "; runs sealed: only the files it sees, no network"
+                + INSERT_TOOLS
                 + "; 'takes_over' an earlier step: the new step writes that step's outputs, "
                 "so what read them reads the new step's (a choice among attempts reaching "
                 "what is scored), and that step's own go under new names",
@@ -3454,7 +3591,7 @@ OPERATORS: dict[str, dict[str, Any]] = {
                 f"{MAP_MAX[2]}; past it the first 'max', and the combine is told so); 'text' "
                 "says what to do with one element; 'combine' (a step as in insert) sees every "
                 "result and writes one output, placed as insert's is; 'system' as insert's, "
-                "for each run; 'tools' as insert's: each run sealed; remove the elements step or the combine and the whole map "
+                "for each run" + MAP_TOOLS + "; remove the elements step or the combine and the whole map "
                 "goes",
         "example": {"op": "map", "after": "<step>", "over": "<step>",
                     "text": "<what to do with one element>",
@@ -3566,9 +3703,11 @@ def _open_knob(state: Mapping[str, Any], name: str) -> bool:
     return not (((state.get("knobs") or {}).get(name) or {}).get("spec") or {}).get("frozen")
 
 
-def reader_knobs(state: Mapping[str, Any], node_id: str) -> list[str]:
+def reader_knobs(state: Mapping[str, Any], node_id: str, *, steps: bool = False) -> list[str]:
     """The prompt knobs after step ``node_id`` that 'to' can name for its output, nearest
-    first: an agent's own prompt knob, or a text knob an op fills facts into; none frozen."""
+    first: an agent's own prompt knob, or a text knob an op fills facts into; none frozen.
+    With ``steps``, an agent whose prompt is no knob is named too, by its id ('to' naming
+    it re-slots its prompt, `_reslotted`)."""
     graph = _edits()._graph(state)
     names: list[str] = []
     if not graph.nodes[node_id].produces:
@@ -3580,6 +3719,9 @@ def reader_knobs(state: Mapping[str, Any], node_id: str) -> list[str]:
         if node.kind == "agent":
             knob = _task_knob(node)
             found = [knob] if knob and len(graph.knob_consumers().get(knob, ())) == 1 else []
+            if steps and knob is None and reader not in names:
+                names.append(reader)
+                continue
         else:
             found = _filled_text_knobs(node, state, graph)
         names += [k for k in found if k not in names and _open_knob(state, k)]
@@ -3611,8 +3753,8 @@ def _reader_hint(state: Mapping[str, Any], node_id: str, edit: Mapping[str, Any]
                  before: Mapping[str, Any]) -> str:
     """Where step ``node_id``'s output could go, for a refusal, in one clause: the prompt
     knobs after it (named in 'to' when ``edit``'s operator takes one); when the nearest
-    agent after it takes no knob of its own, the op before it that builds that agent's
-    prompt, to insert before; and when no later step can read it at all, a step that takes
+    agent after it takes no knob of its own, that agent in 'to' (its prompt is re-slotted)
+    and the op before it that builds that agent's prompt, to insert before; and when no later step can read it at all, a step that takes
     over the one whose output is graded (``takes_over``; a route way's new step rewrites it
     in place on its way)."""
     op = edit.get("op")
@@ -3628,6 +3770,8 @@ def _reader_hint(state: Mapping[str, Any], node_id: str, edit: Mapping[str, Any]
                      f"put {{{{{fact}}}}} in a later prompt: {names}")
     first = next((graph.nodes[r] for r in readers if graph.nodes[r].kind == "agent"), None)
     if takes_to and first is not None and _task_knob(first) is None:
+        # Its prompt is no knob: 'to' naming it re-slots it (`_reslotted`).
+        parts.append(f"name {first.id} in 'to' (its prompt gets a section for it)")
         after = _downstream(graph, node_id)
         taken = _consumed(first, state)
         for builder in graph.nodes.values():
@@ -4031,10 +4175,14 @@ def register(macro, macros: Mapping[str, Any]) -> None:
 
 
 def wiring_notes(edit: Mapping[str, Any], before: Mapping[str, Any],
-                 after: Mapping[str, Any]) -> list[str]:
+                 after: Mapping[str, Any], final: Mapping[str, Any] | None = None) -> list[str]:
     """What a core operator did beyond the steps it names: the steps it added and removed,
-    and the prompts of existing steps it put a new step's output into, so the candidate
-    says where an output went."""
+    the prompts of existing steps it put a new step's output into, and the item's input
+    files a tool step it added or changed works on (`_with_item_files`), so the candidate
+    says where an output went. ``after`` is the state the edit left; ``final`` (default
+    ``after``) the candidate's, after every edit of its proposal: what is true of the
+    candidate -- a new step's output that nothing reads, a knob that reaches no step --
+    is judged there, so a later edit that reads the output is not contradicted."""
     if not isinstance(edit, Mapping) or edit.get("op") not in CORE_OPS:
         return []
     if edit.get("op") == "loop" and not is_one_line_loop(edit):
@@ -4054,12 +4202,15 @@ def wiring_notes(edit: Mapping[str, Any], before: Mapping[str, Any],
                            - set(re.findall(r"\{\{\s*([A-Za-z_]\w*)\s*\}\}", str(was or ""))))
             if slots:
                 placed.append(f"{', '.join('{{' + s + '}}' for s in slots)} into knob {name!r}")
+    final = after if final is None else final
     unread: list[str] = []
     try:
-        graph = _edits()._graph(after)
-        taken_in = set().union(*(_consumed(n, after) for n in graph.nodes.values()))
+        graph = _edits()._graph(final)
+        taken_in = set().union(*(_consumed(n, final) for n in graph.nodes.values()))
         for node_id in added:
-            node = graph.nodes[node_id]
+            node = graph.nodes.get(node_id)
+            if node is None:
+                continue  # a later edit of the proposal took it out again
             if node.kind in ("agent", "op") and node.produces and not any(
                     ("fact", f) in taken_in for f in node.produces) and not any(
                     ("file", f) in taken_in for f in node.writes):
@@ -4089,14 +4240,84 @@ def wiring_notes(edit: Mapping[str, Any], before: Mapping[str, Any],
     if dropped:
         parts.append(f"dropped knob(s) {', '.join(dropped)}, which no step reads now")
     try:
+        # Said by the edit that made it so, and only when it still is in the candidate.
         was_dead = dead_text_knobs(before)
+        still = dead_text_knobs(final) if final is not after else None
         parts += [f"knob {name!r} now reaches no step ({op} fills it into "
                   f"{', '.join(outputs)}, which no step reads)"
                   for name, (op, outputs) in sorted(dead_text_knobs(after).items())
-                  if name not in was_dead]
+                  if name not in was_dead and (still is None or name in still)]
     except Exception:  # noqa: BLE001 - a note, never a refusal
         pass
     return [f"{edit.get('op')}: " + "; ".join(parts)] if parts else []
+
+
+def item_input_notes(parent: Mapping[str, Any], final: Mapping[str, Any]) -> list[str]:
+    """What the candidate says of each sealed tool step (`workspace.is_sealed`) it adds or
+    changes inside a per-item pass whose Task lays item files: whether its sealed workspace
+    holds the item's input files (given by default when the proposer named none of its
+    inputs, `_with_item_files`), or which of them it does not see. Facts, never refusals."""
+    from refactory_dsh.workspace import is_sealed
+
+    try:
+        old, new = _edits()._graph(parent), _edits()._graph(final)
+    except Exception:  # noqa: BLE001 - a note, never a refusal
+        return []
+    notes = []
+    for node_id in sorted(new.nodes):
+        node = new.nodes[node_id]
+        if not is_sealed(node) or (node_id in old.nodes
+                                   and old.nodes[node_id].to_state() == node.to_state()):
+            continue
+        files = item_files_before(new, final, node_id)
+        has = [path for path in files if path in node.reads]
+        missing = [path for path in files if path not in node.reads]
+        if has:
+            notes.append(f"{node_id} (tools, in the per-item part) has the item's input "
+                         f"file(s) {', '.join(has)} in its sealed workspace")
+        if missing:
+            notes.append(f"{node_id} (tools, in the per-item part) does not see the item's "
+                         f"input file(s) {', '.join(missing)}")
+    return notes
+
+
+#: Where a written-out edit carries whole node objects (`nn.edits`): the field, and whether
+#: it holds a list of them.
+_NODE_FIELDS = (("node", False), ("into", True), ("branches", True))
+
+
+def default_item_inputs(edit: Mapping[str, Any], before: Mapping[str, Any],
+                        after: Mapping[str, Any]) -> dict[str, Any] | None:
+    """``edit`` with the item's input files as the ``reads`` of each node object it adds
+    whole (``add_node``, the written-out macros) that runs its tools sealed inside a
+    per-item pass and names no ``reads`` of its own -- the default a core operator's new
+    tool step gets (`_with_item_files`) -- judged on ``after``, the state ``edit`` left;
+    ``None`` when it adds none such. The edit as returned is the one recorded and replayed.
+    A node object that lists ``reads`` (even none) keeps exactly those."""
+    from refactory_dsh.workspace import is_sealed
+
+    if not isinstance(edit, Mapping) or (edit.get("op") in CORE_OPS and not (
+            edit.get("op") == "split" and not is_one_line_split(edit))):
+        return None
+    try:
+        new = _edits()._graph(after)
+    except Exception:  # noqa: BLE001 - the validator's to say
+        return None
+    out = json.loads(json.dumps(edit))
+    changed = False
+    for key, many in _NODE_FIELDS:
+        value = out.get(key)
+        for node_state in (value if many and isinstance(value, list) else [value]):
+            if not isinstance(node_state, dict) or "reads" in node_state:
+                continue
+            node = new.nodes.get(str(node_state.get("id")))
+            if node is None or not is_sealed(node):
+                continue
+            files = item_files_before(new, after, node.id)
+            if files:
+                node_state["reads"] = files
+                changed = True
+    return out if changed else None
 
 
 def _taken_away(before: Mapping[str, Any], after: Mapping[str, Any], added: Sequence[str],

@@ -300,8 +300,13 @@ function knobOutputIssues(id: string, node: WorkflowNode): GraphIssue[] {
   return issues
 }
 
-/** What a step's own route may set, as Python's `nn.graph.STEP_ROUTE_FIELDS`. */
-const STEP_ROUTE_FIELDS = ['model', 'effort', 'max_completion_tokens']
+/**
+ * What a step's own route may hold, as Python's `nn.graph.ROUTE_DECLARATION_FIELDS`: its
+ * model, effort and output cap, and Claude Code's thinking budget, turn cap and Bash limits (which a mode
+ * binds to a frozen knob, `Node.bound_route`).
+ */
+const STEP_ROUTE_FIELDS = ['model', 'effort', 'max_completion_tokens', 'max_thinking_tokens', 'max_turns',
+  'bash_timeout_ms', 'bash_output_chars']
 
 /**
  * What is wrong with a step's own `route`, by the rules Python's `Node` holds it to

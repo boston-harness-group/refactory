@@ -26,7 +26,7 @@ from refactory_dsh.outerloop import FinalEvaluation, ValidationGate
 from refactory_packages.skillopt.loop import SkillOptLoop
 from refactory_packages.skillopt import schedule as sched_mod
 from refactory_packages.skillopt import prompts
-from refactory_packages.skillopt.trace import current_call_key
+from refactory_dsh.strategy_trace import current_call_key
 
 
 @pytest.fixture(autouse=True)
@@ -34,7 +34,7 @@ def _no_retry_waits(monkeypatch: pytest.MonkeyPatch) -> list[float]:
     """``trace.ask`` waits 1, 2, 4 s after failed attempts, as SkillOpt does; the
     suite records the waits instead of sleeping them."""
     waits: list[float] = []
-    monkeypatch.setattr("refactory_packages.skillopt.trace._sleep", waits.append)
+    monkeypatch.setattr("refactory_dsh.strategy_trace._sleep", waits.append)
     return waits
 
 # ── toy task & mode ────────────────────────────────────────────────────────
@@ -1556,7 +1556,7 @@ def test_three_failed_attempts_take_the_existing_fallback(tmp_path, _no_retry_wa
     assert [c["attempt"] for c in _model_calls(trace)] == [1, 2, 3]
     assert all(c["raw_output"] is None for c in _model_calls(trace))
     assert _no_retry_waits == [1, 2, 4]  # SkillOpt waits after its last failure too
-    from refactory_packages.skillopt.trace import retry_delay
+    from refactory_dsh.strategy_trace import retry_delay
     assert [retry_delay(a) for a in range(6)] == [1, 2, 4, 8, 15, 15]  # claude_backend.py:323
 
     _no_retry_waits.clear()
@@ -1573,7 +1573,7 @@ def test_a_reply_is_never_retried(tmp_path, _no_retry_waits):
     """SkillOpt retries only a call that raised; an unusable reply goes to the
     caller's parse and fallback (aggregate.py:53-64) after one attempt."""
     from refactory_packages.skillopt import merge
-    from refactory_packages.skillopt.trace import ask
+    from refactory_dsh.strategy_trace import ask
 
     client = FakeClient({("merge_final", 1, 0, 0): "I cannot merge these."})
     trace = _trace(tmp_path)
@@ -1593,7 +1593,7 @@ def test_a_reply_is_never_retried(tmp_path, _no_retry_waits):
     lambda: __import__("refactory_dsh.model", fromlist=["ModelChoiceError"]).ModelChoiceError(),
 ])
 def test_budget_cancel_and_model_choice_are_never_retried(tmp_path, _no_retry_waits, make_error):
-    from refactory_packages.skillopt.trace import ask
+    from refactory_dsh.strategy_trace import ask
 
     error = make_error()
 
@@ -1879,7 +1879,7 @@ def test_tolerant_json_in_every_parser(tmp_path):
 
 
 def _trace(tmp_path: Path):  # type: ignore[no-untyped-def]
-    from refactory_packages.skillopt.trace import TraceRecorder
+    from refactory_dsh.strategy_trace import TraceRecorder
     return TraceRecorder(tmp_path / "unit_trace.jsonl")
 
 

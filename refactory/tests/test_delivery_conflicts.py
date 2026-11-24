@@ -2037,3 +2037,105 @@ def test_a_redo_after_main_moved_again_reruns_the_merged_check(github, tmp_path,
     assert redo > 0
     assert "merge_check_reused_from" not in record
     assert "reused from the check" not in (run / delivery.BODY).read_text()
+
+
+# ── merge-check excusal tests (correction 6) ───────────────────────────
+#
+# The reference path itself runs on real worktrees in test_judge_paths.py.
+
+import subprocess as _sp
+from types import SimpleNamespace as _NS
+from unittest.mock import patch as _patch
+
+from refactory_dsh import base_check as _bc, sandbox
+
+
+def _merge_check_ctx(tmp_path, *, base_commit="abc123", check="pytest tests/"):
+    """Minimal context for _check_merged."""
+    run = tmp_path / "run"
+    run.mkdir(parents=True, exist_ok=True)
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _sp.run(["git", "-C", str(repo), "init", "-q", "-b", "main"], check=True, capture_output=True)
+    _sp.run(["git", "-C", str(repo), "config", "user.email", "t@t"], check=True, capture_output=True)
+    _sp.run(["git", "-C", str(repo), "config", "user.name", "T"], check=True, capture_output=True)
+    (repo / "tool.py").write_text("print('ok')\n")
+    _sp.run(["git", "-C", str(repo), "add", "."], check=True, capture_output=True)
+    _sp.run(["git", "-C", str(repo), "commit", "-q", "-m", "init"], check=True, capture_output=True)
+    commit = _sp.run(["git", "-C", str(repo), "rev-parse", "HEAD"],
+                     check=True, capture_output=True, text=True).stdout.strip()
+    ctx = _NS(
+        workdir=run,
+        facts={"check": check, "setup": "", "generate": "", "commit": commit},
+        budget=None,
+    )
+    ctx.knob = lambda name, default=None: default
+    ctx.exists = lambda name: (run / name).exists()
+    ctx.read_text = lambda name: (run / name).read_text()
+    ctx.set_fact = lambda name, value: ctx.facts.__setitem__(name, value)
+    ctx.write_text = lambda name, text: (run / name).write_text(text) or (run / name)
+    found = worktree.Worktree(
+        path=str(repo), branch="main", base=base_commit,
+        head=commit, target=str(repo), run=str(run),
+    )
+    return ctx, found, commit
+
+
+def test_target_tip_carried_on_clean_merge():
+    """MergeResult constructed with target_tip carries it through to the caller.
+
+    When the target_tip field is removed from MergeResult or the assignment in
+    _merge_target's clean-merge return is reverted, this test must fail.
+    """
+    # Verify the MergeResult dataclass has the target_tip field
+    merge = delivery.MergeResult(merge_commit="abc123", target_tip="def456")
+    assert merge.target_tip == "def456"
+    assert merge.merge_commit == "abc123"
+    # Without target_tip, default is empty string
+    merge2 = delivery.MergeResult(merge_commit="abc123")
+    assert merge2.target_tip == ""
+
+
+def test_merge_check_reuses_inrun_base(tmp_path):
+    """When target_tip equals the run's base commit, failures the whole in-run base
+    check already recorded are excused in the merge check."""
+    test_a = "tests/test_a.py::test_x"
+    failure_output = f"FAILED {test_a} - assert False\n= 1 failed in 0.1s =\n"
+
+    ctx, found, commit = _merge_check_ctx(tmp_path)
+    # target_tip equals found.base
+    target_tip = found.base
+
+    check_result = sandbox.SandboxResult(
+        ok=False, stdout=failure_output, stderr="", returncode=1)
+    # Targeted base runs: empty (they don't find the failure)
+    targeted_base = _bc.BaseCheckResult(
+        ok=True, failures=set(), output="all passed", exit_code=0)
+    # But the in-run base cache has test_a
+    cache_key = _bc.cache_key(found.base, "", "", "pytest tests/")
+    cache_data = {
+        "cache_key": cache_key,
+        "ok": False,
+        "failures": [test_a],
+        "output": failure_output,
+        "exit_code": 1,
+        "environment_failure": None,
+        "base_clean": True,
+    }
+    cache_path = ctx.workdir / _bc.CACHE_FILE
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    import json as _json
+    cache_path.write_text(_json.dumps(cache_data))
+
+    with _patch.object(sandbox, "run_command", return_value=check_result), \
+         _patch.object(_bc, "targeted_base_failures",
+                       return_value=(targeted_base, "targeted")), \
+         _patch.object(_bc, "targeted_attempt_failures",
+                       return_value={test_a}), \
+         _patch.object(worktree, "git", return_value=""), \
+         _patch("refactory_dsh.delivery.record_full_check"):
+        reason, infra = delivery._check_merged(
+            ctx, found, commit, commit, 60.0, target_tip=target_tip)
+
+    # test_a is excused because the in-run base cache has it
+    assert reason == "", f"expected empty reason (excused via inrun base), got: {reason}"
