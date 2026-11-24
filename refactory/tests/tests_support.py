@@ -136,6 +136,31 @@ def graph_profile(home: Path, checkout: Path) -> Path:
     return directory
 
 
+def graph_owner_launcher(directory: Path) -> Path | None:
+    """A `DSH_CLI` that hands a graph-profile launch to `graph-owner.mjs`, or ``None``
+    when this checkout cannot run it (no Node, or no `pnpm install`).
+
+    The real spine row, mounted as the graph profile mounts it, with no CEO model and no
+    person: commands run as DSH runs them, and the run ends when the spine stops. As
+    `parity_dsh.py` does, everything after ``--profile <name>`` is graph-startup's.
+    """
+    import shutil
+
+    from refactory_dsh.paths import REPO_ROOT
+
+    node = shutil.which("node")
+    owner = REPO_ROOT / "packages/workflow/workflow-spine/tests/fixtures/graph-owner.mjs"
+    if node is None or not (REPO_ROOT / "packages/workflow/workflow-spine/node_modules").exists():
+        return None
+    directory.mkdir(parents=True, exist_ok=True)
+    script = directory / "owner-script.json"
+    script.write_text(json.dumps({"answers": []}))
+    launcher = directory / "dsh"
+    launcher.write_text('#!/bin/sh\nwhile [ "$1" != --profile ]; do shift; done\nshift 2\n'
+                        f'exec "{node}" "{owner}" --script "{script}" -- "$@"\n')
+    launcher.chmod(0o755)
+    return launcher
+
 _INIT = '''\
 """A generated package."""
 from refactory_dsh.nn import Package

@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import copy
 import importlib
+import io
 import json
 import multiprocessing
 import os
@@ -28,6 +29,8 @@ import warnings
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Mapping, Protocol, Sequence
+
+from refactory_dsh import activity
 
 from .graph import PROCEED, Edge, Graph, Node, op_io
 from .loops import loop_edges
@@ -149,6 +152,12 @@ class HaltStop(Exception):
         self.gate = gate
         self.reason = reason
         super().__init__(f"gate {gate!r} halted the run")
+
+    def detail(self) -> str:
+        """What the run's status says of this halt: which gate, and the reason it gave
+        (a halt verdict's own reason, or the cap that refused a retry), as the spine
+        keeps it. A plain ``halt`` with no reason says only which gate."""
+        return f"{self}: {self.reason}" if self.reason and self.reason != "verdict" else str(self)
 
 
 def route_verdict(verdict: str, edges: list[Edge], gate_kind: str) -> tuple[Edge | None, str]:
@@ -291,6 +300,8 @@ class RunContext:
         target = self._writable(name)
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(text)
+        # A watched run counts a node's writes as work (`activity`); others do nothing.
+        activity.mark()
         return target
 
     def append_text(self, name: str, text: str) -> Path:
@@ -299,6 +310,7 @@ class RunContext:
         target.parent.mkdir(parents=True, exist_ok=True)
         with target.open("a") as handle:
             handle.write(text)
+        activity.mark()
         return target
 
     def read_text(self, name: str) -> str:
@@ -638,9 +650,35 @@ def load_items(node: Node, workdir: Path) -> list[dict[str, Any]]:
     :func:`refactory_dsh.task.select_subset`; both runtimes load through this
     function, so both iterate the same part of the same items.
     """
-    from refactory_dsh.task import select_subset
+    from refactory_dsh.task import _item_key, select_subset
 
-    return select_subset(full_items(node, workdir), workdir)
+    every = full_items(node, workdir)
+    items = select_subset(every, workdir)
+    # A smoke's sample (`sandbox.smoke_sample`) names, per Task-bound node, the items it
+    # runs; any other run iterates the whole selected part, as it always has. An item is
+    # named as the sample and the selection name it: by id, else by its position among
+    # all the node's items (`task._item_key`), never its position in the selection.
+    if node.task_ref:
+        sample = smoke_sample_ids(workdir, node.id)
+        if sample is not None:
+            keys = {id(item): _item_key(item, index) for index, item in enumerate(every)}
+            items = [item for item in items if keys.get(id(item)) in sample]
+    return items
+
+
+#: Where a smoke's sample names the items each Task-bound data node runs
+#: (`sandbox.smoke_sample`), relative to the run directory: ``{node id: [item ids]}``.
+SMOKE_SAMPLE = ".refactory/smoke-sample.json"
+
+
+def smoke_sample_ids(workdir: Path, node_id: str) -> set[str] | None:
+    """The item ids a smoke's sample gives ``node_id``, or None outside a smoke."""
+    try:
+        sample = json.loads((Path(workdir) / SMOKE_SAMPLE).read_text())
+    except (OSError, json.JSONDecodeError):
+        return None
+    ids = sample.get(node_id) if isinstance(sample, dict) else None
+    return {str(item) for item in ids} if isinstance(ids, list) else None
 
 
 def full_items(node: Node, workdir: Path) -> list[dict[str, Any]]:
@@ -798,6 +836,7 @@ def _op_child_target(conn: Any, args_dict: dict[str, Any]) -> None:
         raise SystemExit(f"terminated by signal {signum}")
     signal.signal(signal.SIGTERM, _sigterm_handler)
 
+    record = None
     try:
         # Apply the parent's environment snapshot: the forkserver child inherits
         # the forkserver's env (created once), but the parent may have set vars
@@ -806,6 +845,9 @@ def _op_child_target(conn: Any, args_dict: dict[str, Any]) -> None:
         if env_snapshot:
             os.environ.clear()
             os.environ.update(env_snapshot)
+        # In a watched run (`activity.WATCH_ENV`) this child, which leads a session of
+        # its own, records its group, so a stopped run can end it.
+        record = activity.record_process()
         # The child imports what an op names on its own: the forkserver started with the
         # parent's sys.path. A workspace package installed since then is picked up here.
         for pkg_name, pkg_paths in args_dict.get("_package_paths", {}).items():
@@ -853,11 +895,10 @@ def _op_child_target(conn: Any, args_dict: dict[str, Any]) -> None:
             # be emitted by the parent, matching the spine (execute.ts:177-178).
             # SWEEP-4: also capture stdout so the parent can extract fn-gate
             # feedback the same way the spine does (execute.ts:148-157).
-            import io as _io
             _old_stderr = sys.stderr
             _old_stdout = sys.stdout
-            _capture_stderr = _io.StringIO()
-            _capture_stdout = _io.StringIO()
+            _capture_stderr = _MarkedCapture()
+            _capture_stdout = _MarkedCapture()
             sys.stderr = _capture_stderr
             sys.stdout = _capture_stdout
             try:
@@ -899,7 +940,17 @@ def _op_child_target(conn: Any, args_dict: dict[str, Any]) -> None:
                 "_stdout": _err_stdout,
             }))
     finally:
+        activity.forget_process(record)
         conn.close()
+
+
+class _MarkedCapture(io.StringIO):
+    """An op child's captured output, which a watched run counts as work as it is
+    written (`activity.mark`), as the spine's node runner does."""
+
+    def write(self, text: str) -> int:
+        activity.mark()
+        return super().write(text)
 
 
 def _finish_op_child(child: Any) -> None:
@@ -1115,7 +1166,7 @@ class Executor:
                     error = str(exc)
                     self._record(node.id, error=error, outcome="refused")
                 except HaltStop as exc:
-                    error = str(exc)
+                    error = exc.detail()
                     self._record(node.id, error=error, outcome="halted")
                 except Exception as exc:
                     error = f"{node.id}: {type(exc).__name__}: {exc}"
@@ -1382,7 +1433,7 @@ class Executor:
                         raise
                       except HaltStop as exc:
                         # Terminal halt ends the data node.
-                        error = str(exc)
+                        error = exc.detail()
                         self._record(node.id, error=error, outcome="halted")
                         _data_halted = True
                         break
@@ -1536,7 +1587,8 @@ class Executor:
                 current = None
                 break
             except HaltStop as exc:
-                error = str(exc)
+                # Include the halt reason so it reaches the run's status record.
+                error = exc.detail()
                 self._record(exc.gate, error=error, outcome="halted")
                 current = None
                 break
@@ -2444,9 +2496,12 @@ class Executor:
         # checkpoint's `gate_verdicts`, here the progress record), never a fact: no node
         # reads it, and the spine's facts have none.
         if selected is None:
-            # Terminal halt
+            # Terminal halt — carry the verdict's own reason so the halt text
+            # reaches the run's status record on the walker, as the spine carries
+            # it through ``reasonOf(stdout)`` (run.py prints reason then label).
+            halt_reason = str(getattr(verdict, "reason", "") or "").strip() or reason
             self.record.gate(self.graph, node.id, verdict, target=None, retry=False)
-            raise HaltStop(node.id, reason=reason)
+            raise HaltStop(node.id, reason=halt_reason)
         # SWEEP-4: Match the spine's feedback text (execute.ts:reasonOf).
         # On the spine, run.py prints Verdict.reason to stdout first, then the
         # verdict label; reasonOf() takes all lines before the last non-empty one.

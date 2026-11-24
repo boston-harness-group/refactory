@@ -98,6 +98,9 @@ class RunResult:
     gate_exhausted: list[str] = field(default_factory=list)
     #: Per-item records from a data-node evaluation (F6).
     item_records: list[dict[str, Any]] = field(default_factory=list)
+    #: What stopped the run before it finished: ``'inactivity'`` or ``'backstop'``,
+    #: or ``None`` when the run completed or was stopped for another reason.
+    timeout_kind: str | None = None
 
 
 class _Values:

@@ -40,6 +40,21 @@ when measured, stdout/stderr, elapsed time and failure information. Distinct smo
 directories preserve the outputs of earlier attempts. `revision.json` separately
 records comparison/provenance. Design retains its command and actual output.
 
+A Task-bound mode is smoked on `smoke_items` items of its train part, run at once.
+The train part is the one the mode's own runs use. Name the saved optimize profile
+with the `profile` knob, or pass `holdout` and `parts_manifest` as `refactory optimize`
+takes them (LiveMath: its manifest and `holdout` 0); a knob given wins over the
+profile. A relative manifest path, given here or in the profile, is the project's,
+while `refactory optimize` reads a relative one against its own working directory: give
+the profile an absolute path, or run optimize from the project, for both to agree.
+A `holdout` that is not empty or a number from 0 to below 1 stops the run at its
+first node. `smoke.json` records the split
+(and where each setting came from) and the items each node ran. With none given, the
+smoke samples the default holdout fraction and `create.json` warns that val or test
+items may have run. A manifest none of whose train ids is an item of the Task, or a
+node with no train item, is refused before the run; a manifest some of whose train
+ids are missing is warned about. A revision's source is smoked on the same sample.
+
 `authoring-evidence.json` binds the validation result to hashes of the delivered
 source, authoritative brief/strategy/design/plan inputs, applicable ledger entries,
 validation settings, receipt files and canonical runtime output files. Each validation receipt also survives in

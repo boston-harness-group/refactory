@@ -45,7 +45,7 @@ async function run(ctx: Context, name: string, args: unknown): Promise<unknown> 
 }
 
 /** A run whose person gives `answer` at the design gate every time it is asked. */
-async function answering(workdir: string, asked: string[], answer = 'reloop'): Promise<Context> {
+async function answering(workdir: string, asked: string[], answer = 'reloop', custom = ''): Promise<Context> {
   const ctx = new Context()
   await ctx.plugin(SystemPrompt)
   await ctx.plugin(ToolRuntime)
@@ -53,7 +53,7 @@ async function answering(workdir: string, asked: string[], answer = 'reloop'): P
   ctx.on('user-questions/request', request => Promise.resolve({
     answers: request.questions.map(question => {
       asked.push(question.question)
-      return { id: question.id, selected: [answer], custom: '' }
+      return { id: question.id, selected: [answer], custom }
     }),
   }))
   await ctx.plugin(workflowSpine, { graph, toolPrefix: 'wf', maxIterations: 9, workdir })
@@ -117,5 +117,16 @@ describe('the reloop limit at a user gate', () => {
     const view = presentResult('verdict', { gate: 'gate_strategy' },
       { isError: false, meta: presentationMeta('verdict', stopped) })
     expect(view).toEqual({ card: 'generic', title: 'You stopped the run' })
+  })
+
+  it('says nothing about a limit when the person stops the run with a reason', async () => {
+    const workdir = mkdtempSync(join(tmpdir(), 'dsh-spine-reloop-limit-'))
+    dirs.push(workdir)
+    const ctx = await answering(workdir, [], 'halt', 'not worth building')
+    const stopped = await askOnce(ctx)
+    // Their reason is the reply's feedback; no halt message repeats it as the gate's.
+    expect(stopped).toMatchObject({ status: 'routed', verdict: 'halt', answered_by: 'user', halted: true,
+      feedback: 'not worth building' })
+    expect(stopped).not.toHaveProperty('message')
   })
 })
