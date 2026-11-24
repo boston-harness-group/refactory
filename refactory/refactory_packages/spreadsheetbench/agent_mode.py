@@ -51,7 +51,7 @@ from refactory_dsh import nn
 
 from . import agent_port
 from . import skillopt_port as port
-from .mode import OPS, SKILLOPT_CLAUDE_CODE
+from .mode import OPS, SKILLOPT_CLAUDE_CODE, author_note, upgrade_frozen_descriptions
 
 #: The same items and grade, with the input's preview as each item's context for the
 #: optimizer (`tasks.SpreadsheetBenchAgentTask`).
@@ -95,12 +95,11 @@ class Agent(nn.Mode):
                                    description="the solve call's thinking budget (SkillOpt's "
                                                "--max-thinking-tokens)"),
             PROMPT_KNOB: nn.Knob(agent_port.SOLVE_PROMPT, "str", frozen=True,
-                                 description="the solve call's prompt (frozen; use the skill "
-                                             "knob)"),
+                                 description="the solve call's prompt (frozen)"),
             SYSTEM_PROMPT_KNOB: nn.Knob("", "str", frozen=True,
                                         description="text appended to Claude Code's system prompt "
                                                     "for the solve call: none, as SkillOpt's CLI "
-                                                    "(frozen; use the skill knob)"),
+                                                    "(frozen)"),
         }
 
     def build(self) -> nn.Graph:
@@ -147,6 +146,12 @@ class Agent(nn.Mode):
         """The solve step runs on SkillOpt's Claude Code, as the solver's does."""
         return {"solve": SKILLOPT_CLAUDE_CODE}
 
+    @classmethod
+    def upgrade_state(cls, state):
+        """A saved state's frozen knob descriptions as this version words them
+        (`spreadsheetbench.mode.upgrade_frozen_descriptions`)."""
+        return upgrade_frozen_descriptions(state)
+
     def protected_nodes(self) -> tuple[str, ...]:
         """The data pass and the item's outcome."""
         return ("data", "finalize")
@@ -156,7 +161,5 @@ class Agent(nn.Mode):
         return sum(scores) / len(scores) if scores else 0.0
 
     def guidance(self) -> str:
-        return ("The skill is written to the agent's SKILL.md, which it reads before writing "
-                "solution.py for every item; the graph can be edited too -- the steps before "
-                "and around the solve step (only data and finalize are protected). Keep every "
-                "change general -- it must help on items no rollout saw.")
+        return author_note(self, "The `skill` knob is written to the agent's SKILL.md, which "
+                                 "it reads before writing solution.py for every item.")

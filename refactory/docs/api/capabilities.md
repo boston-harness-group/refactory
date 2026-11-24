@@ -13337,7 +13337,7 @@ solve a LiveMathematicianBench multiple-choice item with a single agent call and
     },
     "solve__system_prompt": {
       "default": "You are an expert mathematical reasoning agent solving multiple-choice questions.\n\n{{skill_section}}## Task Format\nYou will receive one mathematics multiple-choice question and its answer choices.\nReason carefully about quantifiers, hypotheses, extremal wording, and exact equality conditions.\n\n## Answer Format\nThink step by step, then provide your final answer inside <answer>...</answer> tags.\nInside the tags, output only the single choice label, such as A or C.\n\nExample:\n<answer>B</answer>\n",
-      "description": "system prompt for solve (frozen; use the skill knob)",
+      "description": "system prompt for solve (frozen)",
       "frozen": true,
       "kind": "str",
       "range": [
@@ -13368,7 +13368,7 @@ solve a LiveMathematicianBench multiple-choice item with a single agent call and
       "panel": "Mode picker; Run once executes enabled modes including authoring; Optimize requires a scored mode. Use chat for stepwise gates."
     },
     "purpose": "solve a LiveMathematicianBench multiple-choice item with a single agent call and grade the answer with SkillOpt's evaluator. The prompt never carries the item's theorem or proof sketch (SkillOpt's use_theorem / use_sketch, off in its runs, are not ported: the theorem states the correct option). max_completion_tokens caps each solve-node model call (default 0 = no cap, as arm A's claude_chat solver runs; a run setting the search does not move). data_parallelism sets how many items the data node runs at once (default 1, sequential; --knob data_parallelism=24 matches arm A's workers 24). Arm-A parity: --worker-backend claude_code --permission-mode dontAsk --model claude-opus-4-6 --effort medium --setting-sources project --knob data_parallelism=24 --strategy skillopt (see the mode's docstring). Requires LIVEMATH_DATA_PATH pointing at qa_*_final.json files. Optimize only when scored; higher is better.",
-    "reviewed_schema": "1544ca7092490387bb83e18e832888ea8ac6497bc00cedfb7cd311643feb1fac"
+    "reviewed_schema": "c24a267b1e47c08ba1478fb22e47a79d55eb0a68ab4a9b59e210079026698432"
   }
 }
 ```
@@ -13522,7 +13522,7 @@ fork two independent solve attempts for each LiveMathematicianBench item, join t
     },
     "judge__system_prompt": {
       "default": "You are an expert mathematical reasoning agent solving multiple-choice questions.\n\n{{skill_section}}## Task Format\nYou will receive one mathematics multiple-choice question and its answer choices.\nReason carefully about quantifiers, hypotheses, extremal wording, and exact equality conditions.\n\n## Answer Format\nThink step by step, then provide your final answer inside <answer>...</answer> tags.\nInside the tags, output only the single choice label, such as A or C.\n\nExample:\n<answer>B</answer>\n",
-      "description": "system prompt for judge (frozen; use the skill knob)",
+      "description": "system prompt for judge (frozen)",
       "frozen": true,
       "kind": "str",
       "range": [
@@ -13558,7 +13558,7 @@ fork two independent solve attempts for each LiveMathematicianBench item, join t
     },
     "solve_a__system_prompt": {
       "default": "You are an expert mathematical reasoning agent solving multiple-choice questions.\n\n{{skill_section}}## Task Format\nYou will receive one mathematics multiple-choice question and its answer choices.\nReason carefully about quantifiers, hypotheses, extremal wording, and exact equality conditions.\n\n## Answer Format\nThink step by step, then provide your final answer inside <answer>...</answer> tags.\nInside the tags, output only the single choice label, such as A or C.\n\nExample:\n<answer>B</answer>\n",
-      "description": "system prompt for solve_a (frozen; use the skill knob)",
+      "description": "system prompt for solve_a (frozen)",
       "frozen": true,
       "kind": "str",
       "range": [
@@ -13570,7 +13570,7 @@ fork two independent solve attempts for each LiveMathematicianBench item, join t
     },
     "solve_b__system_prompt": {
       "default": "You are an expert mathematical reasoning agent solving multiple-choice questions.\n\n{{skill_section}}## Task Format\nYou will receive one mathematics multiple-choice question and its answer choices.\nReason carefully about quantifiers, hypotheses, extremal wording, and exact equality conditions.\n\n## Answer Format\nThink step by step, then provide your final answer inside <answer>...</answer> tags.\nInside the tags, output only the single choice label, such as A or C.\n\nExample:\n<answer>B</answer>\n",
-      "description": "system prompt for solve_b (frozen; use the skill knob)",
+      "description": "system prompt for solve_b (frozen)",
       "frozen": true,
       "kind": "str",
       "range": [
@@ -13601,7 +13601,7 @@ fork two independent solve attempts for each LiveMathematicianBench item, join t
       "panel": "Mode picker; Run once executes enabled modes including authoring; Optimize requires a scored mode. Use chat for stepwise gates."
     },
     "purpose": "fork two independent solve attempts for each LiveMathematicianBench item, join them, then let a judge agent pick the best answer. Part of the structure-ablation grid (F22): same knobs, grader and route settings as livemath/solver; 3 model calls per item. Not an optimizer target (block is a constructor parameter, not a knob).",
-    "reviewed_schema": "5ab83fcb2e7804299411d23303b04ab17cfea1df8782daa09363422f11f28a26"
+    "reviewed_schema": "2ddd04b7c4108f39cf928b56950ddb789325a9fc6d7be28c4fc1b5e2e8902bf6"
   }
 }
 ```
@@ -13725,7 +13725,7 @@ solve each LiveMathematicianBench item then ask the same agent to re-evaluate th
     },
     "self_check__system_prompt": {
       "default": "You are an expert mathematical reasoning agent solving multiple-choice questions.\n\n{{skill_section}}## Task Format\nYou will receive one mathematics multiple-choice question and its answer choices.\nReason carefully about quantifiers, hypotheses, extremal wording, and exact equality conditions.\n\n## Answer Format\nThink step by step, then provide your final answer inside <answer>...</answer> tags.\nInside the tags, output only the single choice label, such as A or C.\n\nExample:\n<answer>B</answer>\n",
-      "description": "system prompt for self_check (frozen; use the skill knob)",
+      "description": "system prompt for self_check (frozen)",
       "frozen": true,
       "kind": "str",
       "range": [
@@ -13749,7 +13749,7 @@ solve each LiveMathematicianBench item then ask the same agent to re-evaluate th
     },
     "solve_draft__system_prompt": {
       "default": "You are an expert mathematical reasoning agent solving multiple-choice questions.\n\n{{skill_section}}## Task Format\nYou will receive one mathematics multiple-choice question and its answer choices.\nReason carefully about quantifiers, hypotheses, extremal wording, and exact equality conditions.\n\n## Answer Format\nThink step by step, then provide your final answer inside <answer>...</answer> tags.\nInside the tags, output only the single choice label, such as A or C.\n\nExample:\n<answer>B</answer>\n",
-      "description": "system prompt for solve_draft (frozen; use the skill knob)",
+      "description": "system prompt for solve_draft (frozen)",
       "frozen": true,
       "kind": "str",
       "range": [
@@ -13780,7 +13780,7 @@ solve each LiveMathematicianBench item then ask the same agent to re-evaluate th
       "panel": "Mode picker; Run once executes enabled modes including authoring; Optimize requires a scored mode. Use chat for stepwise gates."
     },
     "purpose": "solve each LiveMathematicianBench item then ask the same agent to re-evaluate the answer with SkillOpt's multi-turn refinement prompt. Part of the structure-ablation grid (F22): same knobs, grader and route settings as livemath/solver; 2 model calls per item. Not an optimizer target (block is a constructor parameter, not a knob).",
-    "reviewed_schema": "f67f658dc6e057bc14ef0d808c67eea24fff14f4da1c01d11c13a69ed0cd1d80"
+    "reviewed_schema": "f6ab21f861d983b75bd4f22a1253ed4b291a258f231e1e57896fbb06e60a52d6"
   }
 }
 ```
@@ -13916,7 +13916,7 @@ solve each LiveMathematicianBench item then verify the answer with a second agen
     },
     "solve_draft__system_prompt": {
       "default": "You are an expert mathematical reasoning agent solving multiple-choice questions.\n\n{{skill_section}}## Task Format\nYou will receive one mathematics multiple-choice question and its answer choices.\nReason carefully about quantifiers, hypotheses, extremal wording, and exact equality conditions.\n\n## Answer Format\nThink step by step, then provide your final answer inside <answer>...</answer> tags.\nInside the tags, output only the single choice label, such as A or C.\n\nExample:\n<answer>B</answer>\n",
-      "description": "system prompt for solve_draft (frozen; use the skill knob)",
+      "description": "system prompt for solve_draft (frozen)",
       "frozen": true,
       "kind": "str",
       "range": [
@@ -13928,7 +13928,7 @@ solve each LiveMathematicianBench item then verify the answer with a second agen
     },
     "verify__system_prompt": {
       "default": "You are an expert mathematical reasoning agent solving multiple-choice questions.\n\n{{skill_section}}## Task Format\nYou will receive one mathematics multiple-choice question and its answer choices.\nReason carefully about quantifiers, hypotheses, extremal wording, and exact equality conditions.\n\n## Answer Format\nThink step by step, then provide your final answer inside <answer>...</answer> tags.\nInside the tags, output only the single choice label, such as A or C.\n\nExample:\n<answer>B</answer>\n",
-      "description": "system prompt for verify (frozen; use the skill knob)",
+      "description": "system prompt for verify (frozen)",
       "frozen": true,
       "kind": "str",
       "range": [
@@ -13959,7 +13959,7 @@ solve each LiveMathematicianBench item then verify the answer with a second agen
       "panel": "Mode picker; Run once executes enabled modes including authoring; Optimize requires a scored mode. Use chat for stepwise gates."
     },
     "purpose": "solve each LiveMathematicianBench item then verify the answer with a second agent call. Part of the structure-ablation grid (F22): same knobs, grader and route settings as livemath/solver; 2 model calls per item. Not an optimizer target (block is a constructor parameter, not a knob).",
-    "reviewed_schema": "827045416b3b42ea436289d95886fd2390a37822a1aa28bd732f9a32cd07622d"
+    "reviewed_schema": "478830f2c6cc8eb4f01c3abc7d03b9c16dff410466032748bf6f28128488c9bb"
   }
 }
 ```
@@ -14458,7 +14458,7 @@ draft, check, and let a person approve before publishing. Inspect declared ports
 
 ## spreadsheetbench/agent
 
-solve a SpreadsheetBench item as SkillOpt's Claude Code agent harness does (claude_code_exec, mode single): one sealed Claude Code session with Read and Bash, given SkillOpt's prompt byte for byte, works in a workspace holding the input, the skill as .agents/skills/skillopt-target/SKILL.md, task.md and run_solution.py, its commands seeing only that workspace and the pinned interpreter as python, and writes solution.py; that code (else the reply's first fenced block) is run against a copy of the input in the code sandbox and graded by SkillOpt's cell comparison (SB_GRADER=recalc by default). No gold feedback reaches the agent, as in SkillOpt's single path. The session ends on inactivity with no wall (SkillOpt: 600 s per item). Needs the claude_code worker in skip (bypassPermissions) mode; the thinking budget (16384) is a frozen knob. The skill is the only unfrozen knob; the graph around it is editable too. Requires SB_DATA. Optimize only when scored; higher is better.
+solve a SpreadsheetBench item as SkillOpt's Claude Code agent harness does (claude_code_exec, mode single): one sealed Claude Code session with Read and Bash, given SkillOpt's prompt byte for byte, works in a workspace holding the input, the skill as .agents/skills/skillopt-target/SKILL.md, task.md and run_solution.py, its commands seeing only that workspace and the pinned interpreter as python, and writes solution.py; that code (else the reply's first fenced block) is run against a copy of the input in the code sandbox and graded by SkillOpt's cell comparison (SB_GRADER=recalc by default). No gold feedback reaches the agent, as in SkillOpt's single path. The session ends on inactivity with no wall (SkillOpt: 600 s per item). Needs the claude_code worker in skip (bypassPermissions) mode; the thinking budget (16384) is a frozen knob. The skill is the only unfrozen knob; the steps other than the protected ones can be edited and new steps added, within what the frozen knobs fix. Requires SB_DATA. Optimize only when scored; higher is better.
 
 ```json
 {
@@ -14491,7 +14491,7 @@ solve a SpreadsheetBench item as SkillOpt's Claude Code agent harness does (clau
       "user": false
     }
   ],
-  "guidance": "The skill is written to the agent's SKILL.md, which it reads before writing solution.py for every item; the graph can be edited too -- the steps before and around the solve step (only data and finalize are protected). Keep every change general -- it must help on items no rollout saw.",
+  "guidance": "The `skill` knob is written to the agent's SKILL.md, which it reads before writing solution.py for every item. Steps other than the protected `data` and `finalize` can be edited, and new steps added where the validator allows. These knobs are frozen and keep their values: `data_parallelism`, `max_thinking_tokens`, `solve__prompt_template` and `solve__system_prompt`. `solve`'s prompt is the frozen knob `solve__prompt_template`, so a new step's output cannot be added to `solve`'s prompt. Every change must be general: it must help on items no rollout saw.",
   "id": "spreadsheetbench/agent",
   "nodes": [
     {
@@ -14583,7 +14583,7 @@ solve a SpreadsheetBench item as SkillOpt's Claude Code agent harness does (clau
     },
     "solve__prompt_template": {
       "default": "Use the workspace files to solve the task. Read task.md and the skill at .agents/skills/skillopt-target/SKILL.md before answering. If ATTACHMENTS.md exists, read it and inspect the listed local files. Do not call a Skill tool; the ReflACT guidance is a local markdown file. Do not ask for permission. You may modify files in the workspace when the task asks you to create an artifact. Return only the final answer text, keeping any required <answer>...</answer> tags exactly.\n\nRead `.agents/skills/skillopt-target/SKILL.md` directly; do not call a Skill tool.\nRead `task.md`, inspect `input.xlsx` if useful, and write the final solution to `solution.py`.\nYou may run `python run_solution.py` to validate the script locally.\nIn your final response, briefly confirm whether `solution.py` was written and summarize the approach.",
-      "description": "the solve call's prompt (frozen; use the skill knob)",
+      "description": "the solve call's prompt (frozen)",
       "frozen": true,
       "kind": "str",
       "range": [
@@ -14595,7 +14595,7 @@ solve a SpreadsheetBench item as SkillOpt's Claude Code agent harness does (clau
     },
     "solve__system_prompt": {
       "default": "",
-      "description": "text appended to Claude Code's system prompt for the solve call: none, as SkillOpt's CLI (frozen; use the skill knob)",
+      "description": "text appended to Claude Code's system prompt for the solve call: none, as SkillOpt's CLI (frozen)",
       "frozen": true,
       "kind": "str",
       "range": [
@@ -14624,15 +14624,15 @@ solve a SpreadsheetBench item as SkillOpt's Claude Code agent harness does (clau
       "cli": "refactory ceo spreadsheetbench/agent",
       "panel": "Mode picker; Run once executes enabled modes including authoring; Optimize requires a scored mode. Use chat for stepwise gates."
     },
-    "purpose": "solve a SpreadsheetBench item as SkillOpt's Claude Code agent harness does (claude_code_exec, mode single): one sealed Claude Code session with Read and Bash, given SkillOpt's prompt byte for byte, works in a workspace holding the input, the skill as .agents/skills/skillopt-target/SKILL.md, task.md and run_solution.py, its commands seeing only that workspace and the pinned interpreter as python, and writes solution.py; that code (else the reply's first fenced block) is run against a copy of the input in the code sandbox and graded by SkillOpt's cell comparison (SB_GRADER=recalc by default). No gold feedback reaches the agent, as in SkillOpt's single path. The session ends on inactivity with no wall (SkillOpt: 600 s per item). Needs the claude_code worker in skip (bypassPermissions) mode; the thinking budget (16384) is a frozen knob. The skill is the only unfrozen knob; the graph around it is editable too. Requires SB_DATA. Optimize only when scored; higher is better.",
-    "reviewed_schema": "bbe8e9a0aef2f04d174b651aeba8e1e5610018929d7734d6879f044e88074217"
+    "purpose": "solve a SpreadsheetBench item as SkillOpt's Claude Code agent harness does (claude_code_exec, mode single): one sealed Claude Code session with Read and Bash, given SkillOpt's prompt byte for byte, works in a workspace holding the input, the skill as .agents/skills/skillopt-target/SKILL.md, task.md and run_solution.py, its commands seeing only that workspace and the pinned interpreter as python, and writes solution.py; that code (else the reply's first fenced block) is run against a copy of the input in the code sandbox and graded by SkillOpt's cell comparison (SB_GRADER=recalc by default). No gold feedback reaches the agent, as in SkillOpt's single path. The session ends on inactivity with no wall (SkillOpt: 600 s per item). Needs the claude_code worker in skip (bypassPermissions) mode; the thinking budget (16384) is a frozen knob. The skill is the only unfrozen knob; the steps other than the protected ones can be edited and new steps added, within what the frozen knobs fix. Requires SB_DATA. Optimize only when scored; higher is better.",
+    "reviewed_schema": "d7e2370a4a6f8fc1157c7daafa1adbca07dbf2da028d9c80d5f5f42dd5c46ce2"
   }
 }
 ```
 
 ## spreadsheetbench/solver
 
-solve a SpreadsheetBench item as SkillOpt's SpreadsheetBench target agent does (multi mode): each turn one claude -p call whose prompt is the whole conversation in a History: block, its first fenced block run against a copy of the input by a pinned interpreter in a sandbox that cannot see the answer, an execution error as the next message, up to 30 turns, each call ending on inactivity with no wall (SkillOpt: 600 s per item), an item past the harness backstop (REFACTORY_MODEL_BACKSTOP_S) a harness incident; graded by SkillOpt's cell comparison, with a LibreOffice-recalculated copy when the answer cells hold formulas (SB_GRADER=recalc, default; cached is SkillOpt's alone; a failed recalculation is a harness incident). On a train evaluation that asks for gold feedback (the SkillOpt strategy's train rollout, and the default loop's own train evaluations) a wrong clean run is told which cells are wrong and gets another turn, its train score staying its first attempt's. The skill is the only unfrozen knob; the graph around it is editable too. Requires SB_DATA. Optimize only when scored; higher is better.
+solve a SpreadsheetBench item as SkillOpt's SpreadsheetBench target agent does (multi mode): each turn one claude -p call whose prompt is the whole conversation in a History: block, its first fenced block run against a copy of the input by a pinned interpreter in a sandbox that cannot see the answer, an execution error as the next message, up to 30 turns, each call ending on inactivity with no wall (SkillOpt: 600 s per item), an item past the harness backstop (REFACTORY_MODEL_BACKSTOP_S) a harness incident; graded by SkillOpt's cell comparison, with a LibreOffice-recalculated copy when the answer cells hold formulas (SB_GRADER=recalc, default; cached is SkillOpt's alone; a failed recalculation is a harness incident). On a train evaluation that asks for gold feedback (the SkillOpt strategy's train rollout, and the default loop's own train evaluations) a wrong clean run is told which cells are wrong and gets another turn, its train score staying its first attempt's. The skill is the only unfrozen knob; the steps other than the protected ones can be edited and new steps added, within what the frozen knobs fix. Requires SB_DATA. Optimize only when scored; higher is better.
 
 ```json
 {
@@ -14699,7 +14699,7 @@ solve a SpreadsheetBench item as SkillOpt's SpreadsheetBench target agent does (
       "user": false
     }
   ],
-  "guidance": "The skill is appended to the solver's system prompt for every item; the graph can be edited too -- the solve loop and the steps before it (only data, gold_check and finalize are protected). Keep every change general -- it must help on items no rollout saw.",
+  "guidance": "The `skill` knob is appended to the solver's system prompt for every item. Steps other than the protected `data`, `gold_check` and `finalize` can be edited, and new steps added where the validator allows. These knobs are frozen and keep their values: `max_completion_tokens`, `data_parallelism`, `max_turns`, `turn_pause_s` and `solve__system_prompt`. Every change must be general: it must help on items no rollout saw.",
   "id": "spreadsheetbench/solver",
   "nodes": [
     {
@@ -14849,7 +14849,7 @@ solve a SpreadsheetBench item as SkillOpt's SpreadsheetBench target agent does (
     },
     "solve__system_prompt": {
       "default": "You are an expert Python programmer specializing in spreadsheet manipulation. You will be given a user instruction together with a preview of an input .xlsx file. Your job is to write a single self-contained Python script that reads the input file at the path stored in the variable INPUT_PATH, performs the requested manipulation, and saves the result to OUTPUT_PATH. Use only the standard library, openpyxl, and pandas. Do not print anything. Do not use input(). Do not hardcode file paths. Return ONLY the Python code inside a single ```python ... ``` fenced block.{{skill_section}}",
-      "description": "the solve call's system prompt (frozen; use the skill knob)",
+      "description": "the solve call's system prompt (frozen)",
       "frozen": true,
       "kind": "str",
       "range": [
@@ -14890,15 +14890,15 @@ solve a SpreadsheetBench item as SkillOpt's SpreadsheetBench target agent does (
       "cli": "refactory ceo spreadsheetbench/solver",
       "panel": "Mode picker; Run once executes enabled modes including authoring; Optimize requires a scored mode. Use chat for stepwise gates."
     },
-    "purpose": "solve a SpreadsheetBench item as SkillOpt's SpreadsheetBench target agent does (multi mode): each turn one claude -p call whose prompt is the whole conversation in a History: block, its first fenced block run against a copy of the input by a pinned interpreter in a sandbox that cannot see the answer, an execution error as the next message, up to 30 turns, each call ending on inactivity with no wall (SkillOpt: 600 s per item), an item past the harness backstop (REFACTORY_MODEL_BACKSTOP_S) a harness incident; graded by SkillOpt's cell comparison, with a LibreOffice-recalculated copy when the answer cells hold formulas (SB_GRADER=recalc, default; cached is SkillOpt's alone; a failed recalculation is a harness incident). On a train evaluation that asks for gold feedback (the SkillOpt strategy's train rollout, and the default loop's own train evaluations) a wrong clean run is told which cells are wrong and gets another turn, its train score staying its first attempt's. The skill is the only unfrozen knob; the graph around it is editable too. Requires SB_DATA. Optimize only when scored; higher is better.",
-    "reviewed_schema": "1c86b068e599311e8cae50fde837f9f23bfef14e25026760a1de47abe7c9803e"
+    "purpose": "solve a SpreadsheetBench item as SkillOpt's SpreadsheetBench target agent does (multi mode): each turn one claude -p call whose prompt is the whole conversation in a History: block, its first fenced block run against a copy of the input by a pinned interpreter in a sandbox that cannot see the answer, an execution error as the next message, up to 30 turns, each call ending on inactivity with no wall (SkillOpt: 600 s per item), an item past the harness backstop (REFACTORY_MODEL_BACKSTOP_S) a harness incident; graded by SkillOpt's cell comparison, with a LibreOffice-recalculated copy when the answer cells hold formulas (SB_GRADER=recalc, default; cached is SkillOpt's alone; a failed recalculation is a harness incident). On a train evaluation that asks for gold feedback (the SkillOpt strategy's train rollout, and the default loop's own train evaluations) a wrong clean run is told which cells are wrong and gets another turn, its train score staying its first attempt's. The skill is the only unfrozen knob; the steps other than the protected ones can be edited and new steps added, within what the frozen knobs fix. Requires SB_DATA. Optimize only when scored; higher is better.",
+    "reviewed_schema": "8b10d1fcf439cba487fb9d33590ac3f84f6d438c14f0205be4fe2c60637acb85"
   }
 }
 ```
 
 ## spreadsheetbench_v2/agent
 
-solve a SpreadsheetBench 2 task with SkillOpt's Claude Code agent harness (the graph of spreadsheetbench/agent): one sealed Claude Code session with Read and Bash, given SkillOpt's prompt and a task.md holding V2's instruction, input file and output path, writes solution.py, which is run on a copy of the input in the code sandbox; the output is recalculated by LibreOffice as V2's open_spreadsheet.py does and graded by V2's evaluation.py (1% tolerance, 99.8% of unchanged cells). Items are the 277 file-graded tasks of the prepared release, split by workbook/project (66 train, 38 val, 173 test). No gold feedback; no wall-clock or turn cap. Needs the claude_code worker in skip (bypassPermissions) mode, SB2_DATA (a prepared directory) and LibreOffice. The skill is the only unfrozen knob; the graph around it is editable too. Optimize only when scored; higher is better.
+solve a SpreadsheetBench 2 task with SkillOpt's Claude Code agent harness (the graph of spreadsheetbench/agent): one sealed Claude Code session with Read and Bash, given SkillOpt's prompt and a task.md holding V2's instruction, input file and output path, writes solution.py, which is run on a copy of the input in the code sandbox; the output is recalculated by LibreOffice as V2's open_spreadsheet.py does and graded by V2's evaluation.py (1% tolerance, 99.8% of unchanged cells). Items are the 277 file-graded tasks of the prepared release, split by workbook/project (66 train, 38 val, 173 test). No gold feedback; no wall-clock or turn cap. Needs the claude_code worker in skip (bypassPermissions) mode, SB2_DATA (a prepared directory) and LibreOffice. The skill is the only unfrozen knob; the steps other than the protected ones can be edited and new steps added, within what the frozen knobs fix. Optimize only when scored; higher is better.
 
 ```json
 {
@@ -14931,7 +14931,7 @@ solve a SpreadsheetBench 2 task with SkillOpt's Claude Code agent harness (the g
       "user": false
     }
   ],
-  "guidance": "The skill is written to the agent's SKILL.md, which it reads before writing solution.py for every item; the graph can be edited too -- the steps before and around the solve step (only data and finalize are protected). Keep every change general -- it must help on items no rollout saw.",
+  "guidance": "The `skill` knob is written to the agent's SKILL.md, which it reads before writing solution.py for every item. Steps other than the protected `data` and `finalize` can be edited, and new steps added where the validator allows. These knobs are frozen and keep their values: `data_parallelism`, `max_thinking_tokens`, `solve__prompt_template` and `solve__system_prompt`. `solve`'s prompt is the frozen knob `solve__prompt_template`, so a new step's output cannot be added to `solve`'s prompt. Every change must be general: it must help on items no rollout saw.",
   "id": "spreadsheetbench_v2/agent",
   "nodes": [
     {
@@ -15023,7 +15023,7 @@ solve a SpreadsheetBench 2 task with SkillOpt's Claude Code agent harness (the g
     },
     "solve__prompt_template": {
       "default": "Use the workspace files to solve the task. Read task.md and the skill at .agents/skills/skillopt-target/SKILL.md before answering. If ATTACHMENTS.md exists, read it and inspect the listed local files. Do not call a Skill tool; the ReflACT guidance is a local markdown file. Do not ask for permission. You may modify files in the workspace when the task asks you to create an artifact. Return only the final answer text, keeping any required <answer>...</answer> tags exactly.\n\nRead `.agents/skills/skillopt-target/SKILL.md` directly; do not call a Skill tool.\nRead `task.md`, inspect `input.xlsx` if useful, and write the final solution to `solution.py`.\nYou may run `python run_solution.py` to validate the script locally.\nIn your final response, briefly confirm whether `solution.py` was written and summarize the approach.",
-      "description": "the solve call's prompt (frozen; use the skill knob)",
+      "description": "the solve call's prompt (frozen)",
       "frozen": true,
       "kind": "str",
       "range": [
@@ -15035,7 +15035,7 @@ solve a SpreadsheetBench 2 task with SkillOpt's Claude Code agent harness (the g
     },
     "solve__system_prompt": {
       "default": "",
-      "description": "text appended to Claude Code's system prompt for the solve call: none, as SkillOpt's CLI (frozen; use the skill knob)",
+      "description": "text appended to Claude Code's system prompt for the solve call: none, as SkillOpt's CLI (frozen)",
       "frozen": true,
       "kind": "str",
       "range": [
@@ -15064,15 +15064,15 @@ solve a SpreadsheetBench 2 task with SkillOpt's Claude Code agent harness (the g
       "cli": "refactory ceo spreadsheetbench_v2/agent",
       "panel": "Mode picker; Run once executes enabled modes including authoring; Optimize requires a scored mode. Use chat for stepwise gates."
     },
-    "purpose": "solve a SpreadsheetBench 2 task with SkillOpt's Claude Code agent harness (the graph of spreadsheetbench/agent): one sealed Claude Code session with Read and Bash, given SkillOpt's prompt and a task.md holding V2's instruction, input file and output path, writes solution.py, which is run on a copy of the input in the code sandbox; the output is recalculated by LibreOffice as V2's open_spreadsheet.py does and graded by V2's evaluation.py (1% tolerance, 99.8% of unchanged cells). Items are the 277 file-graded tasks of the prepared release, split by workbook/project (66 train, 38 val, 173 test). No gold feedback; no wall-clock or turn cap. Needs the claude_code worker in skip (bypassPermissions) mode, SB2_DATA (a prepared directory) and LibreOffice. The skill is the only unfrozen knob; the graph around it is editable too. Optimize only when scored; higher is better.",
-    "reviewed_schema": "5ebf8a40be0067bbf492cf4e297d08d426124e6b498dd016c56912e0bcfb819c"
+    "purpose": "solve a SpreadsheetBench 2 task with SkillOpt's Claude Code agent harness (the graph of spreadsheetbench/agent): one sealed Claude Code session with Read and Bash, given SkillOpt's prompt and a task.md holding V2's instruction, input file and output path, writes solution.py, which is run on a copy of the input in the code sandbox; the output is recalculated by LibreOffice as V2's open_spreadsheet.py does and graded by V2's evaluation.py (1% tolerance, 99.8% of unchanged cells). Items are the 277 file-graded tasks of the prepared release, split by workbook/project (66 train, 38 val, 173 test). No gold feedback; no wall-clock or turn cap. Needs the claude_code worker in skip (bypassPermissions) mode, SB2_DATA (a prepared directory) and LibreOffice. The skill is the only unfrozen knob; the steps other than the protected ones can be edited and new steps added, within what the frozen knobs fix. Optimize only when scored; higher is better.",
+    "reviewed_schema": "406275fdde51067cff942eec7806c58ecb054f33780e20c909903deccf084fff"
   }
 }
 ```
 
 ## spreadsheetbench_v2/steps
 
-solve a SpreadsheetBench 2 task with V2's agent setup (as spreadsheetbench_v2/swe) split into its workflow's steps: inspect -> plan -> implement -> verify, four sealed Claude Code sessions with Bash, view_xlsx and LibreOffice on the PATH. Each step's prompt is V2's instance template with the workflow cut to its stages plus a section naming its files, and V2's system template appended; both are the step's own open knobs (<step>__task, <step>__system_prompt). Steps hand on inspect_notes.md, plan.md and output.xlsx; verify may correct output.xlsx, which is graded by V2's pipeline after the last step; no output.xlsx fails the item. Same 277 items and split as spreadsheetbench_v2/agent. Each step has the 50-turn cap, 60 s per Bash command and 10,000 characters of output shown; final.json records each step's turns and the total. The skill (one SKILL.md every step reads; empty by default) and the eight step texts are open knobs; the graph is editable too. A different starting point from V2's one session: baseline to be measured. Needs the claude_code worker in skip (bypassPermissions) mode, SB2_DATA, LibreOffice and Linux. Optimize only when scored; higher is better.
+solve a SpreadsheetBench 2 task with V2's agent setup (as spreadsheetbench_v2/swe) split into its workflow's steps: inspect -> plan -> implement -> verify, four sealed Claude Code sessions with Bash, view_xlsx and LibreOffice on the PATH. Each step's prompt is V2's instance template with the workflow cut to its stages plus a section naming its files, and V2's system template appended; both are the step's own open knobs (<step>__task, <step>__system_prompt). Steps hand on inspect_notes.md, plan.md and output.xlsx; verify may correct output.xlsx, which is graded by V2's pipeline after the last step; no output.xlsx fails the item. Same 277 items and split as spreadsheetbench_v2/agent. Each step has the 50-turn cap, 60 s per Bash command and 10,000 characters of output shown; final.json records each step's turns and the total. The skill (one SKILL.md every step reads; empty by default) and the eight step texts are open knobs; the steps other than the protected ones can be edited and new steps added, within what the frozen knobs fix. A different starting point from V2's one session: baseline to be measured. Needs the claude_code worker in skip (bypassPermissions) mode, SB2_DATA, LibreOffice and Linux. Optimize only when scored; higher is better.
 
 ```json
 {
@@ -15120,7 +15120,7 @@ solve a SpreadsheetBench 2 task with V2's agent setup (as spreadsheetbench_v2/sw
       "user": false
     }
   ],
-  "guidance": "Four sealed steps run in order -- inspect, plan, implement, verify -- each with its own prompt (<step>__task) and system prompt (<step>__system_prompt); they hand on inspect_notes.md, plan.md and output.xlsx, and the output.xlsx left after the last step is graded. The skill is one SKILL.md every step reads. The graph can be edited too (only data and finalize are protected). Keep every change general -- it must help on items no rollout saw.",
+  "guidance": "Four sealed steps run in order -- inspect, plan, implement, verify -- each with its own prompt (<step>__task) and system prompt (<step>__system_prompt); they hand on inspect_notes.md, plan.md and output.xlsx, and the output.xlsx left after the last step is graded. The `skill` knob is one SKILL.md every step reads. Steps other than the protected `data` and `finalize` can be edited, and new steps added where the validator allows. These knobs are frozen and keep their values: `data_parallelism`, `max_turns`, `bash_timeout_ms` and `bash_output_chars`. Every change must be general: it must help on items no rollout saw.",
   "id": "spreadsheetbench_v2/steps",
   "nodes": [
     {
@@ -15395,15 +15395,15 @@ solve a SpreadsheetBench 2 task with V2's agent setup (as spreadsheetbench_v2/sw
       "cli": "refactory ceo spreadsheetbench_v2/steps",
       "panel": "Mode picker; Run once executes enabled modes including authoring; Optimize requires a scored mode. Use chat for stepwise gates."
     },
-    "purpose": "solve a SpreadsheetBench 2 task with V2's agent setup (as spreadsheetbench_v2/swe) split into its workflow's steps: inspect -> plan -> implement -> verify, four sealed Claude Code sessions with Bash, view_xlsx and LibreOffice on the PATH. Each step's prompt is V2's instance template with the workflow cut to its stages plus a section naming its files, and V2's system template appended; both are the step's own open knobs (<step>__task, <step>__system_prompt). Steps hand on inspect_notes.md, plan.md and output.xlsx; verify may correct output.xlsx, which is graded by V2's pipeline after the last step; no output.xlsx fails the item. Same 277 items and split as spreadsheetbench_v2/agent. Each step has the 50-turn cap, 60 s per Bash command and 10,000 characters of output shown; final.json records each step's turns and the total. The skill (one SKILL.md every step reads; empty by default) and the eight step texts are open knobs; the graph is editable too. A different starting point from V2's one session: baseline to be measured. Needs the claude_code worker in skip (bypassPermissions) mode, SB2_DATA, LibreOffice and Linux. Optimize only when scored; higher is better.",
-    "reviewed_schema": "6f1603a7836c6a4cd60bd3a48cc83d7ace374908e1c000cbd63a0e8f074e9678"
+    "purpose": "solve a SpreadsheetBench 2 task with V2's agent setup (as spreadsheetbench_v2/swe) split into its workflow's steps: inspect -> plan -> implement -> verify, four sealed Claude Code sessions with Bash, view_xlsx and LibreOffice on the PATH. Each step's prompt is V2's instance template with the workflow cut to its stages plus a section naming its files, and V2's system template appended; both are the step's own open knobs (<step>__task, <step>__system_prompt). Steps hand on inspect_notes.md, plan.md and output.xlsx; verify may correct output.xlsx, which is graded by V2's pipeline after the last step; no output.xlsx fails the item. Same 277 items and split as spreadsheetbench_v2/agent. Each step has the 50-turn cap, 60 s per Bash command and 10,000 characters of output shown; final.json records each step's turns and the total. The skill (one SKILL.md every step reads; empty by default) and the eight step texts are open knobs; the steps other than the protected ones can be edited and new steps added, within what the frozen knobs fix. A different starting point from V2's one session: baseline to be measured. Needs the claude_code worker in skip (bypassPermissions) mode, SB2_DATA, LibreOffice and Linux. Optimize only when scored; higher is better.",
+    "reviewed_schema": "1ae0c6b631b786912b351dd7a3405a9620e42bd2ef7a6b3e7680a926c4cad01c"
   }
 }
 ```
 
 ## spreadsheetbench_v2/swe
 
-solve a SpreadsheetBench 2 task with V2's own agent setup (SWE-agent/config/spreadsheet.yaml ported to one sealed Claude Code session): V2's instance template as the prompt (Bash for bash, view_xlsx run as a command, submit meaning ending the turn) and V2's system template appended to Claude Code's; the session has Claude Code's Bash, view_xlsx and LibreOffice on its PATH and a /tmp of its own, edits the workbook and writes output.xlsx, which is recalculated by LibreOffice as V2's open_spreadsheet.py does and graded by V2's evaluation.py; no output.xlsx fails the item. Same 277 items and split as spreadsheetbench_v2/agent. Turn cap 50 (V2's call cap, Claude Code's --max-turns), 60 s per Bash command and 10,000 characters of output shown (V2's); a session stopped at the cap is graded on what it left and its record says so. No gold feedback. Needs the claude_code worker in skip (bypassPermissions) mode, SB2_DATA (a prepared directory), LibreOffice and Linux. The skill (empty by default, then not mentioned) is the only unfrozen knob; the graph around it is editable too. Optimize only when scored; higher is better.
+solve a SpreadsheetBench 2 task with V2's own agent setup (SWE-agent/config/spreadsheet.yaml ported to one sealed Claude Code session): V2's instance template as the prompt (Bash for bash, view_xlsx run as a command, submit meaning ending the turn) and V2's system template appended to Claude Code's; the session has Claude Code's Bash, view_xlsx and LibreOffice on its PATH and a /tmp of its own, edits the workbook and writes output.xlsx, which is recalculated by LibreOffice as V2's open_spreadsheet.py does and graded by V2's evaluation.py; no output.xlsx fails the item. Same 277 items and split as spreadsheetbench_v2/agent. Turn cap 50 (V2's call cap, Claude Code's --max-turns), 60 s per Bash command and 10,000 characters of output shown (V2's); a session stopped at the cap is graded on what it left and its record says so. No gold feedback. Needs the claude_code worker in skip (bypassPermissions) mode, SB2_DATA (a prepared directory), LibreOffice and Linux. The skill (empty by default, then not mentioned) is the only unfrozen knob; the steps other than the protected ones can be edited and new steps added, within what the frozen knobs fix. Optimize only when scored; higher is better.
 
 ```json
 {
@@ -15436,7 +15436,7 @@ solve a SpreadsheetBench 2 task with V2's own agent setup (SWE-agent/config/spre
       "user": false
     }
   ],
-  "guidance": "The skill is written to the agent's SKILL.md, which the prompt tells it to read before it edits the workbook (an empty skill is not mentioned); the graph can be edited too -- the steps before and around the solve step (only data and finalize are protected). Keep every change general -- it must help on items no rollout saw.",
+  "guidance": "The `skill` knob is written to the agent's SKILL.md, which the prompt tells it to read before it edits the workbook (an empty skill is not mentioned). Steps other than the protected `data` and `finalize` can be edited, and new steps added where the validator allows. These knobs are frozen and keep their values: `data_parallelism`, `max_turns`, `bash_timeout_ms`, `bash_output_chars`, `solve__prompt_template` and `solve__system_prompt`. `solve`'s prompt is the frozen knob `solve__prompt_template`, so a new step's output cannot be added to `solve`'s prompt. Every change must be general: it must help on items no rollout saw.",
   "id": "spreadsheetbench_v2/swe",
   "nodes": [
     {
@@ -15554,7 +15554,7 @@ solve a SpreadsheetBench 2 task with V2's own agent setup (SWE-agent/config/spre
     },
     "solve__prompt_template": {
       "default": "<task_context>\n\n## Important\n- When completing spreadsheet tasks, strictly avoid altering any cells that already contain values unless explicitly instructed. Modify only the cells that are required for the task.\n- You need to complete the instructions and ensure that the original formatting is preserved as much as possible.\n\n## Tools\nYou are provided with four tools: `Bash`, `view_xlsx` and `submit`. You must use these tools to complete the target task.\n**Important: You can only call ONE tool at a time per response.**\n- `Bash`: run shell commands (e.g., file operations, calling Python scripts with `python3`)\n- `view_xlsx`: inspect `.xlsx` files (list sheets, view sheet contents, see original formulas and values); a command on your PATH: run it with `Bash`\n- `submit`: finalize and submit your solution after verification; to submit, end your turn with a short final reply (there is no `submit` command)\n\n## Environment\nYou can complete the corresponding spreadsheet tasks using the following Python environment:\n`Pandas`, `openpyxl`, `numpy` and `LibreOffice`\nYou can use these environments to manipulate the spreadsheet data.\n\n## Recommended Workflow\n1. **Inspect**: Use `view_xlsx` to inspect the data. This will allow you to understand the structure and contents of the spreadsheet.\n   - You must choose mode `list` or `content` to inspect the data.\n   - List all sheets: `view_xlsx {{spreadsheet_path}} list`\n   - View specific sheet: `view_xlsx {{spreadsheet_path}} content \"Sheet1\"`\n   - View row range: `view_xlsx {{spreadsheet_path}} content \"Sheet1\" 1 50`\n\n2. **Plan**: Decide how to manipulate the data using `openpyxl` or `LibreOffice`.\n\n3. **Implement**: Create a python script (e.g., `process_data.py`) that performs the edit.\n   - You can use `Bash` tool to write Python code directly, e.g., cat > /tmp/script.py << 'EOF' ... EOF), which can then be used to verify syntax correctness.\n\n4. **Execute**: Run the python script using `python3 /tmp/script.py`\n\n5. **Verify**: Check the output file exists, ensure the answer is correct.\n   - Do NOT combine verify and submit commands (e.g., `python3 script.py && submit`). Run them separately to ensure verification is complete before submission.\n   - Ensure the existing structure, layout, and formatting of the model are preserved throughout the process.\n\n6. **Submit**: When verification is successful, submit: end your turn with a short final reply.\n\n{{skill_section}}</task_context>\n\n<instructions>\n\n## Task instructions\nYou need to process a spreadsheet file based on specific instructions.\n**Instruction:** {{instruction}}\n\n## Input and Output\nYou are provided with an input spreadsheet file and you need to generate an output spreadsheet file based on the output_path.\n**Input File:** {{spreadsheet_path}}\n**Output Path:** {{output_path}}\n\n</instructions>",
-      "description": "the solve call's prompt, V2's instance template (frozen; use the skill knob)",
+      "description": "the solve call's prompt, V2's instance template (frozen)",
       "frozen": true,
       "kind": "str",
       "range": [
@@ -15597,8 +15597,8 @@ solve a SpreadsheetBench 2 task with V2's own agent setup (SWE-agent/config/spre
       "cli": "refactory ceo spreadsheetbench_v2/swe",
       "panel": "Mode picker; Run once executes enabled modes including authoring; Optimize requires a scored mode. Use chat for stepwise gates."
     },
-    "purpose": "solve a SpreadsheetBench 2 task with V2's own agent setup (SWE-agent/config/spreadsheet.yaml ported to one sealed Claude Code session): V2's instance template as the prompt (Bash for bash, view_xlsx run as a command, submit meaning ending the turn) and V2's system template appended to Claude Code's; the session has Claude Code's Bash, view_xlsx and LibreOffice on its PATH and a /tmp of its own, edits the workbook and writes output.xlsx, which is recalculated by LibreOffice as V2's open_spreadsheet.py does and graded by V2's evaluation.py; no output.xlsx fails the item. Same 277 items and split as spreadsheetbench_v2/agent. Turn cap 50 (V2's call cap, Claude Code's --max-turns), 60 s per Bash command and 10,000 characters of output shown (V2's); a session stopped at the cap is graded on what it left and its record says so. No gold feedback. Needs the claude_code worker in skip (bypassPermissions) mode, SB2_DATA (a prepared directory), LibreOffice and Linux. The skill (empty by default, then not mentioned) is the only unfrozen knob; the graph around it is editable too. Optimize only when scored; higher is better.",
-    "reviewed_schema": "91569525525546ec4910f87ad83fda04fe1568aebd9bd4b59ac64a343a72a3e3"
+    "purpose": "solve a SpreadsheetBench 2 task with V2's own agent setup (SWE-agent/config/spreadsheet.yaml ported to one sealed Claude Code session): V2's instance template as the prompt (Bash for bash, view_xlsx run as a command, submit meaning ending the turn) and V2's system template appended to Claude Code's; the session has Claude Code's Bash, view_xlsx and LibreOffice on its PATH and a /tmp of its own, edits the workbook and writes output.xlsx, which is recalculated by LibreOffice as V2's open_spreadsheet.py does and graded by V2's evaluation.py; no output.xlsx fails the item. Same 277 items and split as spreadsheetbench_v2/agent. Turn cap 50 (V2's call cap, Claude Code's --max-turns), 60 s per Bash command and 10,000 characters of output shown (V2's); a session stopped at the cap is graded on what it left and its record says so. No gold feedback. Needs the claude_code worker in skip (bypassPermissions) mode, SB2_DATA (a prepared directory), LibreOffice and Linux. The skill (empty by default, then not mentioned) is the only unfrozen knob; the steps other than the protected ones can be edited and new steps added, within what the frozen knobs fix. Optimize only when scored; higher is better.",
+    "reviewed_schema": "e0ac338be97abb192b3ac10dcbafef0011171a7ebfc47c115699949384763105"
   }
 }
 ```

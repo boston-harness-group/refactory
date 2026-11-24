@@ -93,6 +93,45 @@ SOLVE_RETRY = {"on": ["crash"], "times": 4}
 CAP_BINDING = "route.max_completion_tokens"
 
 
+#: What a frozen knob's description said before it was a plain "(frozen)".
+OLD_FROZEN_NOTE = "(frozen; use the skill knob)"
+
+
+def upgrade_frozen_descriptions(state: Mapping[str, Any]) -> tuple[dict[str, Any], list[str]]:
+    """A state saved while a frozen knob's description pointed at the skill knob
+    (`OLD_FROZEN_NOTE`), with each such description reading "(frozen)" as this version
+    declares it (`nn.replace_in_knob_descriptions`); shared by the SpreadsheetBench and
+    LiveMath modes."""
+    return nn.replace_in_knob_descriptions(state, OLD_FROZEN_NOTE, "(frozen)")
+
+
+def _named(names) -> str:
+    quoted = [f"`{name}`" for name in names]
+    return " and ".join([", ".join(quoted[:-1]), quoted[-1]]) if len(quoted) > 1 else "".join(quoted)
+
+
+def author_note(mode: nn.Mode, skill: str) -> str:
+    """A SpreadsheetBench mode's note to the proposer (`nn.Mode.guidance`), facts only, built
+    from the mode so it stays true: what ``skill`` (one sentence) says the skill knob is;
+    which steps are protected; which knobs are frozen; and, for each agent whose prompt is a
+    frozen knob, that a new step's output cannot be added to that prompt. No lever is ranked
+    above another and no part of the graph singled out."""
+    frozen = [name for name, knob in mode.declare().items() if knob.frozen]
+    lines = [skill,
+             f"Steps other than the protected {_named(mode.protected_nodes())} can be edited, "
+             "and new steps added where the validator allows."]
+    if frozen:
+        lines.append(f"These knobs are frozen and keep their values: {_named(frozen)}.")
+    for node in mode.build().nodes.values():
+        bound = dict(node.field_bindings or ())
+        if node.kind == "agent" and bound.get("prompt_template") in frozen:
+            lines.append(f"`{node.id}`'s prompt is the frozen knob "
+                         f"`{bound['prompt_template']}`, so a new step's output cannot be "
+                         f"added to `{node.id}`'s prompt.")
+    lines.append("Every change must be general: it must help on items no rollout saw.")
+    return " ".join(lines)
+
+
 class Solver(nn.Mode):
     """SkillOpt's SpreadsheetBench target agent over the Task's items."""
 
@@ -116,7 +155,7 @@ class Solver(nn.Mode):
                                     description="cooldown after each model call"),
             SYSTEM_PROMPT_KNOB: nn.Knob(SYSTEM_PROMPT, "str", frozen=True,
                                         description="the solve call's system prompt "
-                                                    "(frozen; use the skill knob)"),
+                                                    "(frozen)"),
         }
 
     def build(self) -> nn.Graph:
@@ -186,10 +225,12 @@ class Solver(nn.Mode):
 
     @classmethod
     def upgrade_state(cls, state: Mapping[str, Any]) -> tuple[dict[str, Any], list[str]]:
-        """`_upgrade_item_files`, then `_upgrade_cap_binding`."""
+        """`_upgrade_item_files`, then `_upgrade_cap_binding`, then
+        `upgrade_frozen_descriptions`."""
         state, notes = cls._upgrade_item_files(state)
         state, more = cls._upgrade_cap_binding(state)
-        return state, [*notes, *more]
+        state, described = upgrade_frozen_descriptions(state)
+        return state, [*notes, *more, *described]
 
     @classmethod
     def _upgrade_cap_binding(cls, state: dict[str, Any]) -> tuple[dict[str, Any], list[str]]:
@@ -256,7 +297,5 @@ class Solver(nn.Mode):
         return sum(scores) / len(scores) if scores else 0.0
 
     def guidance(self) -> str:
-        return ("The skill is appended to the solver's system prompt for every item; the "
-                "graph can be edited too -- the solve loop and the steps before it (only "
-                "data, gold_check and finalize are protected). Keep every change general -- "
-                "it must help on items no rollout saw.")
+        return author_note(self, "The `skill` knob is appended to the solver's system prompt "
+                                 "for every item.")

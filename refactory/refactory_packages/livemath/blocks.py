@@ -50,7 +50,7 @@ def frozen_system_prompt_knobs(agent_node_ids) -> dict[str, nn.Knob]:
     return {
         system_prompt_knob(node_id): nn.Knob(
             SYSTEM_PROMPT, "str", frozen=True,
-            description=f"system prompt for {node_id} (frozen; use the skill knob)")
+            description=f"system prompt for {node_id} (frozen)")
         for node_id in agent_node_ids
     }
 

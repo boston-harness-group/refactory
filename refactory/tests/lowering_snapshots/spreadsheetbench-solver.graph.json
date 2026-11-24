@@ -325,7 +325,7 @@
       "enum": [],
       "values": [],
       "frozen": true,
-      "description": "the solve call's system prompt (frozen; use the skill knob)",
+      "description": "the solve call's system prompt (frozen)",
       "required": false
     }
   }

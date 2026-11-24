@@ -41,6 +41,24 @@ _KNOB_ENTRY = frozenset({"value", "spec"})
 STATE_UPGRADES = ".refactory/state-upgrades.json"
 
 
+def replace_in_knob_descriptions(state: Mapping[str, Any], old: str, new: str
+                                 ) -> tuple[dict[str, Any], list[str]]:
+    """``state`` with ``old`` replaced by ``new`` in each knob's description, one note per
+    knob changed: for a mode's `Mode.upgrade_state` when its own wording of a knob changed.
+    A description is the mode's words, never an edit's choice, so an old state runs as it
+    ran. ``(state, [])`` when no description holds ``old``."""
+    stale = sorted(name for name, entry in (state.get("knobs") or {}).items()
+                   if old in str(((entry or {}).get("spec") or {}).get("description") or ""))
+    if not stale:
+        return dict(state), []
+    state = copy.deepcopy(dict(state))
+    for name in stale:
+        spec = state["knobs"][name]["spec"]
+        spec["description"] = str(spec["description"]).replace(old, new)
+    return state, [f"{name}'s description now reads {new!r} where it read {old!r}"
+                   for name in stale]
+
+
 def record_state_upgrades(workdir: Path, notes: Any) -> None:
     """Record in ``workdir`` what a saved state's upgrade changed (`Mode.upgrade_state`),
     so a run of an upgraded state says so; nothing when nothing changed."""
@@ -272,12 +290,9 @@ class Mode:
         return ()
 
     def guidance(self) -> str:
-        """Free text for the optimizer, for what the surface cannot say.
-
-        A knob's description says what a knob *is*; this says what is worth doing.
-        The traces eventually show that structure rarely helps on a pipeline and
-        that one knob is the lever, but only after a batch has been spent finding
-        out. The author already knows.
+        """Facts about the mode that the surface cannot say (what a knob feeds, which steps
+        are protected, what a frozen knob fixes), shown to the proposer under "About this
+        mode". Facts only: it ranks no lever above another.
         """
         return ""
 

@@ -131,6 +131,15 @@ class Solver(nn.Mode):
     #: subclass (or a graph edit of ``timeout_s``) can declare one.
     solve_timeout_s: ClassVar[int | None] = None
 
+    #: What a frozen knob's description said before it was a plain "(frozen)".
+    OLD_FROZEN_NOTE = "(frozen; use the skill knob)"
+
+    @classmethod
+    def upgrade_state(cls, state: Mapping[str, Any]) -> tuple[dict[str, Any], list[str]]:
+        """A saved state's frozen knob descriptions as this version words them: "(frozen)",
+        where a state saved before said `OLD_FROZEN_NOTE` (`nn.replace_in_knob_descriptions`)."""
+        return nn.replace_in_knob_descriptions(state, cls.OLD_FROZEN_NOTE, "(frozen)")
+
     def __init__(
         self,
         block: str = "baseline",

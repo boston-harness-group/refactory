@@ -28,7 +28,7 @@ from .executor import (ExecutionError, Executor, ModelClient, RunContext, Step, 
                        by_declaration, declared_files, execute, fills_facts, names_matter)
 from .graph import Edge, Graph, GraphError, Node
 from .knob import KINDS, Knob, KnobError
-from .mode import STATE_VERSION, Mode, RunResult, StateError
+from .mode import STATE_VERSION, Mode, RunResult, StateError, replace_in_knob_descriptions
 from .package import Package, PackageError, mode_id, split
 from .validate import (
     RULES,

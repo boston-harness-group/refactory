@@ -233,7 +233,7 @@ def test_spreadsheetbench_declares_the_interpreter_its_model_code_runs_under():
     assert env.summary == (f"python3 (and python) = Python {sb_interpreter.PYTHON} with "
                            f"openpyxl {sb_interpreter.PINS['openpyxl']}, pandas "
                            f"{sb_interpreter.PINS['pandas']}, numpy {sb_interpreter.PINS['numpy']}")
-    for text in (core_ops.INSERT_TOOLS, base_mod.TOOLS_LINE):
+    for text in (core_ops.INSERT_TOOLS, base_mod.tools_line(nn_edits.names())):
         assert not {"spreadsheet", "xlsx", "openpyxl", "pandas"} & set(
             w.strip(".,;:()`'\"").lower() for w in text.split()), text
 

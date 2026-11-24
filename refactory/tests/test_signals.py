@@ -52,7 +52,7 @@ def test_the_mode_states_what_is_worth_doing():
 
 def test_the_prompt_carries_the_guidance_and_the_preferred_operations():
     prompt = _ctx().render()
-    assert "## What the author says is worth doing" in prompt
+    assert "## About this mode" in prompt
     assert "deterministic" in prompt
     assert "`set_knob`" in prompt
 
