@@ -1306,9 +1306,80 @@ def test_sealed_execute_and_workspace_share_tool_path_from_environment():
             "should not unpack ToolEnvironment directly"
 
 
+def _private_tmp_pass(tmp_path: Path) -> Path:
+    """A fake item pass whose Task has private_tmp=True."""
+    pass_dir = tmp_path / "run" / "passes" / "data" / "item_1"
+    pass_dir.mkdir(parents=True)
+    (pass_dir / ".refactory").mkdir()
+    (pass_dir / ".refactory" / "pass.json").write_text(
+        json.dumps({"task": "item_files_ops:PrivateTmpTask"}))
+    (pass_dir / ".refactory" / "workspaces").mkdir()
+    return pass_dir
+
+
+@needs_sandbox
+@linux_only
+def test_sealed_script_private_tmp_is_writable(tmp_path):
+    """A sealed script whose Task declares private_tmp gets a writable /tmp: it can create
+    directories and files there, as sealed agent steps can."""
+    pass_dir = _private_tmp_pass(tmp_path)
+    code = ("import os\n"
+            "def main(inp):\n"
+            "    os.makedirs('/tmp/sub')\n"
+            "    open('/tmp/sub/f.txt', 'w').write('ok')\n"
+            "    return {'facts': {'written': open('/tmp/sub/f.txt').read()}}\n")
+    result = snippet.sealed_execute(code, {"files": {}, "facts": {}},
+                                    workdir=pass_dir, node_id="tmpw", reads=[])
+    assert result["facts"]["written"] == "ok"
+
+
+@needs_sandbox
+@linux_only
+def test_sealed_script_private_tmp_is_fresh_each_run(tmp_path):
+    """Each sealed_execute gets its own /tmp: a file written in the first run is not visible
+    in the second."""
+    pass_dir = _private_tmp_pass(tmp_path)
+    write_code = ("def main(inp):\n"
+                  "    open('/tmp/marker.txt', 'w').write('first')\n"
+                  "    return {'facts': {'done': 'yes'}}\n")
+    snippet.sealed_execute(write_code, {"files": {}, "facts": {}},
+                           workdir=pass_dir, node_id="w1", reads=[])
+    check_code = ("import os\n"
+                  "def main(inp):\n"
+                  "    return {'facts': {'exists': str(os.path.exists('/tmp/marker.txt'))}}\n")
+    result = snippet.sealed_execute(check_code, {"files": {}, "facts": {}},
+                                    workdir=pass_dir, node_id="w2", reads=[])
+    assert result["facts"]["exists"] == "False"
+
+
+@needs_sandbox
+@linux_only
+def test_sealed_script_without_private_tmp_has_readonly_tmp(tmp_path):
+    """A sealed script whose Task does NOT declare private_tmp gets a read-only /tmp:
+    removing the private_tmp binding from tool_path_from_environment is caught."""
+    pass_dir = _sealed_pass(tmp_path)
+    code = ("import os\n"
+            "def main(inp):\n"
+            "    os.makedirs('/tmp/sub')\n"
+            "    return {'facts': {'done': 'yes'}}\n")
+    with pytest.raises(snippet.SnippetError):
+        snippet.sealed_execute(code, {"files": {}, "facts": {}},
+                               workdir=pass_dir, node_id="notmp", reads=[])
+
+
 def _skip_no_libreoffice():
     if ifo._find_libreoffice() is None:
         pytest.skip("LibreOffice not found anywhere on PATH")
+
+
+def _skip_no_libreoffice_conversion():
+    """Skip when LibreOffice is absent or the installed LibreOffice cannot convert inside
+    the seal (a portable build under /tmp needs /etc/fonts, which the seal does not bind)."""
+    _skip_no_libreoffice()
+    prog = ifo._find_libreoffice()
+    if not prog or not prog.startswith("/usr"):
+        pytest.skip(f"LibreOffice is not system-installed (program dir {prog}); "
+                    "a portable build under /tmp may lack /etc/fonts inside the seal")
 
 
 def _lo_pass(tmp_path: Path) -> Path:
@@ -1326,9 +1397,9 @@ def _lo_pass(tmp_path: Path) -> Path:
 def test_sealed_script_with_libreoffice_reaches_soffice_in_the_seal(tmp_path):
     """[real LibreOffice] A sealed script's ToolEnvironment makes soffice available inside
     the seal. The soffice wrapper (ToolEnvironment.commands) calls soffice.bin directly with
-    LD_LIBRARY_PATH and SAL_USE_VCLPLUGIN=svp. Verifies that soffice --version runs inside
-    the seal and that the LO program directory and config files are accessible. Full
-    conversion requires /var/tmp (LO's pipe directory), which the seal does not provide."""
+    LD_LIBRARY_PATH and SAL_USE_VCLPLUGIN=svp. Sealed scripts get the same private /tmp and
+    commands as agent steps; the local portable LibreOffice crashes on conversion even
+    outside the seal."""
     _skip_no_libreoffice()
     pass_dir = _lo_pass(tmp_path)
     code = ("import os, subprocess, shutil, json\n"
@@ -1351,6 +1422,52 @@ def test_sealed_script_with_libreoffice_reaches_soffice_in_the_seal(tmp_path):
     assert "LibreOffice" in result["facts"]["version"]
     assert result["facts"]["soffice_found"] == "True"
     assert result["facts"]["wrapper_ok"] == "True"
+
+
+@needs_sandbox
+def test_sealed_script_libreoffice_converts_workbook(tmp_path):
+    """[real LibreOffice] A sealed script with private_tmp converts an xlsx workbook
+    via soffice --headless --calc --convert-to xlsx.  The formula cell =A1+B1 reads as
+    None with openpyxl (cached value not stored), but after recalculation through
+    LibreOffice it reads as the computed value (30 = 10 + 20)."""
+    _skip_no_libreoffice_conversion()
+    pass_dir = _lo_pass(tmp_path)
+    import openpyxl
+
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws["A1"] = 10
+    ws["B1"] = 20
+    ws["C1"] = "=A1+B1"
+    wb.save(pass_dir / "workbook.xlsx")
+    code = ("import os, subprocess, shutil\n"
+            "import openpyxl\n"
+            "def main(inp):\n"
+            "    wb = openpyxl.load_workbook('workbook.xlsx')\n"
+            "    before = wb.active['C1'].value\n"
+            "    os.makedirs('/tmp/in', exist_ok=True)\n"
+            "    shutil.copy('workbook.xlsx', '/tmp/in/workbook.xlsx')\n"
+            "    r = subprocess.run(\n"
+            "        ['soffice', '-env:UserInstallation=file:///tmp/lo-profile',\n"
+            "         '--headless', '--calc', '--convert-to', 'xlsx',\n"
+            "         '--outdir', '/tmp/out', '/tmp/in/workbook.xlsx'],\n"
+            "        capture_output=True, text=True, timeout=60)\n"
+            "    after = None\n"
+            "    out = '/tmp/out/workbook.xlsx'\n"
+            "    if os.path.isfile(out):\n"
+            "        wb2 = openpyxl.load_workbook(out, data_only=True)\n"
+            "        after = wb2.active['C1'].value\n"
+            "    return {'facts': {'before': repr(before),\n"
+            "                      'after': repr(after),\n"
+            "                      'rc': str(r.returncode),\n"
+            "                      'stderr': r.stderr[:500]}}\n")
+    result = snippet.sealed_execute(code, {"files": {}, "facts": {}},
+                                    workdir=pass_dir, node_id="conv",
+                                    reads=["workbook.xlsx"], timeout_s=60)
+    assert result["facts"]["rc"] == "0", result["facts"].get("stderr", "")
+    assert result["facts"]["after"] == "30", (
+        f"expected C1=30 after recalculation, got {result['facts']['after']} "
+        f"(before={result['facts']['before']})")
 
 
 # ── end-to-end: walker and spine with sealed script steps ────────────────

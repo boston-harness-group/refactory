@@ -214,6 +214,14 @@ class ToolEnvTask(FileTask):
     tool_environment = ToolEnvironment(summary=TOOL_SUMMARY, python=test_interpreter)
 
 
+class PrivateTmpTask(FileTask):
+    """`FileTask` whose sealed tool steps get a writable ``/tmp`` of their own."""
+
+    name = "item_files_private_tmp"
+    tool_environment = ToolEnvironment(summary=TOOL_SUMMARY, python=test_interpreter,
+                                       private_tmp=True)
+
+
 #: Names the grader-side path `HiddenEnvTask` declares (`ToolEnvironment.hidden`).
 HIDDEN_ENV = "ITEM_FILES_TEST_HIDDEN"
 
