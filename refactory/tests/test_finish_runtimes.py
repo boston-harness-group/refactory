@@ -295,7 +295,9 @@ def test_a_finish_updates_the_same_pull_request_on_each_runtime(worlds, runtime)
     [design] = world.prompts("design_doc")
     [build] = world.prompts("emit")
     assert QA.summary in design and finish.FIX_PLAN in design
-    for prompt in (design, build):
+    [judge] = world.prompts("qa_judge")
+    assert finish.JUDGE_ASK in judge and QA.summary in judge and CHANGE.summary in judge
+    for prompt in (design, build, judge):
         assert ENV.summary not in prompt and "test_disk" not in prompt
     # The same pull request, at the run's head; no second one.
     head = worktree.recorded(world.run).head

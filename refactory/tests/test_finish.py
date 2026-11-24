@@ -356,7 +356,7 @@ def _checked(tmp_path, status: str, output: str = "", *, confirmed: tuple[str, .
     ctx.write_text("qa-judge.json", json.dumps({
         "verdict": "proceed", "must_fix": [], "follow_ups": [], "dismissed": [],
         "finish_items": [{"id": name, "met": True, "evidence": f"{name}.py:1"} for name in confirmed]
-        + [{"id": "unconfirmed", "met": False, "evidence": "x.py:1"}]}))
+        + [{"id": "ask-2", "met": False, "evidence": "ask-2.py:1"}]}))
     return ctx
 
 
@@ -392,6 +392,7 @@ def test_each_item_is_resolved_only_on_its_own_evidence(tmp_path):
     assert result["qa-1"] == ("resolved", "finish run at `aaaaaaaaaaaa`: the QA judge confirmed it met (qa-1.py:1)")
     assert result["cf-2"][0] == "open" and "attempted, not confirmed" in result["cf-2"][1]
     assert "tests/test_two.py::test_two still failed, excused" in result["cf-2"][1]
+    # The judge answered for ask-2, with evidence, but not met.
     assert result["ask-2"] == ("open", "finish run at `aaaaaaaaaaaa`: attempted, not confirmed: the QA judge "
                                        "did not confirm it met")
     assert not any("fixed" in said for _state, said in result.values())
@@ -475,6 +476,9 @@ def test_a_finish_fixes_its_items_and_updates_the_same_pull_request(opened_pull,
     for prompt in (design, *builds):
         assert ENV.summary not in prompt and "test_slow" not in prompt
     assert QA.summary in design and finish.FIX_PLAN in design
+    # The QA judge is asked about each item the builder got, and only those.
+    [judge] = [p for p in model.prompts if QA_JUDGE_MARK in p]
+    assert finish.JUDGE_ASK in judge and QA.summary in judge and ENV.summary not in judge
     found = worktree.recorded(run)
     assert _remote_head(opened_pull.github, "acme/app", opened_pull.pull["head"]) == found.head
     [pull] = _pulls(opened_pull.github, "acme/app")
