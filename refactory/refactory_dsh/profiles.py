@@ -228,6 +228,16 @@ def normalize(settings: dict[str, Any], project: Path | None = None) -> dict[str
     # Likewise a package-contributed optimizer (``Package.optimizers``).
     optimizer_choices = (optim.names() if result["optimizer"] in optim.REGISTRY
                          else optim.available(project))
+    from refactory_dsh.nn.package import PackageError
+    for key, resolver in (("optimizer", optim.resolve), ("strategy", strategies.resolve)):
+        # A name a refused package lists (a clash, a class of the wrong kind) is
+        # refused with why; an unknown one falls to the check below.
+        try:
+            resolver(result[key], project)
+        except PackageError as error:
+            raise ProfileError(str(error)) from error
+        except ValueError:
+            pass
     for key, choices in (("optimizer", optimizer_choices), ("strategy", strategy_choices),
                          ("evaluator", ("walker", "dsh")), ("edit_preset", PRESETS),
                          ("worker_backend", ("dsh", "codex", "claude_code"))):
@@ -235,7 +245,11 @@ def normalize(settings: dict[str, Any], project: Path | None = None) -> dict[str
             raise ProfileError(f"unknown {key}: {result[key]}")
     picker = result.get("parent_picker") or ""
     if picker:
-        if not optim.is_picker(picker, project):
+        try:
+            is_picker = optim.is_picker(picker, project)
+        except PackageError as error:
+            raise ProfileError(str(error)) from error
+        if not is_picker:
             raise ProfileError(f"unknown parent_picker: {picker}; known: "
                                f"{', '.join(optim.picker_names(project))}")
         if optim.is_picker(result["optimizer"], project):

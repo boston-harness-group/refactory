@@ -627,8 +627,8 @@ Discover, list and resolve packages of modes.
 | class | `PackageClash` | `` |
 | function | `add` | `(project: 'Path', source: 'Path', *, as_name: 'str' = '', trust: 'str' = 'generated') -> 'str'` |
 | function | `catalogue` | `(project: 'Path') -> 'dict[str, list[dict[str, Any]]]'` |
-| function | `contributed` | `(attribute: 'str', base: 'type', project: 'Path \| None' = None, *, reserved: 'Any' = ()) -> 'dict[str, type]'` |
-| function | `contributions` | `(attribute: 'str', base: 'type', project: 'Path \| None' = None, *, reserved: 'Any' = ()) -> 'dict[str, tuple[type, Package]]'` |
+| function | `contributed` | `(attribute: 'str', project: 'Path \| None' = None) -> 'dict[str, type]'` |
+| function | `contributions` | `(attribute: 'str', project: 'Path \| None' = None) -> 'dict[str, tuple[type, Package]]'` |
 | function | `describe_mode` | `(project: 'Path', identifier: 'str') -> 'dict[str, Any]'` |
 | function | `discover` | `(project: 'Path \| None' = None) -> 'dict[str, Package]'` |
 | function | `discover_names` | `(project: 'Path \| None' = None) -> 'list[str]'` |
@@ -650,6 +650,7 @@ Discover, list and resolve packages of modes.
 | function | `set_enabled` | `(project: 'Path', name: 'str', enabled: 'bool') -> 'None'` |
 | function | `smoke` | `(project: 'Path', identifier: 'str', *, model: 'bool' = False, client: 'Any' = None) -> 'dict[str, Any]'` |
 | function | `smoke_state` | `(name: 'str', project: 'Path \| None' = None) -> 'str'` |
+| function | `survey` | `(attribute: 'str', project: 'Path \| None' = None) -> 'tuple[dict[str, tuple[type, Package]], dict[str, str], dict[str, str]]'` |
 | function | `tool_report` | `(project: 'Path \| None' = None, name: 'str \| None' = None) -> 'dict[str, list[dict[str, Any]]]'` |
 | function | `tools` | `(name: 'str', project: 'Path \| None' = None)` |
 | function | `usable_packages` | `(project: 'Path \| None' = None) -> 'dict[str, Package]'` |
@@ -661,7 +662,7 @@ Discover, list and resolve packages of modes.
 - **`add`** — Copy a package into the workspace, refusing a clash.
 - **`catalogue`** — Modes grouped by package: the only way they are ever listed.
 - **`contributed`** — :func:`contributions` without the providing packages.
-- **`contributions`** — The classes the usable packages list under ``attribute`` (a ``Package`` field:
+- **`contributions`** — The pieces the usable packages contribute, each with its package
 - **`describe_mode`** — One mode's surface, for a person about to optimize it or read a report.
 - **`discover`** — Every package that loads. A package that fails to import is reported.
 - **`discover_names`** — Every package directory, installed or in the workspace.
@@ -680,6 +681,7 @@ Discover, list and resolve packages of modes.
 - **`resolve`** — The package and mode class for ``<package>/<name>``.
 - **`smoke`** — Run one mode once, so a package can be checked rather than merely imported.
 - **`smoke_state`** — What was recorded about a package's smoke (`SMOKE`): by the create or edit run that
+- **`survey`** — What the usable packages contribute under ``attribute`` (``strategies`` or
 - **`tool_report`** — Every declared tool of every package, with its status on this machine.
 - **`tools`** — The tools a package declares, read without importing it.
 - **`usable_packages`** — The packages a run may take a mode, strategy or optimizer from: the enabled ones

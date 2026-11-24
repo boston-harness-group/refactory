@@ -1427,17 +1427,15 @@ class Loop(OuterLoop):
         in ``config.json``, so a resume can refuse a different implementation under
         the same name (`_check_package_sources`)."""
         from refactory_dsh import optim, registry, strategies
-        from refactory_dsh.optim import Optimizer
 
         found: dict[str, dict[str, str]] = {}
-        for key, name, attribute, base, core in (
-                ("strategy", self.config.strategy, "strategies", OuterLoop, strategies.STRATEGIES),
-                ("optimizer", self.config.optimizer, "optimizers", Optimizer, optim.REGISTRY),
-                ("parent_picker", self.config.parent_picker, "optimizers", Optimizer,
-                 optim.REGISTRY)):
+        for key, name, attribute, core in (
+                ("strategy", self.config.strategy, "strategies", strategies.STRATEGIES),
+                ("optimizer", self.config.optimizer, "optimizers", optim.REGISTRY),
+                ("parent_picker", self.config.parent_picker, "optimizers", optim.REGISTRY)):
             if not name or name in core:
                 continue
-            entry = registry.contributions(attribute, base, self.project, reserved=core).get(name)
+            entry = registry.contributions(attribute, self.project).get(name)
             if entry is not None:
                 found[key] = {"name": name, "package": entry[1].name,
                               "version": entry[1].version}

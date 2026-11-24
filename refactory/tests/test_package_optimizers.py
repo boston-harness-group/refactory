@@ -291,18 +291,20 @@ def test_a_package_optimizer_must_be_named_and_an_optimizer(tmp_path):
         "SEEN = []", "class NotOne:\n    name = 'not_one'\n\n\nSEEN = []").replace(
         'name="probe_blocks"', 'name="probe_bad"')
     project = _project(tmp_path, bad, name="probe_bad")
-    with pytest.raises(TypeError, match="not a Optimizer"):
-        optim.package_optimizers(project)
+    # The package is left out, as one that fails to load is; naming its pieces is
+    # refused with why.
+    assert "probe_picker" not in optim.package_optimizers(project)
+    with pytest.raises(PackageError, match="probe_bad.*not a Optimizer"):
+        optim.resolve("probe_picker", project)
 
 
 def test_strategies_and_optimizers_share_one_discovery_route(tmp_path, monkeypatch):
     calls: list[str] = []
     real = registry.contributed
 
-    def spy(attribute: str, base: type, project: Path | None = None,
-            **kw: Any) -> dict[str, type]:
+    def spy(attribute: str, project: Path | None = None) -> dict[str, type]:
         calls.append(attribute)
-        return real(attribute, base, project, **kw)
+        return real(attribute, project)
 
     monkeypatch.setattr(registry, "contributed", spy)
     strategies.package_strategies()
@@ -441,11 +443,20 @@ def test_a_package_name_that_shadows_the_librarys_is_refused(tmp_path, shadow, a
     renamed = SOURCE.replace('name = "probe_picker"' if attribute == "optimizers"
                              else 'name = "probe_loop"', f'name = "{shadow}"')
     project = _project(tmp_path, renamed)
-    with pytest.raises(registry.PackageError, match=f"{shadow!r}, a name the library already has"):
-        (optim.package_optimizers if attribute == "optimizers"
-         else strategies.package_strategies)(project)
-    with pytest.raises(registry.PackageError, match="already has"):
-        (optim.available if attribute == "optimizers" else strategies.available)(project)
+    # The whole package is left out of what is selectable...
+    renamed_away = "probe_picker" if attribute == "optimizers" else "probe_loop"
+    pieces = {"probe_picker", "probe_proposer", "probe_loop"} - {renamed_away}
+    assert not pieces & (set(optim.available(project)) | set(strategies.available(project)))
+    for attribute_name in ("optimizers", "strategies"):
+        found, refused, _names = registry.survey(attribute_name, project)
+        assert PACKAGE in refused and all(p.name != PACKAGE for _c, p in found.values())
+    # ...and a run naming any of its pieces is refused with why.
+    for piece, resolver in (("probe_proposer", optim.resolve), ("probe_picker", optim.resolve),
+                            ("probe_loop", strategies.resolve)):
+        if piece in pieces:
+            with pytest.raises(registry.PackageError,
+                               match=f"{shadow!r}, a name the library already has"):
+                resolver(piece, project)
     # The library's name still means the library's class.
     if attribute == "optimizers":
         assert optim.resolve(shadow, project) is optim.REGISTRY[shadow]
@@ -487,3 +498,43 @@ def test_the_catalogue_lists_a_projects_package_pieces(tmp_path):
     assert {"probe_picker", "probe_proposer", "archive", "random"} <= optimizers
     assert {"probe_loop", "default"} <= {e["name"] for e in listed["outer_loops"]}
     assert "probe_picker" not in {e["name"] for e in level_two()["optimizers"]}
+
+
+def test_a_misnamed_package_does_not_take_down_listings_or_other_names(tmp_path):
+    """A project package whose picker is named ``archive`` is left out with why, as a
+    package that fails to load is: the catalogue, the help contract, profiles and
+    every other package's names keep working."""
+    from refactory_dsh.console import level_two
+    from refactory_dsh.discovery import help_contract
+
+    project = _project(tmp_path)
+    bad = registry.workspace_root(project) / "probe_misnamed"
+    bad.mkdir()
+    (bad / "__init__.py").write_text(
+        SOURCE.replace('name="probe_blocks"', 'name="probe_misnamed"')
+        .replace('name = "probe_picker"', 'name = "archive"')
+        .replace('name = "probe_proposer"', 'name = "misnamed_proposer"')
+        .replace('name = "probe_loop"', 'name = "misnamed_loop"'))
+    listed = level_two(project)
+    assert {"probe_picker", "probe_proposer", "archive"} <= {e["name"] for e in listed["optimizers"]}
+    assert "misnamed_proposer" not in {e["name"] for e in listed["optimizers"]}
+    assert "misnamed_loop" not in {e["name"] for e in listed["outer_loops"]}
+    assert [u["package"] for u in listed["unavailable_packages"]] == ["probe_misnamed"]
+    assert "'archive', a name the library already has" in listed["unavailable_packages"][0]["reason"]
+    assert help_contract(project)["strategies"]["unavailable_packages"] == listed[
+        "unavailable_packages"]
+    # Other names resolve and validate; the library's archive is the library's.
+    assert optim.resolve("archive", project) is optim.REGISTRY["archive"]
+    assert optim.resolve("probe_picker", project).__module__ == f"refactory_packages.{PACKAGE}"
+    chosen = {"optimizer": "probe_proposer", "parent_picker": "probe_picker",
+              "strategy": "probe_loop"}
+    settings = profiles.normalize(dict(chosen), project)
+    assert {k: settings[k] for k in chosen} == chosen
+    # The misnamed package's own pieces are refused with why, in a run and a profile.
+    with pytest.raises(PackageError, match="probe_misnamed.*'archive'"):
+        optim.resolve("misnamed_proposer", project)
+    with pytest.raises(PackageError, match="probe_misnamed.*'archive'"):
+        strategies.resolve("misnamed_loop", project)
+    for key, name in (("optimizer", "misnamed_proposer"), ("strategy", "misnamed_loop")):
+        with pytest.raises(profiles.ProfileError, match="not available.*'archive'"):
+            profiles.normalize({key: name}, project)

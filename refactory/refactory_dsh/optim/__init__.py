@@ -67,8 +67,7 @@ def package_optimizers(project: Path | None = None) -> dict[str, type[Optimizer]
     name, found as package strategies are (``registry.contributed``)."""
     from refactory_dsh import registry
 
-    return registry.contributed("optimizers", Optimizer, project,  # type: ignore[return-value]
-                                reserved=REGISTRY)
+    return registry.contributed("optimizers", project)  # type: ignore[return-value]
 
 
 def names() -> list[str]:
@@ -87,18 +86,28 @@ def resolve(name: str, project: Path | None = None) -> type[Optimizer]:
     no package). Fails loud on an unknown name."""
     if name in REGISTRY:
         return REGISTRY[name]
-    contributed = package_optimizers(project)
-    if name in contributed:
-        return contributed[name]
-    known = sorted(set(REGISTRY) | set(contributed))
+    from refactory_dsh import registry
+
+    found, refused, refused_names = registry.survey("optimizers", project)
+    if name in found:
+        return found[name][0]  # type: ignore[return-value]
+    if name in refused_names:
+        # The package that lists it was left out: the run is refused with why.
+        raise registry.PackageError(
+            f"optimizer {name!r} is not available: {refused[refused_names[name]]}")
+    known = sorted(set(REGISTRY) | set(found))
     raise ValueError(f"unknown optimizer {name!r}; known: {known}")
 
 
 def is_picker(name: str, project: Path | None = None) -> bool:
     """Whether ``name`` chooses parents (a :class:`ParentSelector`), and so can be the
     ``parent_picker`` paired with a proposer; ``False`` for an unknown name."""
+    from refactory_dsh.nn.package import PackageError
+
     try:
         return issubclass(resolve(name, project), ParentSelector)
+    except PackageError:
+        raise
     except ValueError:
         return False
 

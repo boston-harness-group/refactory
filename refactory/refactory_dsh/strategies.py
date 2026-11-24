@@ -874,8 +874,7 @@ def package_strategies(project: Path | None = None) -> dict[str, type[OuterLoop]
     """
     from refactory_dsh import registry
 
-    return registry.contributed("strategies", OuterLoop, project,  # type: ignore[return-value]
-                                reserved=STRATEGIES)
+    return registry.contributed("strategies", project)  # type: ignore[return-value]
 
 
 def available(project: Path | None = None) -> list[str]:
@@ -886,10 +885,16 @@ def available(project: Path | None = None) -> list[str]:
 def resolve(name: str, project: Path | None = None) -> type[OuterLoop]:
     if name in STRATEGIES:
         return STRATEGIES[name]
-    contributed = package_strategies(project)
-    if name in contributed:
-        return contributed[name]
-    known = sorted(set(STRATEGIES) | set(contributed))
+    from refactory_dsh import registry
+
+    found, refused, refused_names = registry.survey("strategies", project)
+    if name in found:
+        return found[name][0]  # type: ignore[return-value]
+    if name in refused_names:
+        # The package that lists it was left out: the run is refused with why.
+        raise registry.PackageError(
+            f"strategy {name!r} is not available: {refused[refused_names[name]]}")
+    known = sorted(set(STRATEGIES) | set(found))
     raise ValueError(f"unknown strategy {name!r}; known: {known}")
 
 
