@@ -675,8 +675,7 @@ def test_a_step_whose_every_test_was_deselected_passes_without_running_one(tmp_p
     """Every test of the check passed in the self-check on this commit: all are deselected,
     none runs again, and pytest's exit 5 for the empty step is read as the pass it is --
     for a single step and as a step of a chain."""
-    for check in (f"{PYTEST} -q tests", f"{PYTEST} -q tests && echo lint ok",
-                  f"{PYTEST} -q -n 2 tests"):
+    for check in (f"{PYTEST} -q tests", f"{PYTEST} -q tests && echo lint ok"):
         root = tmp_path / str(len(check))
         root.mkdir()
         fx = Fixture(root, {"tests/test_three.py": MORE}, {"change.txt": "x\n"}, check=check)
@@ -688,18 +687,72 @@ def test_a_step_whose_every_test_was_deselected_passes_without_running_one(tmp_p
         assert fx.tests("copy") == []
 
 
+def test_under_xdist_the_last_pass_runs_again(tmp_path):
+    """xdist's summary never counts deselections, so under it one passed test is left to
+    run and the step can never exit 5 for deselecting all it collects."""
+    check = f"{PYTEST} -q -n 2 tests"
+    fx = Fixture(tmp_path, {"tests/test_two.py": "def test_one():\n    pass\n\n\n"
+                                                 "def test_zwei():\n    pass\n"},
+                 {"change.txt": "x\n"}, check=check)
+    repo_change.prepare_attempt(fx.ctx, 120)
+    _self_check(fx, ["tests/test_two.py"])
+    passed, used, result = _merged_full_check(fx, check)
+    assert used == passed[:-1] and len(passed) == 2
+    assert result.ok and set(fx.tests("copy")) == {passed[-1]}  # xdist logs a test twice
+
+
 def test_a_step_that_collected_nothing_still_fails():
-    """A step that collected nothing without deselecting anything stays failing; so does
-    one whose exit 5 pytest did not explain."""
-    result = sandbox.SandboxResult(ok=False, returncode=5, stdout="no tests ran in 0.01s\n")
-    base_check.settle_deselected(result, "pytest -q tests")
+    """Only pytest's own count of exactly the tests the step deselected makes its exit 5 a
+    pass: a step that deselected nothing, an exit 5 pytest did not explain, a count that
+    differs, and xdist's bare "no tests ran" all stay failing."""
+    one = "pytest -q tests --deselect=tests/test_a.py::test_x"
+    for command, out in (("pytest -q tests", "no tests ran in 0.01s\n"),
+                         (one, "crashed\n"),
+                         (one, "no tests ran in 0.01s\n"),
+                         (one, "2 deselected in 0.01s\n"),
+                         ("pytest -q -n 4 tests --deselect=tests/test_a.py::test_x",
+                          "no tests ran in 0.70s\n")):
+        result = sandbox.SandboxResult(ok=False, returncode=5, stdout=out)
+        base_check.settle_deselected(result, command)
+        assert not result.ok and result.returncode == 5, (command, out)
+    result = sandbox.SandboxResult(ok=False, returncode=5, stdout="1 deselected in 0.01s\n")
+    base_check.settle_deselected(result, one)
+    assert result.ok and result.returncode == 0
+
+
+def test_a_chain_step_without_deselect_that_collected_nothing_still_fails():
+    """N6: with per-step records, the step that deselected everything passes, and a step
+    without ``--deselect`` that collected nothing keeps the chain failing."""
+    from refactory_dsh.base_check import _step_record
+
+    steps = [_step_record({"step": "pytest -q tests --deselect=tests/test_a.py::test_x",
+                           "operator": "", "ran": True, "exit_code": 5,
+                           "output": "1 deselected in 0.01s"}),
+             _step_record({"step": "pytest -q other", "operator": "&&", "ran": True,
+                           "exit_code": 5, "output": "no tests ran in 0.01s"})]
+    result = sandbox.SandboxResult(ok=False, returncode=5, stdout="")
+    result.step_results = steps  # type: ignore[attr-defined]
+    base_check.settle_deselected(result, "pytest -q tests --deselect=tests/test_a.py::test_x"
+                                         " && pytest -q other")
+    assert [sr["exit_code"] for sr in steps] == [0, 5]
     assert not result.ok and result.returncode == 5
-    result = sandbox.SandboxResult(ok=False, returncode=5, stdout="crashed\n")
-    base_check.settle_deselected(result, "pytest -q tests --deselect=tests/test_a.py::test_x")
-    assert not result.ok and result.returncode == 5
-    result = sandbox.SandboxResult(ok=False, returncode=5, stdout="no tests ran in 0.70s\n")
-    base_check.settle_deselected(result, "pytest -q -n 4 tests --deselect=tests/test_a.py::test_x")
-    assert result.ok and result.returncode == 0  # xdist's word for all deselected
+
+
+def test_a_self_checked_file_the_whole_run_does_not_collect_still_fails(tmp_path):
+    """M (review): with ``python_files = check_*.py`` pytest collects ``tests/test_a.py``
+    when it is named, as the self-check names it, but not under ``pytest tests``. The full
+    check then deselects nothing it collected and runs nothing: exit 5 stays a failure, as
+    it is without deselection."""
+    check = f"{PYTEST} -q tests"
+    fx = Fixture(tmp_path, {"pytest.ini": "[pytest]\npython_files = check_*.py\n",
+                            "tests/test_a.py": MORE}, {"change.txt": "x\n"}, check=check)
+    repo_change.prepare_attempt(fx.ctx, 120)
+    prepass = _self_check(fx, ["tests/test_a.py"])
+    assert prepass.passed_ids == ["tests/test_a.py::test_more"]
+    plain = repo_change.run_check(fx.ctx, check, 120, beside_reviews=True, per_step=True)
+    _, used, result = _merged_full_check(fx, check)
+    assert used == ["tests/test_a.py::test_more"]
+    assert plain.returncode == 5 and not result.ok and result.returncode == 5
 
 
 ORDER_BASE = ("STATE = []\n\n\ndef test_a_sets():\n    pass\n\n\n"
