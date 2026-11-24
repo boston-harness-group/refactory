@@ -1123,6 +1123,19 @@ def _deliver(ctx: Any, found: worktree.Worktree, planned: dict[str, Any], *,
 
     if merge.merge_commit:
         merge.check_reused = reusable_check(ctx, path, merge.merge_commit)
+    elif (not merge.conflicts and not merge.abandoned and not merge.infrastructure
+          and whole_suite_owed(ctx, path, reviewed_commit)):
+        # Nothing to merge, but the reviewed commit's check deselected what its self-check
+        # had passed: the whole suite runs once here, so the check stays binding (an
+        # order-dependent failure, a file only the run's worktree had).
+        check_failure, infra_flag = _check_merged(ctx, found, reviewed_commit, reviewed_commit,
+                                                   check_timeout_s, target_tip=found.base)
+        if check_failure:
+            if infra_flag:
+                raise ValueError(
+                    f"delivery stopped: infrastructure failure in the whole check: {check_failure}"
+                )
+            merge = MergeResult(check_failed=check_failure)
     if merge.merge_commit and not merge.check_reused:
         check_failure, infra_flag = _check_merged(ctx, found, merge.merge_commit, reviewed_commit,
                                                    check_timeout_s,
@@ -1741,6 +1754,29 @@ def record_full_check(ctx: Any, path: Path, command: str) -> None:
     ledger.write_text(json.dumps(passed, indent=2) + "\n")
 
 
+#: The commits whose full check deselected the self-check's passes
+#: (`design_ops._full_check`): none of them stands for delivery's check. In the run
+#: directory, beside `PASSED_CHECKS`.
+DESELECTED_CHECKS = Path(".refactory") / "deselected-checks.json"
+
+
+def record_deselected_check(ctx: Any, commit: str) -> None:
+    """Note that ``commit``'s full check ran without what its self-check had passed."""
+    ledger = Path(ctx.workdir) / DESELECTED_CHECKS
+    known = list(worktree._json(ledger).get("commits") or [])
+    if commit and commit not in known:
+        ledger.parent.mkdir(parents=True, exist_ok=True)
+        ledger.write_text(json.dumps({"commits": [*known, commit]}, indent=1) + "\n")
+
+
+def whole_suite_owed(ctx: Any, path: Path, commit: str) -> bool:
+    """Whether delivery must run the whole check on ``commit``: its full check deselected
+    the self-check's passes, and no whole run of the suite on its tree passed since
+    (`reusable_check`)."""
+    known = worktree._json(Path(ctx.workdir) / DESELECTED_CHECKS).get("commits") or []
+    return commit in known and not reusable_check(ctx, path, commit)
+
+
 def reusable_check(ctx: Any, path: Path, commit: str) -> str:
     """The commit whose passing full check covers ``commit``'s tree, or ``""``.
 
@@ -1836,8 +1872,15 @@ def _check_merged(ctx: Any, found: worktree.Worktree, merge_commit: str,
     if not check:
         return "", False
 
-    result = sandbox.run_command(check, workdir=path, timeout_s=check_timeout_s, budget=budget,
-                                 env=env, home=home, exact_env=True)
+    from refactory_dsh import base_check
+
+    # Once, step by step when the check is a chain (`base_check.run_chain`): whether every
+    # step ran, and what each said, comes from this run.
+    result, steps = base_check.run_chain(
+        check, lambda script: sandbox.run_command(script, workdir=path, timeout_s=check_timeout_s,
+                                                  budget=budget, env=env, home=home,
+                                                  exact_env=True),
+        base_check._roots((path, "<root>"), (home, "<home>")))
     if result.ok:
         record_full_check(ctx, path, check)
         return "", False
@@ -1847,7 +1890,7 @@ def _check_merged(ctx: Any, found: worktree.Worktree, merge_commit: str,
     if target_tip:
         output = "\n".join((result.stdout or "", result.stderr or "")).strip()
         not_excused = _merged_excusal(ctx, found, path, env, home, check, output,
-                                      merge_commit, target_tip, check_timeout_s)
+                                      merge_commit, target_tip, check_timeout_s, steps=steps)
         if not not_excused:
             record_full_check(ctx, path, check)
             return "", False
@@ -1859,7 +1902,7 @@ def _check_merged(ctx: Any, found: worktree.Worktree, merge_commit: str,
 
 def _merged_excusal(ctx: Any, found: worktree.Worktree, path: Path, env: dict[str, str],
                     home: Path, check: str, output: str, merge_commit: str, target_tip: str,
-                    timeout: float) -> str:
+                    timeout: float, *, steps: list[dict] | None = None) -> str:
     """Why the merged result's failed check is not excused; empty when it is.
 
     The merged result passes only when every failure its output counts is named and
@@ -1868,15 +1911,21 @@ def _merged_excusal(ctx: Any, found: worktree.Worktree, path: Path, env: dict[st
     does not fail it again -- and nothing went unrun: `base_check.excusal_blocker` finds
     nothing (the runner's summary counts exactly the named failures, the last step is
     a test runner that did not stop at its first failure), and the chain ran every step
-    (`base_check.chain_incomplete`). Anything else is the check failing, so delivery
-    stays binding: a draft, or no push.
+    (`base_check.chain_incomplete`). For a chain, ``steps`` are the records of its one
+    run, step by step, and each failing step is held to that rule
+    (`base_check.steps_blocker`). Anything else is the check failing, so delivery stays
+    binding: a draft, or no push.
     """
-    from refactory_dsh import base_check, sandbox
+    from refactory_dsh import base_check
 
     failures = base_check.parse_test_failures(output)
     if not failures:
         return "no failing test could be read, so nothing is excused"
-    blocker = base_check.excusal_blocker(check, output, failures)
+    incomplete = base_check.chain_incomplete(check, steps)
+    if incomplete:
+        return f"not excused: {incomplete}"
+    blocker = (base_check.steps_blocker(steps) if steps is not None
+               else base_check.excusal_blocker(check, output, failures))
     if blocker:
         return f"not excused: {blocker}"
     t_result, _source = base_check.targeted_base_failures(
@@ -1914,13 +1963,6 @@ def _merged_excusal(ctx: Any, found: worktree.Worktree, path: Path, env: dict[st
     if not jr.all_excused:
         return "charged: " + ", ".join(
             f"{tid} ({jr.reasons.get(tid, 'new-failure')})" for tid in sorted(jr.charged))
-    incomplete = base_check.chain_incomplete(
-        check, lambda script: sandbox.run_command(
-            script, workdir=path, timeout_s=timeout, budget=getattr(ctx, "budget", None),
-            env=env, home=home, exact_env=True),
-        base_check._roots((path, "<root>"), (home, "<home>")))
-    if incomplete:
-        return f"not excused: {incomplete}"
     return ""
 
 

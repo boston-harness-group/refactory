@@ -7847,7 +7847,8 @@ Build a reusable mode package from a brief, name and task/single-shot inputs. Ca
         "data_node",
         "revision_of",
         "requires_input",
-        "smoke_timeout_s"
+        "smoke_timeout_s",
+        "holdout"
       ],
       "notes": "read the brief, set up per-run staging, and publish to the prompts",
       "role": "ceo"
@@ -7916,6 +7917,10 @@ Build a reusable mode package from a brief, name and task/single-shot inputs. Ca
         "allow_regression",
         "sample_knobs",
         "smoke_timeout_s",
+        "smoke_items",
+        "profile",
+        "holdout",
+        "parts_manifest",
         "attempts",
         "check_attempt_cap"
       ],
@@ -8091,6 +8096,18 @@ Build a reusable mode package from a brief, name and task/single-shot inputs. Ca
       "value": "",
       "values": []
     },
+    "holdout": {
+      "default": "",
+      "description": "the holdout fraction the produced mode's runs use, from 0 to below 1; the smoke samples only the train part of that split. Ignored for the split when a parts manifest is given (empty: the profile's, else the outer loop's default 0.3)",
+      "frozen": false,
+      "kind": "str",
+      "range": [
+        null,
+        null
+      ],
+      "value": "",
+      "values": []
+    },
     "name": {
       "default": "",
       "description": "the package to create (empty takes the name from the brief)",
@@ -8106,6 +8123,30 @@ Build a reusable mode package from a brief, name and task/single-shot inputs. Ca
     "overwatch__system_prompt": {
       "default": "",
       "description": "system prompt for overwatch",
+      "frozen": false,
+      "kind": "str",
+      "range": [
+        null,
+        null
+      ],
+      "value": "",
+      "values": []
+    },
+    "parts_manifest": {
+      "default": "",
+      "description": "the parts manifest (parts.json with train/val/test id lists) the produced mode's runs use; the smoke samples only its train ids. A relative path, here or in the profile, is the project's (`refactory optimize` reads one against its working directory) (empty: the profile's, else the holdout fraction's split)",
+      "frozen": false,
+      "kind": "str",
+      "range": [
+        null,
+        null
+      ],
+      "value": "",
+      "values": []
+    },
+    "profile": {
+      "default": "",
+      "description": "a saved optimize profile (`refactory profile-save`) whose holdout and parts_manifest the smoke samples by; holdout and parts_manifest given here win (empty: none)",
       "frozen": false,
       "kind": "str",
       "range": [
@@ -8223,9 +8264,21 @@ Build a reusable mode package from a brief, name and task/single-shot inputs. Ca
       "value": false,
       "values": []
     },
+    "smoke_items": {
+      "default": 3,
+      "description": "number of items to run from a task-bound data node during smoke; the full item set is not exercised",
+      "frozen": false,
+      "kind": "int",
+      "range": [
+        1,
+        null
+      ],
+      "value": 3,
+      "values": []
+    },
     "smoke_timeout_s": {
       "default": 3600,
-      "description": "wall-clock seconds allowed for each full mode validation pass, including its model calls; timeout fails creation",
+      "description": "seconds a smoke pass may go with no sign of work before it is stopped. Work is: any output of the smoke or of a node command; a node's declared writes; the run's own state files (status, checkpoint, events, progress, facts); a worker's receipt and activity file; an item pass's marker and record, up to four levels of nested passes. A plain file written anywhere else, or output a node captures from its own subprocesses, is not. A wall-clock backstop (four times this, capped at 4 hours by default) still ends each pass",
       "frozen": false,
       "kind": "int",
       "range": [
@@ -8292,7 +8345,7 @@ Build a reusable mode package from a brief, name and task/single-shot inputs. Ca
       "panel": "Mode picker; Run once executes enabled modes including authoring; Optimize requires a scored mode. Use chat for stepwise gates."
     },
     "purpose": "Build a reusable mode package from a brief, name and task/single-shot inputs. Canonical smoke runs before separate QA and Overwatch; repair shares the attempt bound and completion needs current validation and intent evidence.",
-    "reviewed_schema": "3fddccba946f8bf6d63e2d7b4c59d50a346a8193a3a79a547be985dc1159ffd3"
+    "reviewed_schema": "d4cbfcedf956fdbbf67b0f88dd04595d233534e8342ac4329d2d9fb055828b08"
   }
 }
 ```
@@ -8459,7 +8512,8 @@ Build a small reusable package with a strategist, coder and focused QA. Canonica
         "data_node",
         "revision_of",
         "requires_input",
-        "smoke_timeout_s"
+        "smoke_timeout_s",
+        "holdout"
       ],
       "notes": "read the brief, set up per-run staging, and publish to the prompts",
       "role": "ceo"
@@ -8489,6 +8543,10 @@ Build a small reusable package with a strategist, coder and focused QA. Canonica
         "allow_regression",
         "sample_knobs",
         "smoke_timeout_s",
+        "smoke_items",
+        "profile",
+        "holdout",
+        "parts_manifest",
         "repair_attempts",
         "check_attempt_cap"
       ],
@@ -8622,9 +8680,45 @@ Build a small reusable package with a strategist, coder and focused QA. Canonica
       "value": "",
       "values": []
     },
+    "holdout": {
+      "default": "",
+      "description": "the holdout fraction the produced mode's runs use, from 0 to below 1; the smoke samples only the train part of that split. Ignored for the split when a parts manifest is given (empty: the profile's, else the outer loop's default 0.3)",
+      "frozen": false,
+      "kind": "str",
+      "range": [
+        null,
+        null
+      ],
+      "value": "",
+      "values": []
+    },
     "name": {
       "default": "",
       "description": "the package to create (empty takes the name from the brief)",
+      "frozen": false,
+      "kind": "str",
+      "range": [
+        null,
+        null
+      ],
+      "value": "",
+      "values": []
+    },
+    "parts_manifest": {
+      "default": "",
+      "description": "the parts manifest (parts.json with train/val/test id lists) the produced mode's runs use; the smoke samples only its train ids. A relative path, here or in the profile, is the project's (`refactory optimize` reads one against its working directory) (empty: the profile's, else the holdout fraction's split)",
+      "frozen": false,
+      "kind": "str",
+      "range": [
+        null,
+        null
+      ],
+      "value": "",
+      "values": []
+    },
+    "profile": {
+      "default": "",
+      "description": "a saved optimize profile (`refactory profile-save`) whose holdout and parts_manifest the smoke samples by; holdout and parts_manifest given here win (empty: none)",
       "frozen": false,
       "kind": "str",
       "range": [
@@ -8706,9 +8800,21 @@ Build a small reusable package with a strategist, coder and focused QA. Canonica
       "value": false,
       "values": []
     },
+    "smoke_items": {
+      "default": 3,
+      "description": "number of items to run from a task-bound data node during smoke; the full item set is not exercised",
+      "frozen": false,
+      "kind": "int",
+      "range": [
+        1,
+        null
+      ],
+      "value": 3,
+      "values": []
+    },
     "smoke_timeout_s": {
       "default": 3600,
-      "description": "wall-clock seconds allowed for each full mode validation pass, including its model calls; timeout fails creation",
+      "description": "seconds a smoke pass may go with no sign of work before it is stopped. Work is: any output of the smoke or of a node command; a node's declared writes; the run's own state files (status, checkpoint, events, progress, facts); a worker's receipt and activity file; an item pass's marker and record, up to four levels of nested passes. A plain file written anywhere else, or output a node captures from its own subprocesses, is not. A wall-clock backstop (four times this, capped at 4 hours by default) still ends each pass",
       "frozen": false,
       "kind": "int",
       "range": [
@@ -8763,7 +8869,7 @@ Build a small reusable package with a strategist, coder and focused QA. Canonica
       "panel": "Mode picker; Run once executes enabled modes including authoring; Optimize requires a scored mode. Use chat for stepwise gates."
     },
     "purpose": "Build a small reusable package with a strategist, coder and focused QA. Canonical smoke precedes focused QA; structural, runtime and review failures share repair_attempts. Supply a brief, name and task/single-shot inputs.",
-    "reviewed_schema": "1f3437b748a7372075d53eaff9a6e1d1527c82be8d9abf70289bf86fe47f04a3"
+    "reviewed_schema": "4d230329b0c0872d9b475ce5d7ea8d107fa333b1a5c52834a234e7a1c21fd820"
   }
 }
 ```
@@ -11151,7 +11257,8 @@ Revise an existing mode package and validate the revision before separate QA and
         "data_node",
         "revision_of",
         "requires_input",
-        "smoke_timeout_s"
+        "smoke_timeout_s",
+        "holdout"
       ],
       "notes": "read the brief, set up per-run staging, and publish to the prompts",
       "role": "ceo"
@@ -11220,6 +11327,10 @@ Revise an existing mode package and validate the revision before separate QA and
         "allow_regression",
         "sample_knobs",
         "smoke_timeout_s",
+        "smoke_items",
+        "profile",
+        "holdout",
+        "parts_manifest",
         "attempts",
         "check_attempt_cap"
       ],
@@ -11395,6 +11506,18 @@ Revise an existing mode package and validate the revision before separate QA and
       "value": "",
       "values": []
     },
+    "holdout": {
+      "default": "",
+      "description": "the holdout fraction the produced mode's runs use, from 0 to below 1; the smoke samples only the train part of that split. Ignored for the split when a parts manifest is given (empty: the profile's, else the outer loop's default 0.3)",
+      "frozen": false,
+      "kind": "str",
+      "range": [
+        null,
+        null
+      ],
+      "value": "",
+      "values": []
+    },
     "name": {
       "default": "",
       "description": "the package to create (empty takes the name from the brief)",
@@ -11410,6 +11533,30 @@ Revise an existing mode package and validate the revision before separate QA and
     "overwatch__system_prompt": {
       "default": "",
       "description": "system prompt for overwatch",
+      "frozen": false,
+      "kind": "str",
+      "range": [
+        null,
+        null
+      ],
+      "value": "",
+      "values": []
+    },
+    "parts_manifest": {
+      "default": "",
+      "description": "the parts manifest (parts.json with train/val/test id lists) the produced mode's runs use; the smoke samples only its train ids. A relative path, here or in the profile, is the project's (`refactory optimize` reads one against its working directory) (empty: the profile's, else the holdout fraction's split)",
+      "frozen": false,
+      "kind": "str",
+      "range": [
+        null,
+        null
+      ],
+      "value": "",
+      "values": []
+    },
+    "profile": {
+      "default": "",
+      "description": "a saved optimize profile (`refactory profile-save`) whose holdout and parts_manifest the smoke samples by; holdout and parts_manifest given here win (empty: none)",
       "frozen": false,
       "kind": "str",
       "range": [
@@ -11527,9 +11674,21 @@ Revise an existing mode package and validate the revision before separate QA and
       "value": false,
       "values": []
     },
+    "smoke_items": {
+      "default": 3,
+      "description": "number of items to run from a task-bound data node during smoke; the full item set is not exercised",
+      "frozen": false,
+      "kind": "int",
+      "range": [
+        1,
+        null
+      ],
+      "value": 3,
+      "values": []
+    },
     "smoke_timeout_s": {
       "default": 3600,
-      "description": "wall-clock seconds allowed for each full mode validation pass, including its model calls; timeout fails creation",
+      "description": "seconds a smoke pass may go with no sign of work before it is stopped. Work is: any output of the smoke or of a node command; a node's declared writes; the run's own state files (status, checkpoint, events, progress, facts); a worker's receipt and activity file; an item pass's marker and record, up to four levels of nested passes. A plain file written anywhere else, or output a node captures from its own subprocesses, is not. A wall-clock backstop (four times this, capped at 4 hours by default) still ends each pass",
       "frozen": false,
       "kind": "int",
       "range": [
@@ -11596,7 +11755,7 @@ Revise an existing mode package and validate the revision before separate QA and
       "panel": "Mode picker; Run once executes enabled modes including authoring; Optimize requires a scored mode. Use chat for stepwise gates."
     },
     "purpose": "Revise an existing mode package and validate the revision before separate QA and Overwatch. Supply revision_of, name and brief. allow_regression=true skips original execution and numerical comparison, while revised execution and intent evidence remain mandatory.",
-    "reviewed_schema": "184ce0afc0773fd7318dab012f721a9160cd84b03834893eb6622d0090ef279d"
+    "reviewed_schema": "f7e831e44d53ac22baea475914513e9ca60600a99fbac6ab16055d24cbe1c0a9"
   }
 }
 ```
@@ -11758,7 +11917,8 @@ Revise a small mode package with a coder and focused QA after canonical validati
         "data_node",
         "revision_of",
         "requires_input",
-        "smoke_timeout_s"
+        "smoke_timeout_s",
+        "holdout"
       ],
       "notes": "read the brief, set up per-run staging, and publish to the prompts",
       "role": "ceo"
@@ -11788,6 +11948,10 @@ Revise a small mode package with a coder and focused QA after canonical validati
         "allow_regression",
         "sample_knobs",
         "smoke_timeout_s",
+        "smoke_items",
+        "profile",
+        "holdout",
+        "parts_manifest",
         "repair_attempts",
         "check_attempt_cap"
       ],
@@ -11911,9 +12075,45 @@ Revise a small mode package with a coder and focused QA after canonical validati
       "value": "",
       "values": []
     },
+    "holdout": {
+      "default": "",
+      "description": "the holdout fraction the produced mode's runs use, from 0 to below 1; the smoke samples only the train part of that split. Ignored for the split when a parts manifest is given (empty: the profile's, else the outer loop's default 0.3)",
+      "frozen": false,
+      "kind": "str",
+      "range": [
+        null,
+        null
+      ],
+      "value": "",
+      "values": []
+    },
     "name": {
       "default": "",
       "description": "the package to create (empty takes the name from the brief)",
+      "frozen": false,
+      "kind": "str",
+      "range": [
+        null,
+        null
+      ],
+      "value": "",
+      "values": []
+    },
+    "parts_manifest": {
+      "default": "",
+      "description": "the parts manifest (parts.json with train/val/test id lists) the produced mode's runs use; the smoke samples only its train ids. A relative path, here or in the profile, is the project's (`refactory optimize` reads one against its working directory) (empty: the profile's, else the holdout fraction's split)",
+      "frozen": false,
+      "kind": "str",
+      "range": [
+        null,
+        null
+      ],
+      "value": "",
+      "values": []
+    },
+    "profile": {
+      "default": "",
+      "description": "a saved optimize profile (`refactory profile-save`) whose holdout and parts_manifest the smoke samples by; holdout and parts_manifest given here win (empty: none)",
       "frozen": false,
       "kind": "str",
       "range": [
@@ -11995,9 +12195,21 @@ Revise a small mode package with a coder and focused QA after canonical validati
       "value": false,
       "values": []
     },
+    "smoke_items": {
+      "default": 3,
+      "description": "number of items to run from a task-bound data node during smoke; the full item set is not exercised",
+      "frozen": false,
+      "kind": "int",
+      "range": [
+        1,
+        null
+      ],
+      "value": 3,
+      "values": []
+    },
     "smoke_timeout_s": {
       "default": 3600,
-      "description": "wall-clock seconds allowed for each full mode validation pass, including its model calls; timeout fails creation",
+      "description": "seconds a smoke pass may go with no sign of work before it is stopped. Work is: any output of the smoke or of a node command; a node's declared writes; the run's own state files (status, checkpoint, events, progress, facts); a worker's receipt and activity file; an item pass's marker and record, up to four levels of nested passes. A plain file written anywhere else, or output a node captures from its own subprocesses, is not. A wall-clock backstop (four times this, capped at 4 hours by default) still ends each pass",
       "frozen": false,
       "kind": "int",
       "range": [
@@ -12040,7 +12252,7 @@ Revise a small mode package with a coder and focused QA after canonical validati
       "panel": "Mode picker; Run once executes enabled modes including authoring; Optimize requires a scored mode. Use chat for stepwise gates."
     },
     "purpose": "Revise a small mode package with a coder and focused QA after canonical validation. Supply revision_of, name and brief. allow_regression=true skips original execution/comparison but still requires revised validation and intent evidence.",
-    "reviewed_schema": "a030bca98b76bd46b990b05b557fa2ea0040aaa3d25b8b2d0c683434301f7054"
+    "reviewed_schema": "bca6c09eb35bcf3dafa54442bd1f7ea6332b53a602da341b03d9ac0e75206bf8"
   }
 }
 ```

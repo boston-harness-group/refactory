@@ -2,6 +2,7 @@
   "core": [
     "refactory_dsh",
     "refactory_dsh._v1_compat",
+    "refactory_dsh.activity",
     "refactory_dsh.adopt",
     "refactory_dsh.agent_delivery",
     "refactory_dsh.agent_json",
@@ -121,6 +122,7 @@
     "refactory_dsh.design_ops",
     "refactory_dsh.discovery",
     "refactory_dsh.edit",
+    "refactory_dsh.empty_input",
     "refactory_dsh.fast",
     "refactory_dsh.failfast",
     "refactory_dsh.fast_ops",

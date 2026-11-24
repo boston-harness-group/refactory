@@ -34,7 +34,7 @@ import type { UserQuestionService } from '@deepseek-ai/dsh-user-questions'
 import type { JsonValue } from '@deepseek-ai/dsh-util-values'
 import { HALT, Spine, validateGraph } from './spine.ts'
 import type { NodeView, SpineNext, TerminalHalt } from './spine.ts'
-import { commandOf, isDeterministic, runDataCommand, runDeterministic, runWarningsOf } from './execute.ts'
+import { commandOf, isDeterministic, repeatsOnRedo, runDataCommand, runDeterministic, runWarningsOf } from './execute.ts'
 import type { CommandFailure, CommandOutcome, CommandRunnerConfig } from './execute.ts'
 import type { WorkflowGraph } from './types.ts'
 import { isToolPolicy } from './types.ts'
@@ -1351,17 +1351,25 @@ export function apply(ctx: Context, config: Config): void {
    * @returns the message.
    */
   function limitMessage(spine: Spine, workdir: string | undefined): string | undefined {
-    const halted = spine.state().halted as { gate?: string; reason?: string } | undefined
-    if (halted?.reason !== 'max_iterations' || !halted.gate) return undefined
-    const spent = spine.reloops(halted.gate)
-    const limit = spent === undefined ? 'its reloop limit' : `its limit of ${spent.cap} reloops`
-    const target = spent?.target ?? 'the node it reloops to'
-    const run = workdir ?? 'RUN_DIR'
-    return `The run stopped: ${halted.gate} reached ${limit}. To go on, rerun ${target}: in the GUI, `
-      + 'choose it, then Preview affected results and Confirm correction and rerun; or run '
-      + `\`refactory graph-control preview --run ${run} --node ${target}\` and then `
-      + `\`refactory graph-control rerun --run ${run} --node ${target} --revision REVISION\` `
-      + 'with the revision it returns. A rerun by a person resets the limit.'
+    const halted = spine.state().halted as { gate?: string; reason?: string; detail?: string } | undefined
+    if (!halted) return undefined
+    if (halted.reason === 'max_iterations' && halted.gate) {
+      const spent = spine.reloops(halted.gate)
+      const limit = spent === undefined ? 'its reloop limit' : `its limit of ${spent.cap} reloops`
+      const target = spent?.target ?? 'the node it reloops to'
+      const run = workdir ?? 'RUN_DIR'
+      return `The run stopped: ${halted.gate} reached ${limit}. To go on, rerun ${target}: in the GUI, `
+        + 'choose it, then Preview affected results and Confirm correction and rerun; or run '
+        + `\`refactory graph-control preview --run ${run} --node ${target}\` and then `
+        + `\`refactory graph-control rerun --run ${run} --node ${target} --revision REVISION\` `
+        + 'with the revision it returns. A rerun by a person resets the limit.'
+    }
+    // A verdict halt carries its own reason text in `detail` (correction #4:
+    // the halt reason reaches the person on both runtimes).
+    if (halted.detail) {
+      return `gate ${halted.gate ?? '?'} halted the run: ${halted.detail}`
+    }
+    return undefined
   }
 
   /** The status {@link recordStatus} last wrote for the run, or undefined when there is none to read. */
@@ -3037,7 +3045,10 @@ export function apply(ctx: Context, config: Config): void {
         }
         spine.verdict(args.gate, result.verdict, result.feedback || args.feedback || '')
         if (spine.isHalted()) recordStatus(spine, workdir, 'halted')
-        const limit = limitMessage(spine, workdir)
+        // The reply's message is a reloop limit's, as before; a person's own halt is
+        // already in the reply as their feedback.
+        const halt = spine.state().halted as { reason?: string } | undefined
+        const limit = halt?.reason === 'max_iterations' ? limitMessage(spine, workdir) : undefined
         return json({
           status: 'routed', gate: args.gate, verdict: result.verdict, answered_by: 'user',
           ...(result.feedback ? { feedback: result.feedback } : {}),
@@ -3115,13 +3126,30 @@ export function apply(ctx: Context, config: Config): void {
       // A limit that stopped the run -- a gate halted at its iteration limit, or the run
       // failed, as design mode's own attempt limit fails it -- is not the CEO's to lift.
       const state = spine.state()
-      const halted = state.halted as { gate?: string; reason?: string } | undefined
+      const halted = state.halted as { gate?: string; reason?: string; detail?: string } | undefined
       const stopped = halted?.reason === 'max_iterations'
         ? `run halted at gate ${halted.gate} after reaching its iteration limit`
         : recordedStatus(workdir) === 'failed' ? 'run has failed' : undefined
       if (stopped !== undefined) {
         throw new Error(`${stopped}; a CEO redo cannot spend more attempts. Use `
           + '`refactory graph-control rerun --acknowledge-failure` to have a person spend more attempts.')
+      }
+      // Nor is a redo that would only repeat a halt verdict from a gate the runtime
+      // evaluates (a code gate, such as a smoke whose outcome is uncertain): one where the
+      // redone node, the gate and every node between them are commands (`repeatsOnRedo`).
+      // Each of those runs again on what it read before, so the gate decides as it did. An
+      // agent node on the way -- dispatched to a worker or driven by the CEO -- can produce
+      // something new, so a redo through one stays the CEO's, as does any redo after a halt
+      // at an agent or user gate.
+      const rerun = halted?.reason === 'verdict' && halted.gate !== undefined
+        && config.executeCommands && isDeterministic(spine.view(halted.gate))
+        ? spine.between(args.node, halted.gate) : []
+      if (rerun.length > 0 && rerun.every(nid => repeatsOnRedo(spine.view(nid)))) {
+        throw new Error(`gate ${halted!.gate} halted the run${halted!.detail ? `: ${halted!.detail}` : ''}. `
+          + `Redoing ${args.node === halted!.gate ? 'the gate' : args.node} reruns only commands `
+          + `(${rerun.join(', ')}) on what they read before, so it would repeat the halt. `
+          + 'Redo an agent node upstream of the gate, or have a person rerun with '
+          + '`refactory graph-control rerun`.')
       }
       const plan = spine.planRedo(args.node)
       if (dataCommand !== '' && workdir === undefined) {

@@ -40,6 +40,56 @@ when measured, stdout/stderr, elapsed time and failure information. Distinct smo
 directories preserve the outputs of earlier attempts. `revision.json` separately
 records comparison/provenance. Design retains its command and actual output.
 
+After the smoke passes, the gate runs the mode once more with its input empty
+(`refactory_dsh.empty_input`). Only declared input is emptied: a knob named in the
+brief's inputs (`--input`) points at an empty folder or file when its sample or
+default names one, and is the empty string otherwise; a data node reading a
+`source_path` reads an empty source of its format. Other knobs keep their values,
+so an output folder or a settings file given with `--sample` is never emptied, and
+a path the graph writes is left alone. The check then judges the run:
+
+- it stopped with its own error (a non-zero exit): pass;
+- it exited 0: a repairable finding, sent back to the builder, whatever it wrote
+  or reported. That includes empty files, a "no input" report, and a result that
+  lives only in facts and the score: no rule can tell an honest status from a
+  fabricated one, so a mode with no input must stop with an error naming what is
+  missing.
+
+The check is inconclusive when the run timed out, the model was unavailable, the
+mode could not be described, or an undeclared knob defaults to an existing path
+that looks like input (then the mode is not run, since it would still read that
+data). Only a file or folder under the project or the home folder looks like
+input; a system location (`/usr`, `/bin`, `/opt`, `/Library`, `/System`), an
+executable, a scratch location (`/tmp`, the system temp folder), the run folder
+and a path the graph writes do not. A relative
+default is resolved against the project on both runtimes. It is not
+applicable when the mode declares no input. Both are run warnings and appear in
+`create.json`'s `warnings`. Describing the mode and the run share one smoke's wall clock (`smoke_wall_s`), and the run uses the canonical smoke's sample, so it never runs a val or test item.
+`empty-input.json` holds the receipt, and `create.json` carries it beside a
+`readme` entry that warns when the package has no README.
+
+An edit starts from the package it revises: the emission's `===FILE:` blocks
+replace or add files, a `===DELETE: <path>===` block removes one, and every
+other file (the README, data, anything not Python) is kept. Each attempt starts
+from the source package, not from the previous attempt. A symlink that leaves the
+package is dropped, never copied as the file it points at, and named in a run
+warning and in `create.json`'s `warnings`; one inside the package stays a link.
+
+A Task-bound mode is smoked on `smoke_items` items of its train part, run at once.
+The train part is the one the mode's own runs use. Name the saved optimize profile
+with the `profile` knob, or pass `holdout` and `parts_manifest` as `refactory optimize`
+takes them (LiveMath: its manifest and `holdout` 0); a knob given wins over the
+profile. A relative manifest path, given here or in the profile, is the project's,
+while `refactory optimize` reads a relative one against its own working directory: give
+the profile an absolute path, or run optimize from the project, for both to agree.
+A `holdout` that is not empty or a number from 0 to below 1 stops the run at its
+first node. `smoke.json` records the split
+(and where each setting came from) and the items each node ran. With none given, the
+smoke samples the default holdout fraction and `create.json` warns that val or test
+items may have run. A manifest none of whose train ids is an item of the Task, or a
+node with no train item, is refused before the run; a manifest some of whose train
+ids are missing is warned about. A revision's source is smoked on the same sample.
+
 `authoring-evidence.json` binds the validation result to hashes of the delivered
 source, authoritative brief/strategy/design/plan inputs, applicable ledger entries,
 validation settings, receipt files and canonical runtime output files. Each validation receipt also survives in

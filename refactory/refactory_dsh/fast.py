@@ -260,7 +260,14 @@ class CreateFastMode(CreateMode):
                 "and canonical runtime validation follow. Emit the whole package as file "
                 "blocks introduced by ===FILE: <relative path>===, starting with __init__.py "
                 "containing PACKAGE = nn.Package(...). Paths are relative to the package root, "
-                "never prefixed with the package name. Write those blocks to emit.txt. "
+                "never prefixed with the package name. A revision starts from the package "
+                "it revises: a file you do not write is kept as it is, and a line of exactly "
+                "===DELETE: <relative path>=== with nothing after it removes one. When the "
+                "run's input is missing or empty, the package raises an error naming what is "
+                "missing (a non-zero exit), writes no results file, not even a report that "
+                "there was no input, and never fabricates, simulates or samples stand-in "
+                "input data. "
+                "Write those blocks to emit.txt. "
                 "Write nothing but emit.txt: do not apply or test your change anywhere — "
                 "the target, the run's worktree or a copy — because materialise and the "
                 "check do that after you answer and send you the result. Then return a "
@@ -285,7 +292,9 @@ class CreateFastMode(CreateMode):
         _qa_nodes(graph, artifact=False, design=False)
         graph.add(replace(full.nodes["register"], resource_role="work"))
         graph.add(replace(full.nodes["smoke"], evaluator="refactory_dsh.create_ops:gate_smoke",
-                          knobs=("allow_regression", "sample_knobs", "smoke_timeout_s", "repair_attempts", "check_attempt_cap"),
+                          knobs=("allow_regression", "sample_knobs", "smoke_timeout_s", "smoke_items",
+                                "profile", "holdout", "parts_manifest", "repair_attempts",
+                                "check_attempt_cap"),
                           writes=(*full.nodes["smoke"].writes, "repair.txt", "fast-report.json"),
                           produces=(*full.nodes["smoke"].produces, "repair_feedback", "repairs_used",
                                     "check_repairs_used", "review_repairs_used",

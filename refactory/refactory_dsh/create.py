@@ -95,8 +95,45 @@ class CreateMode(Mode):
             ),
             "smoke_timeout_s": Knob(
                 DEFAULT_MODEL_SMOKE_TIMEOUT_S, "int", lo=1, hi=86400,
-                description="wall-clock seconds allowed for each full mode validation "
-                            "pass, including its model calls; timeout fails creation",
+                description="seconds a smoke pass may go with no sign of work before it is "
+                            "stopped. Work is: any output of the smoke or of a node "
+                            "command; a node's declared writes; the run's own state files "
+                            "(status, checkpoint, events, progress, facts); a worker's "
+                            "receipt and activity file; an item pass's marker and record, "
+                            "up to four levels of nested passes. A plain file written "
+                            "anywhere else, or output a node captures from its own "
+                            "subprocesses, is not. A wall-clock backstop (four times this, "
+                            "capped at 4 hours by default) still ends each pass",
+            ),
+            "smoke_items": Knob(
+                3, "int", lo=1,
+                description="number of items to run from a task-bound data node "
+                            "during smoke; the full item set is not exercised",
+            ),
+            # The split the produced mode's real runs use, as `refactory optimize` takes
+            # it: the smoke samples that train part only, so it never runs an item those
+            # runs hold out. One source of truth is the saved optimize profile; the two
+            # settings given here win over it.
+            "profile": Knob(
+                "", "str",
+                description="a saved optimize profile (`refactory profile-save`) whose "
+                            "holdout and parts_manifest the smoke samples by; holdout and "
+                            "parts_manifest given here win (empty: none)",
+            ),
+            "holdout": Knob(
+                "", "str",
+                description="the holdout fraction the produced mode's runs use, from 0 to "
+                            "below 1; the smoke samples only the train part of that split. "
+                            "Ignored for the split when a parts manifest is given (empty: "
+                            "the profile's, else the outer loop's default 0.3)",
+            ),
+            "parts_manifest": Knob(
+                "", "str",
+                description="the parts manifest (parts.json with train/val/test id lists) "
+                            "the produced mode's runs use; the smoke samples only its train "
+                            "ids. A relative path, here or in the profile, is the project's "
+                            "(`refactory optimize` reads one against its working directory) "
+                            "(empty: the profile's, else the holdout fraction's split)",
             ),
             "check_attempt_cap": Knob(
                 8, "int", lo=0,
@@ -164,7 +201,7 @@ class CreateMode(Mode):
             # are knobs. Naming no Task and not asking for `single_shot` is refused
             # here, before the first model call.
             knobs=("name", "brief", "task_ref", "single_shot", "data_node",
-                   "revision_of", "requires_input", "smoke_timeout_s"),
+                   "revision_of", "requires_input", "smoke_timeout_s", "holdout"),
             writes=("brief.json", "research-review.txt", "strategy-review.txt", "validation.txt",
                     "staging/source-snapshot.json"),
             produces=("name", "brief", "extends", "revision_of", "intent", "validation",
@@ -363,7 +400,10 @@ class CreateMode(Mode):
                 "the promised structure and substantive content. Identify unresolved "
                 "fields in their actual template context; punctuation, braces, or "
                 "ordinary words alone are not evidence of a placeholder. Keep guards "
-                "small and specific to a stated contract violation.\n\n"
+                "small and specific to a stated contract violation. When the run's "
+                "input is missing or empty, raise an error naming what is missing (a "
+                "non-zero exit) and write no results file, not even a report that there "
+                "was no input; never fabricate, simulate or sample stand-in input data.\n\n"
                 "Design: Read the file `design.md` in the run directory. It contains the package design with all operations, nodes, knobs, and score definitions.\n\n"
                 "## What this mode must take as input\n{{requires_input}}\n\n"
                 "## API\n{{api}}\n\n"
@@ -372,7 +412,11 @@ class CreateMode(Mode):
                 "## What the reviews refused\n{{qa_gate}}\n{{overwatch_review}}\n\n"
                 "Write every file into emit.txt as a block introduced by a line of exactly:\n"
                 "===FILE: <relative path>===\n"
-                "followed by the file's full contents. Every path is relative to the "
+                "followed by the file's full contents. A revision starts from the "
+                "package it revises: a file you do not write is kept as it is, its "
+                "README, data and other non-Python files included, and a line of "
+                "exactly ===DELETE: <relative path>=== with nothing after it removes "
+                "one. Every path is relative to the "
                 "**package's own root**: the manifest is exactly `__init__.py`, not "
                 "`{{name}}/__init__.py`, not `refactory/refactory_packages/{{name}}/"
                 "__init__.py`, and not `.factory/packages/{{name}}/__init__.py`. The "
@@ -562,8 +606,10 @@ class CreateMode(Mode):
         graph.add(Node(
             "smoke", "gate", evaluator=f"{OPS}:gate_smoke", role="validation",
             resource_role="final_validation", max_iterations=12,
-            knobs=("allow_regression", "sample_knobs", "smoke_timeout_s", "attempts", "check_attempt_cap"),
-            writes=("smoke.json", "revision.json", "authoring-evidence.json", "validation.txt"),
+            knobs=("allow_regression", "sample_knobs", "smoke_timeout_s", "smoke_items", "profile",
+                   "holdout", "parts_manifest", "attempts", "check_attempt_cap"),
+            writes=("smoke.json", "revision.json", "authoring-evidence.json", "validation.txt",
+                    "empty-input.json"),
             produces=("smoke_score", "smoke_ok", "smoke_model", "smoke_reason",
                       "before_score", "after_score", "regressed", "revision_note",
                       "runtime_evidence", "validation", "attempts_used",

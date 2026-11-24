@@ -621,15 +621,20 @@ def _delivery_envelope_s(state: dict[str, Any]) -> int:
 def _smoke_envelope_s(state: dict[str, Any], runs: int) -> int:
     """The command_timeout_s of a smoke node that makes ``runs`` sandboxed runs.
 
-    Each run is bounded by the smoke budget on a wall clock (`sandbox.run_sandboxed`),
-    so the old ``runs × budget + 600`` still holds for them; a smoke node can also run
-    a command, which is bounded by the backstop instead. The larger of the two.
+    The smoke budget is an inactivity limit, so a smoke that keeps working runs to its
+    backstop and is then given its stop window (`sandbox.smoke_wall_s`); each run is
+    covered for that, plus 600 s, so the node's own timeout never fires before the
+    smoke's stop is reported. A smoke node can also run a command, which is bounded by
+    the backstop. The larger of the two.
     """
+    import math
+
     from refactory_dsh.model import NODE_DISPATCH_OVERHEAD_S
-    from refactory_dsh.sandbox import COMMAND_BACKSTOP_S
+    from refactory_dsh.sandbox import COMMAND_BACKSTOP_S, smoke_wall_s
 
     budget = _smoke_budget(state)
-    return max(runs * budget + 600, COMMAND_BACKSTOP_S + NODE_DISPATCH_OVERHEAD_S)
+    return max(runs * math.ceil(smoke_wall_s(budget)) + 600,
+               COMMAND_BACKSTOP_S + NODE_DISPATCH_OVERHEAD_S)
 
 
 def command_timeout_s(node: Any, state: dict[str, Any]) -> int | None:
@@ -649,7 +654,9 @@ def command_timeout_s(node: Any, state: dict[str, Any]) -> int | None:
             return _delivery_envelope_s(state)
     elif node.kind == "gate" and getattr(node, "gate_kind", "fn") == "fn":
         if _is_smoke_node(node):
-            return _smoke_envelope_s(state, 2)
+            # The new mode's smoke, the empty-input run (`empty_input`) and the
+            # revision source's smoke.
+            return _smoke_envelope_s(state, 3)
         if _is_check_node(node):
             return _check_envelope_s(state)
     return None

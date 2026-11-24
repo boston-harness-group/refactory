@@ -644,14 +644,12 @@ def test_mutation_d16_per_step_inversion():
         ctx = SimpleNamespace(workdir=Path(td), facts={}, exists=lambda n: False,
                               read_text=lambda n: "", budget=None)
         attempt = sandbox.SandboxResult(ok=False, stdout=attempt_out, stderr="", returncode=1)
+        attempt.step_results = attempt_step_records
         found = SimpleNamespace(path=str(Path(td) / "run-x"), base="abc", head="def",
                                 target=str(Path(td) / "target"))
         with patch.object(base_check, "run_base_check", return_value=base), \
-             patch.object(base_check, "_run_chain_markers", return_value=attempt_step_records), \
              patch.object(base_check.worktree, "recorded", return_value=found), \
-             patch.object(base_check, "_all_changed_files", return_value=[]), \
-             patch.object(base_check, "_attempt_marker_run",
-                          return_value=(lambda s: None, lambda *a: {})):
+             patch.object(base_check, "_all_changed_files", return_value=[]):
             filtered = filter_check(ctx, attempt, "pytest tests/", 60.0)
 
     # test_flaky should be excused (the d16 fix): it was in the base's
