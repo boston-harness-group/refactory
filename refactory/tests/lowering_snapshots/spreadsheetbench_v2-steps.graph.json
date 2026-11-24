@@ -1,0 +1,480 @@
+{
+  "name": "spreadsheetbench_v2-steps",
+  "nodes": {
+    "data": {
+      "id": "data",
+      "reads": [],
+      "writes": [
+        "current_item.json",
+        "item/input.xlsx"
+      ],
+      "blocking": true,
+      "task_ref": "refactory_packages.spreadsheetbench_v2.tasks:SpreadsheetBenchV2StepsTask",
+      "source_path": null,
+      "source_format": null,
+      "inline_items": [],
+      "subgraph_entry": "prepare",
+      "subgraph_exit": "finalize",
+      "parallelism": 8,
+      "split": "all",
+      "shuffle": false,
+      "shuffle_seed": null,
+      "limit": null,
+      "max_items": 500,
+      "_type": "DataNode"
+    },
+    "finalize": {
+      "id": "finalize",
+      "reads": [
+        "implement/.refactory-session.json",
+        "implement_reply.txt",
+        "inspect/.refactory-session.json",
+        "inspect_reply.txt",
+        "output.xlsx",
+        "plan/.refactory-session.json",
+        "plan_reply.txt",
+        "turn.json",
+        "verify/.refactory-session.json",
+        "verify_reply.txt"
+      ],
+      "writes": [
+        "conversation.json",
+        "final.json",
+        "pred.xlsx",
+        "raw.txt",
+        "tool_calls.json"
+      ],
+      "blocking": true,
+      "command": "python -m refactory_dsh.run refactory_packages.spreadsheetbench_v2.steps_ops:finalize",
+      "callable_name": "refactory_packages.spreadsheetbench_v2.steps_ops:finalize",
+      "notes": "take the last step's output.xlsx as the item's output",
+      "_type": "FnNode"
+    },
+    "has_case": {
+      "id": "has_case",
+      "reads": [],
+      "writes": [],
+      "blocking": true,
+      "evaluator_type": "fn",
+      "evaluator_role": null,
+      "evaluator_command": "python -m refactory_dsh.run refactory_packages.spreadsheetbench.ops:has_case",
+      "gate_prompt": "an item with no test case skips the steps",
+      "max_iterations": 1,
+      "on_exhausted": "continue",
+      "_type": "GateNode"
+    },
+    "implement": {
+      "id": "implement",
+      "reads": [
+        "SKILL.md",
+        "input.xlsx",
+        "inspect_notes.md",
+        "plan.md"
+      ],
+      "writes": [
+        "implement/.refactory-session.json",
+        "implement_reply.txt",
+        "output.xlsx"
+      ],
+      "blocking": true,
+      "role": "solver",
+      "model": "",
+      "prompt_template": "<task_context>\n\n## Important\n- When completing spreadsheet tasks, strictly avoid altering any cells that already contain values unless explicitly instructed. Modify only the cells that are required for the task.\n- You need to complete the instructions and ensure that the original formatting is preserved as much as possible.\n\n## Tools\nYou are provided with four tools: `Bash`, `view_xlsx` and `submit`. You must use these tools to complete the target task.\n**Important: You can only call ONE tool at a time per response.**\n- `Bash`: run shell commands (e.g., file operations, calling Python scripts with `python3`)\n- `view_xlsx`: inspect `.xlsx` files (list sheets, view sheet contents, see original formulas and values); a command on your PATH: run it with `Bash`\n- `submit`: finalize and submit your solution after verification; to submit, end your turn with a short final reply (there is no `submit` command)\n\n## Environment\nYou can complete the corresponding spreadsheet tasks using the following Python environment:\n`Pandas`, `openpyxl`, `numpy` and `LibreOffice`\nYou can use these environments to manipulate the spreadsheet data.\n\n## Recommended Workflow\n3. **Implement**: Create a python script (e.g., `process_data.py`) that performs the edit.\n   - You can use `Bash` tool to write Python code directly, e.g., cat > /tmp/script.py << 'EOF' ... EOF), which can then be used to verify syntax correctness.\n\n4. **Execute**: Run the python script using `python3 /tmp/script.py`\n\n## This Step\nThis is step 3 of 4 (Implement and Execute). Read `inspect_notes.md` (the Inspect step's notes) and `plan.md` (the Plan step's plan), then write {{output_path}} from {{spreadsheet_path}} as planned. The next step verifies it. When {{output_path}} is written, end your turn with a short final reply.\n\n{{skill_section}}</task_context>\n\n<instructions>\n\n## Task instructions\nYou need to process a spreadsheet file based on specific instructions.\n**Instruction:** {{instruction}}\n\n## Input and Output\nYou are provided with an input spreadsheet file and you need to generate an output spreadsheet file based on the output_path.\n**Input File:** {{spreadsheet_path}}\n**Output Path:** {{output_path}}\n\n</instructions>",
+      "system_prompt": "You are a helpful Spreadsheet Automation Engineer that interacts with a computer shell to solve data tasks.\nYou operate in a REPL (Read-Eval-Print Loop) environment where you must issue exactly ONE command at a time.",
+      "tools": [
+        "Bash"
+      ],
+      "timeout": null,
+      "max_iterations": 1,
+      "post_checks": [],
+      "retry": {
+        "on": [
+          "crash"
+        ],
+        "times": 1,
+        "timeout_factor": 2
+      },
+      "missing_on_crash": true,
+      "workspace": {
+        "kind": "scratch",
+        "collect": "files"
+      },
+      "route": {
+        "max_turns": "50",
+        "bash_timeout_ms": "60000",
+        "bash_output_chars": "10000"
+      },
+      "_type": "AgentNode"
+    },
+    "inspect": {
+      "id": "inspect",
+      "reads": [
+        "SKILL.md",
+        "input.xlsx"
+      ],
+      "writes": [
+        "inspect/.refactory-session.json",
+        "inspect_notes.md",
+        "inspect_reply.txt"
+      ],
+      "blocking": true,
+      "role": "solver",
+      "model": "",
+      "prompt_template": "<task_context>\n\n## Important\n- When completing spreadsheet tasks, strictly avoid altering any cells that already contain values unless explicitly instructed. Modify only the cells that are required for the task.\n- You need to complete the instructions and ensure that the original formatting is preserved as much as possible.\n\n## Tools\nYou are provided with four tools: `Bash`, `view_xlsx` and `submit`. You must use these tools to complete the target task.\n**Important: You can only call ONE tool at a time per response.**\n- `Bash`: run shell commands (e.g., file operations, calling Python scripts with `python3`)\n- `view_xlsx`: inspect `.xlsx` files (list sheets, view sheet contents, see original formulas and values); a command on your PATH: run it with `Bash`\n- `submit`: finalize and submit your solution after verification; to submit, end your turn with a short final reply (there is no `submit` command)\n\n## Environment\nYou can complete the corresponding spreadsheet tasks using the following Python environment:\n`Pandas`, `openpyxl`, `numpy` and `LibreOffice`\nYou can use these environments to manipulate the spreadsheet data.\n\n## Recommended Workflow\n1. **Inspect**: Use `view_xlsx` to inspect the data. This will allow you to understand the structure and contents of the spreadsheet.\n   - You must choose mode `list` or `content` to inspect the data.\n   - List all sheets: `view_xlsx {{spreadsheet_path}} list`\n   - View specific sheet: `view_xlsx {{spreadsheet_path}} content \"Sheet1\"`\n   - View row range: `view_xlsx {{spreadsheet_path}} content \"Sheet1\" 1 50`\n\n## This Step\nThis is step 1 of 4 (Inspect). Later steps plan, implement and verify the edit, each in a new session that starts from the files named here. Inspect the input and write your notes to `inspect_notes.md` in the working directory: the workbook's structure, the sheets and cells relevant to the instruction, and the conventions you see (formulas, formats, layout). Do not write {{output_path}}: a later step does. When the notes are written, end your turn with a short final reply.\n\n{{skill_section}}</task_context>\n\n<instructions>\n\n## Task instructions\nYou need to process a spreadsheet file based on specific instructions.\n**Instruction:** {{instruction}}\n\n## Input and Output\nYou are provided with an input spreadsheet file and you need to generate an output spreadsheet file based on the output_path.\n**Input File:** {{spreadsheet_path}}\n**Output Path:** {{output_path}}\n\n</instructions>",
+      "system_prompt": "You are a helpful Spreadsheet Automation Engineer that interacts with a computer shell to solve data tasks.\nYou operate in a REPL (Read-Eval-Print Loop) environment where you must issue exactly ONE command at a time.",
+      "tools": [
+        "Bash"
+      ],
+      "timeout": null,
+      "max_iterations": 1,
+      "post_checks": [],
+      "retry": {
+        "on": [
+          "crash"
+        ],
+        "times": 1,
+        "timeout_factor": 2
+      },
+      "missing_on_crash": true,
+      "workspace": {
+        "kind": "scratch",
+        "collect": "files"
+      },
+      "route": {
+        "max_turns": "50",
+        "bash_timeout_ms": "60000",
+        "bash_output_chars": "10000"
+      },
+      "_type": "AgentNode"
+    },
+    "plan": {
+      "id": "plan",
+      "reads": [
+        "SKILL.md",
+        "input.xlsx",
+        "inspect_notes.md"
+      ],
+      "writes": [
+        "plan.md",
+        "plan/.refactory-session.json",
+        "plan_reply.txt"
+      ],
+      "blocking": true,
+      "role": "solver",
+      "model": "",
+      "prompt_template": "<task_context>\n\n## Important\n- When completing spreadsheet tasks, strictly avoid altering any cells that already contain values unless explicitly instructed. Modify only the cells that are required for the task.\n- You need to complete the instructions and ensure that the original formatting is preserved as much as possible.\n\n## Tools\nYou are provided with four tools: `Bash`, `view_xlsx` and `submit`. You must use these tools to complete the target task.\n**Important: You can only call ONE tool at a time per response.**\n- `Bash`: run shell commands (e.g., file operations, calling Python scripts with `python3`)\n- `view_xlsx`: inspect `.xlsx` files (list sheets, view sheet contents, see original formulas and values); a command on your PATH: run it with `Bash`\n- `submit`: finalize and submit your solution after verification; to submit, end your turn with a short final reply (there is no `submit` command)\n\n## Environment\nYou can complete the corresponding spreadsheet tasks using the following Python environment:\n`Pandas`, `openpyxl`, `numpy` and `LibreOffice`\nYou can use these environments to manipulate the spreadsheet data.\n\n## Recommended Workflow\n2. **Plan**: Decide how to manipulate the data using `openpyxl` or `LibreOffice`.\n\n## This Step\nThis is step 2 of 4 (Plan). The Inspect step's notes are in `inspect_notes.md`: read them first (you may also view {{spreadsheet_path}}). Write your plan to `plan.md` in the working directory: which cells to change and how. Do not write {{output_path}}: the next step implements your plan. When the plan is written, end your turn with a short final reply.\n\n{{skill_section}}</task_context>\n\n<instructions>\n\n## Task instructions\nYou need to process a spreadsheet file based on specific instructions.\n**Instruction:** {{instruction}}\n\n## Input and Output\nYou are provided with an input spreadsheet file and you need to generate an output spreadsheet file based on the output_path.\n**Input File:** {{spreadsheet_path}}\n**Output Path:** {{output_path}}\n\n</instructions>",
+      "system_prompt": "You are a helpful Spreadsheet Automation Engineer that interacts with a computer shell to solve data tasks.\nYou operate in a REPL (Read-Eval-Print Loop) environment where you must issue exactly ONE command at a time.",
+      "tools": [
+        "Bash"
+      ],
+      "timeout": null,
+      "max_iterations": 1,
+      "post_checks": [],
+      "retry": {
+        "on": [
+          "crash"
+        ],
+        "times": 1,
+        "timeout_factor": 2
+      },
+      "missing_on_crash": true,
+      "workspace": {
+        "kind": "scratch",
+        "collect": "files"
+      },
+      "route": {
+        "max_turns": "50",
+        "bash_timeout_ms": "60000",
+        "bash_output_chars": "10000"
+      },
+      "_type": "AgentNode"
+    },
+    "prepare": {
+      "id": "prepare",
+      "reads": [
+        "current_item.json",
+        "item/input.xlsx"
+      ],
+      "writes": [
+        "SKILL.md",
+        "input.xlsx",
+        "spreadsheet_preview.txt",
+        "turn.json"
+      ],
+      "blocking": true,
+      "command": "python -m refactory_dsh.run refactory_packages.spreadsheetbench_v2.steps_ops:prepare",
+      "callable_name": "refactory_packages.spreadsheetbench_v2.steps_ops:prepare",
+      "notes": "record the item's start and lay the steps' workspace files",
+      "knob_outputs": {
+        "input.xlsx": [],
+        "SKILL.md": [
+          "skill"
+        ],
+        "turn.json": [],
+        "spreadsheet_preview.txt": [],
+        "instruction": [],
+        "spreadsheet_path": [],
+        "output_path": [],
+        "skill_section": [
+          "skill"
+        ],
+        "has_case": []
+      },
+      "knobs": [
+        "skill"
+      ],
+      "produces": [
+        "instruction",
+        "spreadsheet_path",
+        "output_path",
+        "skill_section",
+        "has_case"
+      ],
+      "_type": "FnNode"
+    },
+    "verify": {
+      "id": "verify",
+      "reads": [
+        "SKILL.md",
+        "input.xlsx",
+        "inspect_notes.md",
+        "output.xlsx",
+        "plan.md"
+      ],
+      "writes": [
+        "output.xlsx",
+        "verify/.refactory-session.json",
+        "verify_reply.txt",
+        "verify_report.md"
+      ],
+      "blocking": true,
+      "role": "solver",
+      "model": "",
+      "prompt_template": "<task_context>\n\n## Important\n- When completing spreadsheet tasks, strictly avoid altering any cells that already contain values unless explicitly instructed. Modify only the cells that are required for the task.\n- You need to complete the instructions and ensure that the original formatting is preserved as much as possible.\n\n## Tools\nYou are provided with four tools: `Bash`, `view_xlsx` and `submit`. You must use these tools to complete the target task.\n**Important: You can only call ONE tool at a time per response.**\n- `Bash`: run shell commands (e.g., file operations, calling Python scripts with `python3`)\n- `view_xlsx`: inspect `.xlsx` files (list sheets, view sheet contents, see original formulas and values); a command on your PATH: run it with `Bash`\n- `submit`: finalize and submit your solution after verification; to submit, end your turn with a short final reply (there is no `submit` command)\n\n## Environment\nYou can complete the corresponding spreadsheet tasks using the following Python environment:\n`Pandas`, `openpyxl`, `numpy` and `LibreOffice`\nYou can use these environments to manipulate the spreadsheet data.\n\n## Recommended Workflow\n5. **Verify**: Check the output file exists, ensure the answer is correct.\n   - Do NOT combine verify and submit commands (e.g., `python3 script.py && submit`). Run them separately to ensure verification is complete before submission.\n   - Ensure the existing structure, layout, and formatting of the model are preserved throughout the process.\n\n6. **Submit**: When verification is successful, submit: end your turn with a short final reply.\n\n## This Step\nThis is step 4 of 4 (Verify and Submit). {{output_path}} was written by the Implement step from `plan.md` (the Plan step's plan) and `inspect_notes.md` (the Inspect step's notes). Check it against the instruction and {{spreadsheet_path}}, recalculating with LibreOffice as needed, and correct {{output_path}} where it is wrong: it is graded as you leave it. Write what you checked and found to `verify_report.md` in the working directory, then submit.\n\n{{skill_section}}</task_context>\n\n<instructions>\n\n## Task instructions\nYou need to process a spreadsheet file based on specific instructions.\n**Instruction:** {{instruction}}\n\n## Input and Output\nYou are provided with an input spreadsheet file and you need to generate an output spreadsheet file based on the output_path.\n**Input File:** {{spreadsheet_path}}\n**Output Path:** {{output_path}}\n\n</instructions>",
+      "system_prompt": "You are a helpful Spreadsheet Automation Engineer that interacts with a computer shell to solve data tasks.\nYou operate in a REPL (Read-Eval-Print Loop) environment where you must issue exactly ONE command at a time.",
+      "tools": [
+        "Bash"
+      ],
+      "timeout": null,
+      "max_iterations": 1,
+      "post_checks": [],
+      "retry": {
+        "on": [
+          "crash"
+        ],
+        "times": 1,
+        "timeout_factor": 2
+      },
+      "missing_on_crash": true,
+      "workspace": {
+        "kind": "scratch",
+        "collect": "files"
+      },
+      "route": {
+        "max_turns": "50",
+        "bash_timeout_ms": "60000",
+        "bash_output_chars": "10000"
+      },
+      "_type": "AgentNode"
+    }
+  },
+  "edges": [
+    {
+      "source": "has_case",
+      "target": "finalize",
+      "condition": "skip"
+    },
+    {
+      "source": "has_case",
+      "target": "inspect",
+      "condition": "proceed"
+    },
+    {
+      "source": "implement",
+      "target": "verify",
+      "condition": null
+    },
+    {
+      "source": "inspect",
+      "target": "plan",
+      "condition": null
+    },
+    {
+      "source": "plan",
+      "target": "implement",
+      "condition": null
+    },
+    {
+      "source": "prepare",
+      "target": "has_case",
+      "condition": null
+    },
+    {
+      "source": "verify",
+      "target": "finalize",
+      "condition": null
+    }
+  ],
+  "start_node": "data",
+  "terminal": true,
+  "knob_values": {
+    "skill": "",
+    "data_parallelism": 8.0,
+    "max_turns": 50.0,
+    "bash_timeout_ms": 60000.0,
+    "bash_output_chars": 10000.0,
+    "inspect__task": "<task_context>\n\n## Important\n- When completing spreadsheet tasks, strictly avoid altering any cells that already contain values unless explicitly instructed. Modify only the cells that are required for the task.\n- You need to complete the instructions and ensure that the original formatting is preserved as much as possible.\n\n## Tools\nYou are provided with four tools: `Bash`, `view_xlsx` and `submit`. You must use these tools to complete the target task.\n**Important: You can only call ONE tool at a time per response.**\n- `Bash`: run shell commands (e.g., file operations, calling Python scripts with `python3`)\n- `view_xlsx`: inspect `.xlsx` files (list sheets, view sheet contents, see original formulas and values); a command on your PATH: run it with `Bash`\n- `submit`: finalize and submit your solution after verification; to submit, end your turn with a short final reply (there is no `submit` command)\n\n## Environment\nYou can complete the corresponding spreadsheet tasks using the following Python environment:\n`Pandas`, `openpyxl`, `numpy` and `LibreOffice`\nYou can use these environments to manipulate the spreadsheet data.\n\n## Recommended Workflow\n1. **Inspect**: Use `view_xlsx` to inspect the data. This will allow you to understand the structure and contents of the spreadsheet.\n   - You must choose mode `list` or `content` to inspect the data.\n   - List all sheets: `view_xlsx {{spreadsheet_path}} list`\n   - View specific sheet: `view_xlsx {{spreadsheet_path}} content \"Sheet1\"`\n   - View row range: `view_xlsx {{spreadsheet_path}} content \"Sheet1\" 1 50`\n\n## This Step\nThis is step 1 of 4 (Inspect). Later steps plan, implement and verify the edit, each in a new session that starts from the files named here. Inspect the input and write your notes to `inspect_notes.md` in the working directory: the workbook's structure, the sheets and cells relevant to the instruction, and the conventions you see (formulas, formats, layout). Do not write {{output_path}}: a later step does. When the notes are written, end your turn with a short final reply.\n\n{{skill_section}}</task_context>\n\n<instructions>\n\n## Task instructions\nYou need to process a spreadsheet file based on specific instructions.\n**Instruction:** {{instruction}}\n\n## Input and Output\nYou are provided with an input spreadsheet file and you need to generate an output spreadsheet file based on the output_path.\n**Input File:** {{spreadsheet_path}}\n**Output Path:** {{output_path}}\n\n</instructions>",
+    "inspect__system_prompt": "You are a helpful Spreadsheet Automation Engineer that interacts with a computer shell to solve data tasks.\nYou operate in a REPL (Read-Eval-Print Loop) environment where you must issue exactly ONE command at a time.",
+    "plan__task": "<task_context>\n\n## Important\n- When completing spreadsheet tasks, strictly avoid altering any cells that already contain values unless explicitly instructed. Modify only the cells that are required for the task.\n- You need to complete the instructions and ensure that the original formatting is preserved as much as possible.\n\n## Tools\nYou are provided with four tools: `Bash`, `view_xlsx` and `submit`. You must use these tools to complete the target task.\n**Important: You can only call ONE tool at a time per response.**\n- `Bash`: run shell commands (e.g., file operations, calling Python scripts with `python3`)\n- `view_xlsx`: inspect `.xlsx` files (list sheets, view sheet contents, see original formulas and values); a command on your PATH: run it with `Bash`\n- `submit`: finalize and submit your solution after verification; to submit, end your turn with a short final reply (there is no `submit` command)\n\n## Environment\nYou can complete the corresponding spreadsheet tasks using the following Python environment:\n`Pandas`, `openpyxl`, `numpy` and `LibreOffice`\nYou can use these environments to manipulate the spreadsheet data.\n\n## Recommended Workflow\n2. **Plan**: Decide how to manipulate the data using `openpyxl` or `LibreOffice`.\n\n## This Step\nThis is step 2 of 4 (Plan). The Inspect step's notes are in `inspect_notes.md`: read them first (you may also view {{spreadsheet_path}}). Write your plan to `plan.md` in the working directory: which cells to change and how. Do not write {{output_path}}: the next step implements your plan. When the plan is written, end your turn with a short final reply.\n\n{{skill_section}}</task_context>\n\n<instructions>\n\n## Task instructions\nYou need to process a spreadsheet file based on specific instructions.\n**Instruction:** {{instruction}}\n\n## Input and Output\nYou are provided with an input spreadsheet file and you need to generate an output spreadsheet file based on the output_path.\n**Input File:** {{spreadsheet_path}}\n**Output Path:** {{output_path}}\n\n</instructions>",
+    "plan__system_prompt": "You are a helpful Spreadsheet Automation Engineer that interacts with a computer shell to solve data tasks.\nYou operate in a REPL (Read-Eval-Print Loop) environment where you must issue exactly ONE command at a time.",
+    "implement__task": "<task_context>\n\n## Important\n- When completing spreadsheet tasks, strictly avoid altering any cells that already contain values unless explicitly instructed. Modify only the cells that are required for the task.\n- You need to complete the instructions and ensure that the original formatting is preserved as much as possible.\n\n## Tools\nYou are provided with four tools: `Bash`, `view_xlsx` and `submit`. You must use these tools to complete the target task.\n**Important: You can only call ONE tool at a time per response.**\n- `Bash`: run shell commands (e.g., file operations, calling Python scripts with `python3`)\n- `view_xlsx`: inspect `.xlsx` files (list sheets, view sheet contents, see original formulas and values); a command on your PATH: run it with `Bash`\n- `submit`: finalize and submit your solution after verification; to submit, end your turn with a short final reply (there is no `submit` command)\n\n## Environment\nYou can complete the corresponding spreadsheet tasks using the following Python environment:\n`Pandas`, `openpyxl`, `numpy` and `LibreOffice`\nYou can use these environments to manipulate the spreadsheet data.\n\n## Recommended Workflow\n3. **Implement**: Create a python script (e.g., `process_data.py`) that performs the edit.\n   - You can use `Bash` tool to write Python code directly, e.g., cat > /tmp/script.py << 'EOF' ... EOF), which can then be used to verify syntax correctness.\n\n4. **Execute**: Run the python script using `python3 /tmp/script.py`\n\n## This Step\nThis is step 3 of 4 (Implement and Execute). Read `inspect_notes.md` (the Inspect step's notes) and `plan.md` (the Plan step's plan), then write {{output_path}} from {{spreadsheet_path}} as planned. The next step verifies it. When {{output_path}} is written, end your turn with a short final reply.\n\n{{skill_section}}</task_context>\n\n<instructions>\n\n## Task instructions\nYou need to process a spreadsheet file based on specific instructions.\n**Instruction:** {{instruction}}\n\n## Input and Output\nYou are provided with an input spreadsheet file and you need to generate an output spreadsheet file based on the output_path.\n**Input File:** {{spreadsheet_path}}\n**Output Path:** {{output_path}}\n\n</instructions>",
+    "implement__system_prompt": "You are a helpful Spreadsheet Automation Engineer that interacts with a computer shell to solve data tasks.\nYou operate in a REPL (Read-Eval-Print Loop) environment where you must issue exactly ONE command at a time.",
+    "verify__task": "<task_context>\n\n## Important\n- When completing spreadsheet tasks, strictly avoid altering any cells that already contain values unless explicitly instructed. Modify only the cells that are required for the task.\n- You need to complete the instructions and ensure that the original formatting is preserved as much as possible.\n\n## Tools\nYou are provided with four tools: `Bash`, `view_xlsx` and `submit`. You must use these tools to complete the target task.\n**Important: You can only call ONE tool at a time per response.**\n- `Bash`: run shell commands (e.g., file operations, calling Python scripts with `python3`)\n- `view_xlsx`: inspect `.xlsx` files (list sheets, view sheet contents, see original formulas and values); a command on your PATH: run it with `Bash`\n- `submit`: finalize and submit your solution after verification; to submit, end your turn with a short final reply (there is no `submit` command)\n\n## Environment\nYou can complete the corresponding spreadsheet tasks using the following Python environment:\n`Pandas`, `openpyxl`, `numpy` and `LibreOffice`\nYou can use these environments to manipulate the spreadsheet data.\n\n## Recommended Workflow\n5. **Verify**: Check the output file exists, ensure the answer is correct.\n   - Do NOT combine verify and submit commands (e.g., `python3 script.py && submit`). Run them separately to ensure verification is complete before submission.\n   - Ensure the existing structure, layout, and formatting of the model are preserved throughout the process.\n\n6. **Submit**: When verification is successful, submit: end your turn with a short final reply.\n\n## This Step\nThis is step 4 of 4 (Verify and Submit). {{output_path}} was written by the Implement step from `plan.md` (the Plan step's plan) and `inspect_notes.md` (the Inspect step's notes). Check it against the instruction and {{spreadsheet_path}}, recalculating with LibreOffice as needed, and correct {{output_path}} where it is wrong: it is graded as you leave it. Write what you checked and found to `verify_report.md` in the working directory, then submit.\n\n{{skill_section}}</task_context>\n\n<instructions>\n\n## Task instructions\nYou need to process a spreadsheet file based on specific instructions.\n**Instruction:** {{instruction}}\n\n## Input and Output\nYou are provided with an input spreadsheet file and you need to generate an output spreadsheet file based on the output_path.\n**Input File:** {{spreadsheet_path}}\n**Output Path:** {{output_path}}\n\n</instructions>",
+    "verify__system_prompt": "You are a helpful Spreadsheet Automation Engineer that interacts with a computer shell to solve data tasks.\nYou operate in a REPL (Read-Eval-Print Loop) environment where you must issue exactly ONE command at a time."
+  },
+  "knob_specs": {
+    "skill": {
+      "default": "",
+      "kind": "str",
+      "lo": null,
+      "hi": null,
+      "enum": [],
+      "values": [],
+      "frozen": false,
+      "description": "the skill, written to SKILL.md, which every step reads; empty, no prompt mentions it",
+      "required": false
+    },
+    "data_parallelism": {
+      "default": 8,
+      "kind": "int",
+      "lo": 1,
+      "hi": 64,
+      "enum": [],
+      "values": [],
+      "frozen": true,
+      "description": "concurrent items",
+      "required": false
+    },
+    "max_turns": {
+      "default": 50,
+      "kind": "int",
+      "lo": 1,
+      "hi": null,
+      "enum": [],
+      "values": [],
+      "frozen": true,
+      "description": "each step's turn cap (V2's per_instance_call_limit, Claude Code's --max-turns)",
+      "required": false
+    },
+    "bash_timeout_ms": {
+      "default": 60000,
+      "kind": "int",
+      "lo": 1,
+      "hi": null,
+      "enum": [],
+      "values": [],
+      "frozen": true,
+      "description": "each Bash command's timeout in ms (V2's execution_timeout)",
+      "required": false
+    },
+    "bash_output_chars": {
+      "default": 10000,
+      "kind": "int",
+      "lo": 1,
+      "hi": null,
+      "enum": [],
+      "values": [],
+      "frozen": true,
+      "description": "the most of a command's output the model sees (V2's max_observation_length)",
+      "required": false
+    },
+    "inspect__task": {
+      "default": "<task_context>\n\n## Important\n- When completing spreadsheet tasks, strictly avoid altering any cells that already contain values unless explicitly instructed. Modify only the cells that are required for the task.\n- You need to complete the instructions and ensure that the original formatting is preserved as much as possible.\n\n## Tools\nYou are provided with four tools: `Bash`, `view_xlsx` and `submit`. You must use these tools to complete the target task.\n**Important: You can only call ONE tool at a time per response.**\n- `Bash`: run shell commands (e.g., file operations, calling Python scripts with `python3`)\n- `view_xlsx`: inspect `.xlsx` files (list sheets, view sheet contents, see original formulas and values); a command on your PATH: run it with `Bash`\n- `submit`: finalize and submit your solution after verification; to submit, end your turn with a short final reply (there is no `submit` command)\n\n## Environment\nYou can complete the corresponding spreadsheet tasks using the following Python environment:\n`Pandas`, `openpyxl`, `numpy` and `LibreOffice`\nYou can use these environments to manipulate the spreadsheet data.\n\n## Recommended Workflow\n1. **Inspect**: Use `view_xlsx` to inspect the data. This will allow you to understand the structure and contents of the spreadsheet.\n   - You must choose mode `list` or `content` to inspect the data.\n   - List all sheets: `view_xlsx {{spreadsheet_path}} list`\n   - View specific sheet: `view_xlsx {{spreadsheet_path}} content \"Sheet1\"`\n   - View row range: `view_xlsx {{spreadsheet_path}} content \"Sheet1\" 1 50`\n\n## This Step\nThis is step 1 of 4 (Inspect). Later steps plan, implement and verify the edit, each in a new session that starts from the files named here. Inspect the input and write your notes to `inspect_notes.md` in the working directory: the workbook's structure, the sheets and cells relevant to the instruction, and the conventions you see (formulas, formats, layout). Do not write {{output_path}}: a later step does. When the notes are written, end your turn with a short final reply.\n\n{{skill_section}}</task_context>\n\n<instructions>\n\n## Task instructions\nYou need to process a spreadsheet file based on specific instructions.\n**Instruction:** {{instruction}}\n\n## Input and Output\nYou are provided with an input spreadsheet file and you need to generate an output spreadsheet file based on the output_path.\n**Input File:** {{spreadsheet_path}}\n**Output Path:** {{output_path}}\n\n</instructions>",
+      "kind": "str",
+      "lo": null,
+      "hi": null,
+      "enum": [],
+      "values": [],
+      "frozen": false,
+      "description": "the inspect step's prompt: V2's instance template with its workflow cut to this step's stages",
+      "required": false
+    },
+    "inspect__system_prompt": {
+      "default": "You are a helpful Spreadsheet Automation Engineer that interacts with a computer shell to solve data tasks.\nYou operate in a REPL (Read-Eval-Print Loop) environment where you must issue exactly ONE command at a time.",
+      "kind": "str",
+      "lo": null,
+      "hi": null,
+      "enum": [],
+      "values": [],
+      "frozen": false,
+      "description": "text appended to Claude Code's system prompt for the inspect step: V2's system template",
+      "required": false
+    },
+    "plan__task": {
+      "default": "<task_context>\n\n## Important\n- When completing spreadsheet tasks, strictly avoid altering any cells that already contain values unless explicitly instructed. Modify only the cells that are required for the task.\n- You need to complete the instructions and ensure that the original formatting is preserved as much as possible.\n\n## Tools\nYou are provided with four tools: `Bash`, `view_xlsx` and `submit`. You must use these tools to complete the target task.\n**Important: You can only call ONE tool at a time per response.**\n- `Bash`: run shell commands (e.g., file operations, calling Python scripts with `python3`)\n- `view_xlsx`: inspect `.xlsx` files (list sheets, view sheet contents, see original formulas and values); a command on your PATH: run it with `Bash`\n- `submit`: finalize and submit your solution after verification; to submit, end your turn with a short final reply (there is no `submit` command)\n\n## Environment\nYou can complete the corresponding spreadsheet tasks using the following Python environment:\n`Pandas`, `openpyxl`, `numpy` and `LibreOffice`\nYou can use these environments to manipulate the spreadsheet data.\n\n## Recommended Workflow\n2. **Plan**: Decide how to manipulate the data using `openpyxl` or `LibreOffice`.\n\n## This Step\nThis is step 2 of 4 (Plan). The Inspect step's notes are in `inspect_notes.md`: read them first (you may also view {{spreadsheet_path}}). Write your plan to `plan.md` in the working directory: which cells to change and how. Do not write {{output_path}}: the next step implements your plan. When the plan is written, end your turn with a short final reply.\n\n{{skill_section}}</task_context>\n\n<instructions>\n\n## Task instructions\nYou need to process a spreadsheet file based on specific instructions.\n**Instruction:** {{instruction}}\n\n## Input and Output\nYou are provided with an input spreadsheet file and you need to generate an output spreadsheet file based on the output_path.\n**Input File:** {{spreadsheet_path}}\n**Output Path:** {{output_path}}\n\n</instructions>",
+      "kind": "str",
+      "lo": null,
+      "hi": null,
+      "enum": [],
+      "values": [],
+      "frozen": false,
+      "description": "the plan step's prompt: V2's instance template with its workflow cut to this step's stages",
+      "required": false
+    },
+    "plan__system_prompt": {
+      "default": "You are a helpful Spreadsheet Automation Engineer that interacts with a computer shell to solve data tasks.\nYou operate in a REPL (Read-Eval-Print Loop) environment where you must issue exactly ONE command at a time.",
+      "kind": "str",
+      "lo": null,
+      "hi": null,
+      "enum": [],
+      "values": [],
+      "frozen": false,
+      "description": "text appended to Claude Code's system prompt for the plan step: V2's system template",
+      "required": false
+    },
+    "implement__task": {
+      "default": "<task_context>\n\n## Important\n- When completing spreadsheet tasks, strictly avoid altering any cells that already contain values unless explicitly instructed. Modify only the cells that are required for the task.\n- You need to complete the instructions and ensure that the original formatting is preserved as much as possible.\n\n## Tools\nYou are provided with four tools: `Bash`, `view_xlsx` and `submit`. You must use these tools to complete the target task.\n**Important: You can only call ONE tool at a time per response.**\n- `Bash`: run shell commands (e.g., file operations, calling Python scripts with `python3`)\n- `view_xlsx`: inspect `.xlsx` files (list sheets, view sheet contents, see original formulas and values); a command on your PATH: run it with `Bash`\n- `submit`: finalize and submit your solution after verification; to submit, end your turn with a short final reply (there is no `submit` command)\n\n## Environment\nYou can complete the corresponding spreadsheet tasks using the following Python environment:\n`Pandas`, `openpyxl`, `numpy` and `LibreOffice`\nYou can use these environments to manipulate the spreadsheet data.\n\n## Recommended Workflow\n3. **Implement**: Create a python script (e.g., `process_data.py`) that performs the edit.\n   - You can use `Bash` tool to write Python code directly, e.g., cat > /tmp/script.py << 'EOF' ... EOF), which can then be used to verify syntax correctness.\n\n4. **Execute**: Run the python script using `python3 /tmp/script.py`\n\n## This Step\nThis is step 3 of 4 (Implement and Execute). Read `inspect_notes.md` (the Inspect step's notes) and `plan.md` (the Plan step's plan), then write {{output_path}} from {{spreadsheet_path}} as planned. The next step verifies it. When {{output_path}} is written, end your turn with a short final reply.\n\n{{skill_section}}</task_context>\n\n<instructions>\n\n## Task instructions\nYou need to process a spreadsheet file based on specific instructions.\n**Instruction:** {{instruction}}\n\n## Input and Output\nYou are provided with an input spreadsheet file and you need to generate an output spreadsheet file based on the output_path.\n**Input File:** {{spreadsheet_path}}\n**Output Path:** {{output_path}}\n\n</instructions>",
+      "kind": "str",
+      "lo": null,
+      "hi": null,
+      "enum": [],
+      "values": [],
+      "frozen": false,
+      "description": "the implement step's prompt: V2's instance template with its workflow cut to this step's stages",
+      "required": false
+    },
+    "implement__system_prompt": {
+      "default": "You are a helpful Spreadsheet Automation Engineer that interacts with a computer shell to solve data tasks.\nYou operate in a REPL (Read-Eval-Print Loop) environment where you must issue exactly ONE command at a time.",
+      "kind": "str",
+      "lo": null,
+      "hi": null,
+      "enum": [],
+      "values": [],
+      "frozen": false,
+      "description": "text appended to Claude Code's system prompt for the implement step: V2's system template",
+      "required": false
+    },
+    "verify__task": {
+      "default": "<task_context>\n\n## Important\n- When completing spreadsheet tasks, strictly avoid altering any cells that already contain values unless explicitly instructed. Modify only the cells that are required for the task.\n- You need to complete the instructions and ensure that the original formatting is preserved as much as possible.\n\n## Tools\nYou are provided with four tools: `Bash`, `view_xlsx` and `submit`. You must use these tools to complete the target task.\n**Important: You can only call ONE tool at a time per response.**\n- `Bash`: run shell commands (e.g., file operations, calling Python scripts with `python3`)\n- `view_xlsx`: inspect `.xlsx` files (list sheets, view sheet contents, see original formulas and values); a command on your PATH: run it with `Bash`\n- `submit`: finalize and submit your solution after verification; to submit, end your turn with a short final reply (there is no `submit` command)\n\n## Environment\nYou can complete the corresponding spreadsheet tasks using the following Python environment:\n`Pandas`, `openpyxl`, `numpy` and `LibreOffice`\nYou can use these environments to manipulate the spreadsheet data.\n\n## Recommended Workflow\n5. **Verify**: Check the output file exists, ensure the answer is correct.\n   - Do NOT combine verify and submit commands (e.g., `python3 script.py && submit`). Run them separately to ensure verification is complete before submission.\n   - Ensure the existing structure, layout, and formatting of the model are preserved throughout the process.\n\n6. **Submit**: When verification is successful, submit: end your turn with a short final reply.\n\n## This Step\nThis is step 4 of 4 (Verify and Submit). {{output_path}} was written by the Implement step from `plan.md` (the Plan step's plan) and `inspect_notes.md` (the Inspect step's notes). Check it against the instruction and {{spreadsheet_path}}, recalculating with LibreOffice as needed, and correct {{output_path}} where it is wrong: it is graded as you leave it. Write what you checked and found to `verify_report.md` in the working directory, then submit.\n\n{{skill_section}}</task_context>\n\n<instructions>\n\n## Task instructions\nYou need to process a spreadsheet file based on specific instructions.\n**Instruction:** {{instruction}}\n\n## Input and Output\nYou are provided with an input spreadsheet file and you need to generate an output spreadsheet file based on the output_path.\n**Input File:** {{spreadsheet_path}}\n**Output Path:** {{output_path}}\n\n</instructions>",
+      "kind": "str",
+      "lo": null,
+      "hi": null,
+      "enum": [],
+      "values": [],
+      "frozen": false,
+      "description": "the verify step's prompt: V2's instance template with its workflow cut to this step's stages",
+      "required": false
+    },
+    "verify__system_prompt": {
+      "default": "You are a helpful Spreadsheet Automation Engineer that interacts with a computer shell to solve data tasks.\nYou operate in a REPL (Read-Eval-Print Loop) environment where you must issue exactly ONE command at a time.",
+      "kind": "str",
+      "lo": null,
+      "hi": null,
+      "enum": [],
+      "values": [],
+      "frozen": false,
+      "description": "text appended to Claude Code's system prompt for the verify step: V2's system template",
+      "required": false
+    }
+  }
+}

@@ -1,4 +1,4 @@
-# SpreadsheetBench (`spreadsheetbench/solver`, `spreadsheetbench/agent`, `spreadsheetbench_v2/agent`, `spreadsheetbench_v2/swe`)
+# SpreadsheetBench (`spreadsheetbench/solver`, `spreadsheetbench/agent`, `spreadsheetbench_v2/agent`, `spreadsheetbench_v2/swe`, `spreadsheetbench_v2/steps`)
 
 SkillOpt's SpreadsheetBench target agent, ported so the outer loop can be measured
 against SkillOpt on the same items, prompts, code runner and grader. Source:
@@ -11,7 +11,9 @@ harness ([below](#the-agent-harness-spreadsheetbenchagent)). They share the data
 Task, the code runner and the grader. `spreadsheetbench_v2/agent` runs that agent harness
 on a second dataset, SpreadsheetBench 2, with V2's own task text and grader
 ([below](#spreadsheetbench-2-spreadsheetbench_v2agent)); `spreadsheetbench_v2/swe` runs V2's
-own agent setup on it ([below](#v2s-own-agent-setup-spreadsheetbench_v2swe)).
+own agent setup on it ([below](#v2s-own-agent-setup-spreadsheetbench_v2swe)), and
+`spreadsheetbench_v2/steps` that setup with its workflow split into graph steps
+([below](#v2s-workflow-as-steps-spreadsheetbench_v2steps)).
 
 ## The data
 
@@ -601,3 +603,77 @@ session is run once more and an empty last turn asked once for its answer (V2 do
 skips that test, so the stand-in checks only that `soffice` is reachable. When a run
 directory is itself under `/tmp`, the step's own `/tmp` shows the empty folders the seal
 mounts the workspace on (they go with the dispatch).
+
+## V2's workflow as steps (`spreadsheetbench_v2/steps`)
+
+`spreadsheetbench_v2/swe` sends one session V2's whole workflow in prose ("Recommended
+Workflow": 1 Inspect, 2 Plan, 3 Implement, 4 Execute, 5 Verify, 6 Submit), so the outer
+loop can only edit text. This mode lifts that workflow into the graph, so the loop has
+structure to optimize:
+
+```
+prepare -> has_case -> inspect -> plan -> implement -> verify -> finalize
+```
+
+Each step is a sealed Claude Code session set up exactly as swe's solve step -- the same
+Task items, split and grade, `Bash` alone with `view_xlsx` and LibreOffice on the PATH, a
+`/tmp` of its own, the same retry -- on swe's code paths (`swe_ops.lay_workspace`,
+`swe_ops.session_facts`, `SpreadsheetBenchV2SweTask`'s tool environment). Steps hand on
+files through the pass, each declared:
+
+| step | upstream stages (`spreadsheet.yaml`) | reads (besides `input.xlsx`, `SKILL.md`) | writes |
+|---|---|---|---|
+| `inspect` | 1 Inspect (:28-32) | -- | `inspect_notes.md` |
+| `plan` | 2 Plan (:34) | `inspect_notes.md` | `plan.md` |
+| `implement` | 3 Implement, 4 Execute (:36-39) | `inspect_notes.md`, `plan.md` | `output.xlsx` |
+| `verify` | 5 Verify, 6 Submit (:41-45) | `inspect_notes.md`, `plan.md`, `output.xlsx` | `verify_report.md`, `output.xlsx` |
+
+Inspect and plan do not declare `output.xlsx`, so one they leave is never handed on.
+Verify may correct `output.xlsx` (swe's "verify, then submit"); the `output.xlsx` in the
+pass after the last step is graded as swe's is, and none fails the item
+(`output-not-found`).
+
+- **Prompts**: each step's prompt is swe's (V2's instance template with swe's
+  substitutions) with the "Recommended Workflow" body cut to the step's own stages, byte for
+  byte, followed by a short "## This Step" section naming what it reads and writes
+  (`steps_port.STEP_SECTIONS`, the only text not V2's). The steps' stages in order are V2's
+  whole workflow. Everything else goes to every step unchanged: "Important", "Tools",
+  "Environment", "Task instructions" and "Input and Output", with the item's instruction
+  and paths filled from prepare's facts (`{{instruction}}`, `{{spreadsheet_path}}`,
+  `{{output_path}}`). The appended system prompt is V2's system template for every step.
+- **Knobs**: each step's prompt and system prompt are its own open knobs,
+  `<step>__task` and `<step>__system_prompt` (eight texts), so the loop edits one step
+  without touching the others. `skill` is one `SKILL.md` every step reads; when it is
+  non-empty every prompt names it (`{{skill_section}}`). Frozen, as swe's: `max_turns`
+  (50, bound to every step's route), `bash_timeout_ms` (60 s) and `bash_output_chars`
+  (10,000).
+- **Cost**: each step has its own 50-turn cap, so an item may use up to 200 turns where
+  swe's one session uses 50. The item's `final.json` records each step's turns
+  (`step_turns`, Claude Code's own counts) and their total (`n_turns`), the steps stopped at
+  their cap (`turn_limits`; the verdict then names each one), the steps with no session
+  facts (`session_facts_missing`) and the steps that left no reply (`steps_without_reply`).
+  `tool_calls.json` keeps every step's calls, in step order. Each step's session facts
+  are its own declared write, `<step>/.refactory-session.json`
+  (`workspace.is_session_log`).
+- **A hand-off a step did not write**: a read that only sealed Claude Code steps write, as
+  a file they may leave out, is optional for a sealed Claude Code reader
+  (`workspace.optional_reads`, on both runtimes): a step stopped at its cap before it wrote
+  its notes leaves the next step to run without them, and verify runs without an
+  `output.xlsx` implement did not write (and may write one). Never silently: each absent
+  read is recorded per step (`workspace.absent_reads`), in `final.json` as
+  `missing_inputs` (`{"plan": ["inspect_notes.md"]}`) and in the verdict the analysts see
+  (`(the plan step ran without inspect_notes.md: no earlier step wrote it)`). Every other
+  read is still required. A step whose reply has no text is listed in
+  `steps_without_reply`.
+- **Analysts**: as swe's -- the input's preview as the item's context. SkillOpt's view
+  shows each step's final message headed by its step, in order, then V2's verdict; the
+  target's prompts are each step's prompt as sent and its system prompt, headed by step.
+- **No added structure**: no loops, judges or routes; only `data` and `finalize` are
+  protected. What else helps is the loop's to find.
+
+**A different starting point.** This is not V2's setup: four sessions with their own turn
+caps and hand-off files replace one. Its baseline score and cost against
+`spreadsheetbench_v2/swe` are to be measured, not assumed.
+
+**Not verified here.** No live model run; the steps ran with scripted agents (walker and
+spine) and the real Claude Code adapter with a faked Agent SDK.

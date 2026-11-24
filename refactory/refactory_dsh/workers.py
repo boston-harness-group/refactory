@@ -814,6 +814,10 @@ def lower_workflow(workflow: Any, workdir: Path, model_context: dict[str, Any] |
             payload['tools'] = list(node.tools)
         if is_optional:
             payload['optional'] = True
+        optional_reads = (declarations or {}).get(name, {}).get('optional_reads')
+        if optional_reads:
+            # Reads it runs without when absent (`workspace.optional_reads`).
+            payload['optional_reads'] = list(optional_reads)
         retry = getattr(node, 'retry', None)
         if retry and int(retry.get('times', 0)) <= 0:
             retry = None
