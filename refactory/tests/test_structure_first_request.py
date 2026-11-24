@@ -483,7 +483,7 @@ def test_the_modes_guidance_and_preferred_edits_reach_the_request(tmp_path):
     assert ctx.guidance == loop.mode.guidance() and "restart_on_stall" in ctx.guidance
     assert ctx.preferred_edits == list(loop.mode.preferred_edits()) == ["set_knob", "insert_after"]
     text = ctx.render()
-    worth = text.split("## What the author says is worth doing", 1)[1]
+    worth = text.split("## About this mode", 1)[1]
     assert worth.lstrip().startswith(loop.mode.guidance()[:60])
     assert "offered no guidance" not in text
     assert "Operations the author suggests trying first: `set_knob`, `insert_after`" in text

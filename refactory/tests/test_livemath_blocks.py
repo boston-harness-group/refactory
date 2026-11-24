@@ -254,8 +254,9 @@ def _make_route_client():
 #: with its knobs and facts; its prompts are unchanged. Then the solve node lost its
 #: 1800 s wall (``timeout`` null): its session ends on inactivity only. Then the solve
 #: node keeps a reply that writes out tool calls as it is (``keeps_tool_markup``), as
-#: SkillOpt's harness does.
-BASELINE_SNAPSHOT_SHA256 = "61f99cd1893147e186676273f173599891426c9c5a7957024b0997fcb192c259"
+#: SkillOpt's harness does. Then the frozen system-prompt knob's description became a
+#: plain "(frozen)" (no longer pointing at the skill knob); its prompts are unchanged.
+BASELINE_SNAPSHOT_SHA256 = "e83b66443a8738da07c1028db24998d4b2c76295854de2d69e87e663e2069fc4"
 
 
 @pytest.mark.parametrize("explicit", [False, True])

@@ -30,7 +30,8 @@ from __future__ import annotations
 from refactory_dsh import nn
 
 from refactory_packages.spreadsheetbench.agent_mode import SOLVE_RETRY
-from refactory_packages.spreadsheetbench.mode import OPS, SKILLOPT_CLAUDE_CODE
+from refactory_packages.spreadsheetbench.mode import (OPS, SKILLOPT_CLAUDE_CODE, author_note,
+                                                       upgrade_frozen_descriptions)
 from refactory_packages.spreadsheetbench.tasks import INPUT
 
 from . import swe_port
@@ -81,7 +82,7 @@ class Swe(nn.Mode):
                                              "(V2's max_observation_length)"),
             PROMPT_KNOB: nn.Knob(swe_port.INSTANCE_TEMPLATE, "str", frozen=True,
                                  description="the solve call's prompt, V2's instance template "
-                                             "(frozen; use the skill knob)"),
+                                             "(frozen)"),
             SYSTEM_PROMPT_KNOB: nn.Knob(swe_port.SYSTEM_TEMPLATE, "str", frozen=True,
                                         description="text appended to Claude Code's system "
                                                     "prompt: V2's system template (frozen)"),
@@ -136,6 +137,12 @@ class Swe(nn.Mode):
         """The solve step runs on the Claude Code the agent mode pins."""
         return {"solve": SKILLOPT_CLAUDE_CODE}
 
+    @classmethod
+    def upgrade_state(cls, state):
+        """A saved state's frozen knob descriptions as this version words them
+        (`spreadsheetbench.mode.upgrade_frozen_descriptions`)."""
+        return upgrade_frozen_descriptions(state)
+
     def protected_nodes(self) -> tuple[str, ...]:
         """The data pass and the item's outcome."""
         return ("data", "finalize")
@@ -145,8 +152,6 @@ class Swe(nn.Mode):
         return sum(scores) / len(scores) if scores else 0.0
 
     def guidance(self) -> str:
-        return ("The skill is written to the agent's SKILL.md, which the prompt tells it to read "
-                "before it edits the workbook (an empty skill is not mentioned); the graph can be "
-                "edited too -- the steps before and around the solve step (only data and "
-                "finalize are protected). Keep every change general -- it must help on items no "
-                "rollout saw.")
+        return author_note(self, "The `skill` knob is written to the agent's SKILL.md, which "
+                                 "the prompt tells it to read before it edits the workbook (an "
+                                 "empty skill is not mentioned).")

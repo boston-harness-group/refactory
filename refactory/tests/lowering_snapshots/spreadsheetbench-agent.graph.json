@@ -215,7 +215,7 @@
       "enum": [],
       "values": [],
       "frozen": true,
-      "description": "the solve call's prompt (frozen; use the skill knob)",
+      "description": "the solve call's prompt (frozen)",
       "required": false
     },
     "solve__system_prompt": {
@@ -226,7 +226,7 @@
       "enum": [],
       "values": [],
       "frozen": true,
-      "description": "text appended to Claude Code's system prompt for the solve call: none, as SkillOpt's CLI (frozen; use the skill knob)",
+      "description": "text appended to Claude Code's system prompt for the solve call: none, as SkillOpt's CLI (frozen)",
       "required": false
     }
   }

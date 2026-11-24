@@ -1042,9 +1042,14 @@ lose to its sibling; the report's Portfolio section shows each round's decisions
 marks such a candidate shadowed. A strategy that
 publishes `edit_kind` for a round gets that level only (`reflective`'s settings-only
 merge does). The report counts what the candidates beyond `--batch-size` cost in
-evaluations, train and val runs both. The request's composition
-examples show one short example per composition (new agent, parallel fork, verdict
-loop, code op) so no single shape reads as the way to grow a pipeline.
+evaluations, train and val runs both. The request's reference ("How nodes compose")
+shows one short example of each composition shape the graph takes, with its own ids: a
+new agent step, a parallel fork and join, a verdict loop, a route, a code op and an
+agent step with tools (`optim.base.COMPOSITION_SHAPES`). Each says how the shape is
+written, none is preferred, so no single shape reads as the way to grow a pipeline. Each
+example applies to that graph as written and takes over no step's outputs; a shape the
+graph refuses in every form tried (a frozen prompt, say) is named on one line with its
+refusal, so the examples are never read as the full set.
 
 ## Why it looks like this
 

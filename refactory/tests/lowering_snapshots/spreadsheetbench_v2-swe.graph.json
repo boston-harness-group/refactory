@@ -245,7 +245,7 @@
       "enum": [],
       "values": [],
       "frozen": true,
-      "description": "the solve call's prompt, V2's instance template (frozen; use the skill knob)",
+      "description": "the solve call's prompt, V2's instance template (frozen)",
       "required": false
     },
     "solve__system_prompt": {

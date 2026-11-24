@@ -28,6 +28,7 @@ from dataclasses import dataclass, field, replace
 from typing import Any, Callable, Collection, Iterable, Mapping, Sequence
 
 from refactory_dsh.nn import edits as nn_edits
+from refactory_dsh.nn.core_ops import STEP_KINDS
 from refactory_dsh.nn import validate_state
 from . import checks, evidence, repair
 from .evidence import CLAIMS
@@ -1059,7 +1060,7 @@ class ProposalContext:
     history_truncated: bool = False
     #: Summaries of previous runs, so a strategy can carry a prior across runs.
     prior_runs: list[dict[str, Any]] = field(default_factory=list)
-    #: What the author says is worth doing, which the traces would only show later.
+    #: The mode author's facts about the mode (`nn.Mode.guidance`), shown under "About this mode".
     guidance: str = ""
     preferred_edits: list[str] = field(default_factory=list)
     #: Knobs the operator has frozen for this run, on top of the ones the mode
@@ -1487,7 +1488,7 @@ class ProposalContext:
         sections += [
             "",
             *_settings_lines(self.knobs),
-            "## What the author says is worth doing",
+            "## About this mode",
             self.guidance or "(the mode's author offered no guidance)",
             (
                 "Operations the author suggests trying first: "
@@ -1532,7 +1533,10 @@ class ProposalContext:
                                  text_knobs=[k.get("name") for k in self.knobs
                                              if k.get("kind") == "str"],
                                  structure_guidance=self.structure_guidance,
-                                 tools=self.new_node_tools),
+                                 tools=self.new_node_tools, protected=self.protected,
+                                 knob_values={k.get("name"): k.get("value")
+                                              for k in self.knobs},
+                                 frozen=[k.get("name") for k in self.knobs if k.get("frozen")]),
             # Only when the view could not be drawn are the nodes and edges listed here.
             *([] if _fit_state(self.node_states, self.edges, self.knobs) is not None else [
                 "The pipeline view could not be drawn; the graph as it declares itself:",
@@ -1671,7 +1675,8 @@ def _node_reference(ctx: "ProposalContext") -> list[str]:
     specs = _node_specs(ctx.node_states, text_chars=ctx.node_spec_text_chars,
                         section_chars=ctx.node_spec_section_chars,
                         knob_values={k.get("name"): k.get("value") for k in ctx.knobs},
-                        person_gates=ctx.person_gates, refer=True)
+                        person_gates=ctx.person_gates, refer=True,
+                        catalogue=ctx.catalogue)
     return [*specs, ""] if specs else []
 
 
@@ -1941,11 +1946,19 @@ def _fact_filled_knobs(node_states: Sequence[dict[str, Any]],
     return sorted(names)
 
 
+def _or_list(names: Sequence[str], last: str = "or") -> str:
+    """``names`` in backticks, the last joined by ``last``."""
+    quoted = [f"`{name}`" for name in names]
+    return f" {last} ".join([", ".join(quoted[:-1]), quoted[-1]]) if len(quoted) > 1 \
+        else "".join(quoted)
+
+
 #: The lead of "Structural operators". It makes no claim about wiring: what a new step
 #: sees and where its output goes are each operator's own generated line
 #: (`nn.core_ops.OPERATORS`, `core_ops.REACHES`), the single source.
 STRUCTURAL_LEAD = (
-    "The structural operators, each one line: what kind of step (`agent`, `code` or `op`), where (a step id), and "
+    "The structural operators, each one line: what kind of step "
+    f"({_or_list(STEP_KINDS)}), where (a step id), and "
     "its text (a prompt, or code). The system does the wiring, as each operator's line "
     "below says. Ids, files and facts are generated; each text goes into a knob of its own "
     "(`<id>__task`, `<id>__code`) for a later `set_knob`; the candidate says what was "
@@ -1957,12 +1970,16 @@ STRUCTURAL_LEAD = (
 def composition_section(catalogue: Sequence[dict[str, Any]], node_states: Sequence[dict[str, Any]],
                         edges: Sequence[dict[str, Any]], *, code_nodes: bool = False,
                         text_knobs: Iterable[str] | None = None,
-                        structure_guidance: bool = False, tools: bool = False) -> list[str]:
+                        structure_guidance: bool = False, tools: bool = False,
+                        protected: Sequence[str] = (),
+                        knob_values: Mapping[str, Any] | None = None,
+                        frozen: Collection[str] = ()) -> list[str]:
     """"How nodes compose": the language's primitives (each node kind, where a `{{fact}}`
     is filled in, tools, gates and loops, running out of output, crashes, forks), facts
-    only; each operator's own line and example are under the operations
-    (`operator_lines`). With ``structure_guidance``, what makes a new step pay off
-    (`feedback.STRUCTURE_GUIDANCE`). Nothing when the run permits no structural op."""
+    only, then one example of each composition shape with this graph's ids
+    (`composition_examples`); each operator's own line and example are under the
+    operations (`operator_lines`). With ``structure_guidance``, what makes a new step pay
+    off (`feedback.STRUCTURE_GUIDANCE`). Nothing when the run permits no structural op."""
     from refactory_dsh import snippet
 
     if not structural_ops(catalogue):
@@ -1988,7 +2005,7 @@ def composition_section(catalogue: Sequence[dict[str, Any]], node_states: Sequen
            "facts reads" if filled else "")
         + ". Any other knob is read as written, so a `{{fact}}` there would never arrive "
         "and is refused (V20).",
-        TOOLS_LINE if tools else NO_TOOLS_LINE,
+        tools_line(ops) if tools else NO_TOOLS_LINE,
     ]
     if code_nodes:
         lines += [
@@ -2050,17 +2067,138 @@ def composition_section(catalogue: Sequence[dict[str, Any]], node_states: Sequen
     if structure_guidance:
         from .feedback import STRUCTURE_GUIDANCE
         lines.append(STRUCTURE_GUIDANCE)
+    examples, refused = composition_examples(catalogue, node_states, edges,
+                                             protected=protected, code_nodes=code_nodes,
+                                             tools=tools, knob_values=knob_values,
+                                             frozen=frozen)
+    if examples:
+        lines += ["", COMPOSITION_LEAD]
+        for shape, bundle in examples:
+            lines.append(f"- {shape}: "
+                         + json.dumps({"edits": bundle} if len(bundle) > 1 else bundle[0]))
+    if refused:
+        lines.append(REFUSED_LEAD + "; ".join(f"{shape}: {why}" for shape, why in refused)
+                     + ".")
     return lines + [""]
 
 
-#: What the request says of tools when a new step may have them: an existing step's own
-#: tool rules (its ``tool_policy``, its ``tools``) are not a limit on a step an edit adds.
-TOOLS_LINE = ("- **tools**: every existing step keeps its own tool rules (a step that has no "
-              "tools or refuses them stays so). A new agent step may still have `tools` "
-              "(`insert`, `map`, `fallback`): it runs sealed, in a fresh workspace holding "
-              "only the files it reads -- in the per-item part, unless its 'sees' (or a node's "
-              "'reads') names its inputs, the item's input files (the pipeline view lists "
-              "them) beside what it sees -- with no network and no grader files.")
+#: What heads the composition examples: vocabulary, one of each shape, none preferred.
+COMPOSITION_LEAD = ("One example of each composition shape, with this graph's ids (how to "
+                    "write it; none is preferred):")
+#: What heads the shapes this graph refuses, each with its refusal.
+REFUSED_LEAD = "Shapes not shown here, with the refusal of the forms tried: "
+#: The composition shapes, in the order shown (`composition_examples`).
+COMPOSITION_SHAPES = ("a new agent step", "a parallel fork and join",
+                      "a verdict loop (a judge that can send a step back)",
+                      "a route (a judge choosing the next step)", "a code op",
+                      "an agent step with tools")
+
+
+def composition_examples(catalogue: Sequence[dict[str, Any]],
+                         node_states: Sequence[dict[str, Any]], edges: Sequence[dict[str, Any]],
+                         *, protected: Sequence[str] = (), code_nodes: bool = False,
+                         tools: bool = False, knob_values: Mapping[str, Any] | None = None,
+                         frozen: Collection[str] = ()
+                         ) -> tuple[list[tuple[str, list[dict[str, Any]]]], list[tuple[str, str]]]:
+    """One short example of each composition shape (`COMPOSITION_SHAPES`) this run offers,
+    with this graph's ids and placeholder texts: how each is written, never when to use it.
+    A shape is shown only when its operator is offered (a code op with ``code_nodes``, a
+    tool step with ``tools`` and an operator that makes one, `tool_step_ops`) and its bundle
+    applies to this graph as an attempt takes it and as it runs (`_completed`, then
+    `_example_refusal`: no ``frozen`` knob moved, every step it adds read, no step's outputs
+    taken over; ``tests/test_dsl_coverage.py`` holds each one to `Optimizer.attempt`). Returns
+    the shapes shown and, for each offered shape no form of which this graph takes, the
+    refusal of every form tried. A take-over form is shown only when the new step can
+    write every file it takes over (`_can_write`), its text saying it must write them.
+    Nothing when the graph has no step to anchor them."""
+    ops = {op.get("op") for op in catalogue}
+    anchor = _composition_anchor(node_states, edges, protected)
+    state = _example_state(node_states, edges, knob_values)
+    if anchor is None or state is None:
+        return [], []
+    step = str(anchor[0]["id"])
+    code_id = f"{step}_code"
+    code = ("def main(inp):\n    result = len(inp['facts'])  # <what it computes>\n"
+            f"    return {{'facts': {{{code_id!r}: str(result)}}}}\n")
+    agent = {"kind": "agent", "text": "<what the new step does>"}
+    # The step just before the anchor, when one plain edge leads to it: branches there feed it.
+    into = [e for e in edges if e.get("target") == step]
+    feeding = [str(into[0]["source"])] if len(into) == 1 and into[0].get("condition") is None \
+        else []
+    branches = [{"kind": "agent", "text": "<what one branch does>"},
+                {"kind": "agent", "text": "<what another branch does>"}]
+    # Each shape: its operator and its forms, the first this graph takes is shown.
+    shapes: list[tuple[str, str, list[dict[str, Any]]]] = [
+        ("insert", COMPOSITION_SHAPES[0], [
+            {"op": "insert", "before": step, **agent}, {"op": "insert", "after": step, **agent}]),
+        ("parallelize", COMPOSITION_SHAPES[1], [
+            {"op": "parallelize", "after": step, "new": branches},
+            *({"op": "parallelize", "after": before, "new": branches} for before in feeding),
+            {"op": "parallelize", "steps": [step], "copies": 1}]),
+        ("loop", COMPOSITION_SHAPES[2], [
+            {"op": "loop", "step": step, "judge": "agent", "text": "<what to check>"}]),
+        ("route", COMPOSITION_SHAPES[3], [
+            {"op": "route", "after": step, "judge": "agent", "text": "<how to choose>"},
+            *({"op": "route", "after": before, "judge": "agent", "text": "<how to choose>",
+               "to": {"proceed": step, "revise": {**agent, "to": step}}} for before in feeding)]),
+    ]
+    if code_nodes:
+        shapes.append(("insert", COMPOSITION_SHAPES[4], [
+            {"op": "insert", "before": step, "kind": "code", "id": code_id, "text": code},
+            {"op": "insert", "after": step, "kind": "code", "id": code_id, "text": code}]))
+    if tools and "insert" in tool_step_ops(ops):
+        tool = {"kind": "agent", "tools": ["bash"], "text": "<what to find out with tools>"}
+        shapes.append(("insert", COMPOSITION_SHAPES[5], [
+            {"op": "insert", "before": step, **tool}, {"op": "insert", "after": step, **tool}]))
+    out: list[tuple[str, list[dict[str, Any]]]] = []
+    refused: list[tuple[str, str]] = []
+    for op, shape, forms in shapes:
+        if op not in ops:
+            continue
+        reasons: list[str] = []
+        for form in forms:
+            done = _completed(state, [form])
+            if done is not None:
+                done = _with_outputs_said(done, state)
+            why = _example_refusal(state, done if done is not None else [form], frozen)
+            if done is not None and why is None:
+                out.append((shape, done))
+                break
+            why = why or "refused by the operator's precondition"
+            if why not in reasons:
+                reasons.append(why)
+        else:
+            refused.append((shape, " / ".join(reasons)))
+    return out, refused
+
+
+def tool_step_ops(ops: Iterable[str]) -> list[str]:
+    """The operations among ``ops`` that can make a new agent step with `tools`: the
+    coverage map's (`nn.coverage.made_by`, which ``tests/test_dsl_coverage.py`` holds to each
+    one making a sealed tool step), core operators first in their order, then the
+    written-out ones by name."""
+    from refactory_dsh.nn import coverage
+
+    makers = set(coverage.made_by("node field", "tools")) & set(ops)
+    return [*(op for op in CORE_OPERATORS if op in makers),
+            *sorted(makers - set(CORE_OPERATORS))]
+
+
+def tools_line(ops: Iterable[str]) -> str:
+    """What the request says of tools when a new step may have them: an existing step's own
+    tool rules (its ``tool_policy``, its ``tools``) are not a limit on a step an edit adds;
+    the operations that can add one are generated (`tool_step_ops`), so the list is always
+    the exact set this run offers. `NO_TOOLS_LINE` when none of ``ops`` can."""
+    makers = tool_step_ops(ops)
+    if not makers:
+        return NO_TOOLS_LINE
+    return ("- **tools**: every existing step keeps its own tool rules (a step that has no "
+            "tools or refuses them stays so). A new agent step may still have `tools` "
+            f"(made by {_or_list(makers)}: in the edit's own 'tools', or in a step or node "
+            "it carries): it runs sealed, in a fresh workspace holding "
+            "only the files it reads -- in the per-item part, unless its 'sees' (or a node's "
+            "'reads') names its inputs, the item's input files (the pipeline view lists "
+            "them) beside what it sees -- with no network and no grader files.")
 #: The same when this run offers no tool step (no seal here, or ``new_step_tools`` off).
 NO_TOOLS_LINE = ("- **tools**: every existing step keeps its own tool rules, and in this run "
                  "a new step has no tools.")
@@ -2109,6 +2247,68 @@ def _example_state(node_states: Sequence[dict[str, Any]], edges: Sequence[dict[s
     return {"graph": graph.to_state(),
             "knobs": {k: {"value": v, "spec": {"kind": "str"}}
                       for k, v in (knob_values or {}).items()}}
+
+
+def _can_write(spec: Mapping[str, Any], file: str, files: Sequence[str]) -> bool:
+    """Whether a new step of ``spec`` can produce ``file`` among the ``files`` it takes over:
+    an agent with tools writes any file, one without only its reply (so one file); the code
+    example returns facts, no files, so it takes over none."""
+    if spec.get("kind", "agent") == "agent":
+        return bool(spec.get("tools")) or len(files) == 1
+    return False
+
+
+def _with_outputs_said(bundle: list[dict[str, Any]], state: Mapping[str, Any]
+                       ) -> list[dict[str, Any]]:
+    """``bundle`` with each take-over's placeholder text saying which files the new step
+    must write: the outputs of the step it takes over, which its readers go on reading."""
+    nodes = (state.get("graph") or {}).get("nodes") or {}
+    out = []
+    for edit in bundle:
+        taken = edit.get("takes_over")
+        files = list((nodes.get(str(taken)) or {}).get("writes") or ()) if taken else []
+        if files and isinstance(edit.get("text"), str) and edit.get("kind", "agent") == "agent":
+            edit = {**edit, "text": f"{edit['text']} It writes {_or_list(files, 'and')}, the outputs "
+                                    f"of `{taken}` it takes over."}
+        out.append(edit)
+    return out
+
+
+def _example_refusal(state: Mapping[str, Any], bundle: Sequence[dict[str, Any]],
+                     frozen: Collection[str] = ()) -> str | None:
+    """Why ``bundle`` is no example for ``state``, or ``None``: an edit refused (a knob of
+    ``frozen`` moved included), a step it adds left with no reader
+    (`core_ops.unread_by_bundle`), or a step's outputs taken over (the new step would have to
+    write what that step writes, which a placeholder text does not say)."""
+    from refactory_dsh.nn import core_ops
+
+    nodes = (state.get("graph") or {}).get("nodes") or {}
+    for edit in bundle:
+        if not edit.get("takes_over"):
+            continue
+        files = list((nodes.get(str(edit["takes_over"])) or {}).get("writes") or ())
+        unable = [f for f in files if not _can_write(edit, f, files)]
+        if unable:
+            return (f"its new step reaches a reader only by taking over the outputs of "
+                    f"`{edit['takes_over']}` ({_or_list(files, 'and')}), which this new "
+                    f"{edit.get('kind', 'agent')} step does not write")
+    # Each knob as a spec `set_knob` reads back: its value its default, its kind its
+    # value's, frozen as declared.
+    kinds = {bool: "bool", int: "int", float: "float", str: "str"}
+    knobs = {name: {"value": entry.get("value"),
+                    "spec": {"default": entry.get("value"),
+                             "kind": kinds.get(type(entry.get("value")), "str"),
+                             "frozen": name in frozen}}
+             for name, entry in (state.get("knobs") or {}).items()}
+    state = {**state, "knobs": knobs}
+    states, current = [], dict(state)
+    try:
+        for edit in bundle:
+            current = nn_edits.apply(edit, current)
+            states.append(current)
+    except Exception as exc:  # noqa: BLE001 - a refused example is said, not shown
+        return str(exc)
+    return core_ops.unread_by_bundle(state, states, bundle)
 
 
 def _removable_step(node_states: Sequence[dict[str, Any]], edges: Sequence[dict[str, Any]],
@@ -3855,11 +4055,21 @@ def _available_section(available: Mapping[str, Mapping[str, Any]], *,
     return [lead, f"({len(available)} node(s) not listed to stay within {limit} characters)"]
 
 
+def node_object_ops(catalogue: Sequence[Mapping[str, Any]]) -> list[str]:
+    """The operations of ``catalogue`` that take a whole node object as their `node` field,
+    in its order: generated, so the request names exactly the ones this run offers."""
+    return [str(c.get("op")) for c in catalogue if "node" in (c.get("fields") or ())]
+
+
 def _node_specs(states: Sequence[dict[str, Any]], *, text_chars: int = NODE_SPEC_TEXT_CHARS,
                 section_chars: int = NODE_SPEC_SECTION_CHARS,
                 knob_values: Mapping[str, Any] | None = None,
-                person_gates: bool = True, refer: bool = False) -> list[str]:
+                person_gates: bool = True, refer: bool = False,
+                catalogue: Sequence[Mapping[str, Any]] | None = None) -> list[str]:
     """Each node of the edited graph in full, then the generated node schemas.
+
+    The operations said to take a copied node are those of ``catalogue`` (else of every
+    edit) with a `node` field (`node_object_ops`).
 
     A structure edit (``add_node``, ``insert_after``, ``split``, ...) needs a whole
     node object; with these a model copies a node, changes its id and the fields it
@@ -3872,14 +4082,15 @@ def _node_specs(states: Sequence[dict[str, Any]], *, text_chars: int = NODE_SPEC
     if not states:
         return []
     schema = render_schema(person_gates=person_gates)
+    takers = node_object_ops(nn_edits.catalogue("broad") if catalogue is None else catalogue)
     ordered = sorted(states, key=lambda s: str(s.get("id")))
 
     def section(chosen: Sequence[dict[str, Any]], limit: int) -> list[str]:
         lines = ["### Each node in full",
                  "Copy a node object, give it a new id, change what you mean to change "
-                 "(prompt, reads, writes, produces, knobs), and use it as the `node` of an "
-                 "`add_node`, `insert_after`, `insert_before` or `wrap` edit. Knob bindings "
-                 "are left out of these copies: a new agent node gets its own "
+                 "(prompt, reads, writes, produces, knobs)"
+                 + (f", and use it as the `node` field of {_or_list(takers)}" if takers else "")
+                 + ". Knob bindings are left out of these copies: a new agent node gets its own "
                  "`<id>__system_prompt` knob holding its `system_prompt_template` and its own "
                  "`<id>__task` knob holding its `prompt_template`, and a "
                  "new node may not bind another node's knob. A field bound to a knob shows "
