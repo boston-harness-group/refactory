@@ -49,12 +49,11 @@ so an output folder or a settings file given with `--sample` is never emptied, a
 a path the graph writes is left alone. The check then judges the run:
 
 - it stopped with its own error (a non-zero exit): pass;
-- it exited 0 and every declared file it wrote is empty: pass. Empty means zero
-  bytes, or a CSV/TSV holding only its header row;
-- it exited 0 and wrote anything else: a repairable finding, sent back to the
-  builder, whatever the content says. This includes a "no input" report: no rule
-  can tell an honest status from a fabricated verdict, so a mode with no input must
-  stop with an error naming what is missing and write no results file.
+- it exited 0: a repairable finding, sent back to the builder, whatever it wrote
+  or reported. That includes empty files, a "no input" report, and a result that
+  lives only in facts and the score: no rule can tell an honest status from a
+  fabricated one, so a mode with no input must stop with an error naming what is
+  missing.
 
 The check is inconclusive when the run timed out, the model was unavailable, the
 mode could not be described, or an undeclared knob defaults to an existing path

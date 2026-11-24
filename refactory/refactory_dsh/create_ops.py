@@ -147,7 +147,7 @@ substitute: a run on invented data that exits 0 reads as a result and is not one
 When required input is missing or empty, the mode stops with an error naming what is
 missing (a non-zero exit) and writes no results file -- not even a report that there
 was no input. Canonical validation runs the mode once more with its input empty and
-refuses a mode that then exits 0 having written anything but empty files.
+refuses a mode that then exits 0, whatever it wrote or reported.
 
 An agent's reply is text, and a model wraps more than JSON around its answer: prose, a
 fence, even a tool-call transcript it invented. An operation that reads an agent's JSON

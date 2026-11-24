@@ -8,12 +8,11 @@ judges the run by what it did:
 
 * it stopped with an error of its own (a non-zero exit) -- **pass**, the mode refused to
   run without input;
-* it finished and every declared file it wrote is empty (`is_empty_output`: zero bytes,
-  or a CSV/TSV holding only its header) -- **pass**, it produced nothing;
-* it finished and wrote anything else -- **finding**, whatever the content says. A
-  "no input" report written on a zero exit is a finding too, on purpose: no rule can
-  tell an honest status from a fabricated verdict ("plate passes QC"), so a mode with
-  no input must stop with an error naming what is missing, and write no report;
+* it finished (exit 0) -- **finding**, whatever it wrote or reported: a file, an empty
+  file, a "no input" status, or nothing but facts and a score. No rule can tell an
+  honest status from a fabricated verdict ("plate passes QC"), and a fabricated result
+  need not be written to a file at all, so the one rule is the one the API states: a
+  mode with no input stops with an error naming what is missing;
 * it was stopped, could not start, or could not be described (a timeout, a missing
   model) -- **inconclusive**, recorded and warned about, not held against the mode.
 
@@ -64,9 +63,6 @@ DESCRIBE_TIMEOUT_S = 180
 
 #: The statuses a person is warned about: the check did not judge the mode.
 UNJUDGED = ("inconclusive", "not_applicable")
-
-#: Files read as tables: a header line and no rows is no result.
-_TABLE_SUFFIXES = (".csv", ".tsv")
 
 #: System locations: a default pointing under one names a tool, not input.
 _SYSTEM_PREFIXES = ("/usr", "/bin", "/sbin", "/opt", "/etc", "/Library", "/System",
@@ -246,34 +242,12 @@ def plan(
             "undeclared": undeclared}
 
 
-def is_empty_output(path: Path) -> bool:
-    """Whether a file the run wrote is empty: the one rule, mechanical on purpose.
-
-    Empty is zero bytes, or a ``.csv`` / ``.tsv`` holding at most its header line; a
-    folder is empty when every file in it is. Anything else is output -- a "no input"
-    status, a verdict, a single space -- because content can say anything, and a rule
-    that reads it can be talked past.
-    """
-    path = Path(path)
-    if path.is_dir():
-        return all(is_empty_output(child) for child in path.rglob("*") if child.is_file())
-    try:
-        data = path.read_bytes()
-    except OSError:
-        return False
-    if not data:
-        return True
-    if path.suffix.lower() in _TABLE_SUFFIXES:
-        try:
-            lines = [line for line in data.decode().splitlines() if line.strip()]
-        except UnicodeDecodeError:
-            return False
-        return len(lines) <= 1
-    return False
-
-
 def produced_results(workdir: Path, writes: list[str] | tuple[str, ...]) -> list[str]:
-    """The files the mode's graph declares that the run left in its directory."""
+    """The files the mode's graph declares that the run left in its directory.
+
+    Recorded in the receipt so a person sees what the run wrote; the verdict does not
+    depend on it.
+    """
     from refactory_dsh.nn.executor import ITEMS_OVERRIDE
 
     found: list[str] = []
@@ -286,12 +260,11 @@ def produced_results(workdir: Path, writes: list[str] | tuple[str, ...]) -> list
     return sorted(found)
 
 
-def verdict(*, ok: bool, timed_out: bool, error: str, results: list[str],
-            empty: list[str] | tuple[str, ...] = ()) -> tuple[str, str]:
+def verdict(*, ok: bool, timed_out: bool, error: str,
+            produced: list[str] | tuple[str, ...] = ()) -> tuple[str, str]:
     """``(status, reason)`` for one empty-input run; see the module docstring.
 
-    ``results`` are the declared files the run wrote with a result in them, ``empty``
-    the ones it wrote with none (`is_empty_output`).
+    ``produced`` only names, in the reason, the declared files the run wrote.
     """
     from refactory_dsh.authoring_evidence import failure_kind
 
@@ -302,18 +275,13 @@ def verdict(*, ok: bool, timed_out: bool, error: str, results: list[str],
         if kind != "code_failure":
             return "inconclusive", f"the empty-input run could not run ({kind}): {error}"
         return "pass", f"the mode stopped on empty input: {error or '(no message)'}"
-    if results:
-        return "finding", (
-            "with its input empty the mode finished and wrote results "
-            f"({', '.join(results)}). A created mode must not fabricate, simulate or "
-            "sample stand-in input data when its real input is missing or empty; it must "
-            "stop with an error that names the missing input and write no results file, "
-            "not even a report that there was no input"
-        )
-    if empty:
-        return "pass", ("the mode finished on empty input and wrote only empty files "
-                        f"({', '.join(empty)})")
-    return "pass", "the mode finished on empty input and wrote none of its declared files"
+    wrote = f" and wrote {', '.join(produced)}" if produced else ""
+    return "finding", (
+        f"with its input empty the mode exited 0{wrote}. A created mode must not "
+        "fabricate, simulate or sample stand-in input data when its real input is "
+        "missing or empty, nor report a result or a status in its place: it must stop "
+        "with an error that names the missing input (a non-zero exit)"
+    )
 
 
 def run(
@@ -372,14 +340,12 @@ def run(
     ok = result.ok and result.payload.get("exit_ok") is not False
     error = result.problem() if not result.ok else str(result.payload.get("error") or "")
     produced = produced_results(workdir, described.get("writes") or ())
-    empty = [name for name in produced if is_empty_output(workdir / name)]
-    results = [name for name in produced if name not in empty]
     status, reason = verdict(ok=ok, timed_out=result.timed_out, error=error,
-                             results=results, empty=empty)
+                             produced=produced)
     return {**receipt, "status": status, "reason": reason, "exit_ok": ok,
             "timed_out": result.timed_out, "returncode": result.returncode,
             "elapsed_s": result.elapsed_s, "run_timeout_s": remaining, "error": error,
-            "produced": produced, "results": results, "empty_outputs": empty,
+            "produced": produced,
             "knobs": planned["knobs"], "sources": planned["sources"]}
 
 

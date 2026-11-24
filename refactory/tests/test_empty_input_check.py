@@ -467,7 +467,7 @@ def test_a_declared_input_that_the_graph_writes_is_left_alone(tmp_path):
     assert "names a file the graph writes" in planned["kept"][0]
 
 
-# ── the one rule: on empty input, an error or empty files (M1) ───────────
+# ── the one rule: on empty input, only a non-zero exit passes (M1) ────────
 
 
 #: Results a mode wrote on empty input while saying, in words, that all was well or that
@@ -507,7 +507,7 @@ def test_any_report_on_empty_input_is_a_finding(tmp_path, project, plates, repor
     receipt = _run(project, tmp_path, f"{NAME}/plate", {"input_dir": str(plates)})
     assert receipt["exit_ok"] is True
     assert receipt["status"] == "finding", receipt
-    assert receipt["results"] == ["summary.json"]
+    assert receipt["produced"] == ["summary.json"]
 
 
 def test_a_short_markdown_verdict_is_a_finding(tmp_path, project, plates):
@@ -522,53 +522,51 @@ def test_a_short_markdown_verdict_is_a_finding(tmp_path, project, plates):
     ('ctx.write_text("summary.json", "")', "summary.json"),
     ('ctx.write_text("summary.csv", "well,value\\n")', "summary.csv"),
 ], ids=["zero-bytes", "csv-header"])
-def test_a_mode_that_writes_only_empty_files_passes(tmp_path, project, plates, write, writes):
+def test_a_mode_that_writes_only_empty_files_is_a_finding(tmp_path, project, plates, write,
+                                                          writes):
     _install(project, NAME, plate_files(NAME, _writes_on_empty(write), writes=writes))
     receipt = _run(project, tmp_path, f"{NAME}/plate", {"input_dir": str(plates)})
     assert receipt["exit_ok"] is True
-    assert receipt["status"] == "pass", receipt
-    assert receipt["empty_outputs"] == [writes] and receipt["results"] == []
+    assert receipt["status"] == "finding", receipt
+    assert receipt["produced"] == [writes]
 
 
-@pytest.mark.parametrize("name, content, empty", [
-    ("a.json", "", True),
-    ("a.csv", "well,value\n", True),
-    ("a.tsv", "well\tvalue\n\n", True),
-    ("a.csv", "well,value\nA1,0.5\n", False),
-    ("a.txt", " ", False),
-    ("a.json", "[]", False),
-    ("a.json", "{}", False),
-    ("a.json", '{"status": "no input", "reason": "input folder empty"}', False),
-    ("a.json", '{"status": "plate passes QC", "message": "all wells within range"}', False),
-    ("a.json", '{"status": "done", "passed": true}', False),
-    ("a.md", SHORT_SUMMARY, False),
-    ("a.md", "no input", False),
-])
-def test_what_counts_as_an_empty_output(tmp_path, name, content, empty):
-    path = tmp_path / name
-    path.write_text(content)
-    assert empty_input.is_empty_output(path) is empty
+def test_a_mode_that_exits_0_writing_nothing_is_a_finding(tmp_path, project, plates):
+    _install(project, NAME, plate_files(NAME, _writes_on_empty("pass")))
+    receipt = _run(project, tmp_path, f"{NAME}/plate", {"input_dir": str(plates)})
+    assert receipt["exit_ok"] is True and receipt["produced"] == []
+    assert receipt["status"] == "finding", receipt
+    assert "exited 0" in receipt["reason"]
 
 
-def test_a_folder_output_is_empty_only_when_every_file_is(tmp_path):
-    folder = tmp_path / "out"
-    (folder / "nested").mkdir(parents=True)
-    (folder / "nested" / "rows.csv").write_text("well,value\n")
-    (folder / "blank.json").write_text("")
-    assert empty_input.is_empty_output(folder)
-    (folder / "result.json").write_text("{}")
-    assert not empty_input.is_empty_output(folder)
+#: Fabricates its result into facts only: the score reads ``run.facts["rows"]``, and no
+#: declared file is written when the input is empty.
+FACTS_ONLY = _READ + '''
+
+def summarise(ctx):
+    tables = _tables(ctx)
+    if not tables:
+        return {"rows": 96}
+    rows = _rows(tables)
+    ctx.write_json("summary.json", {"tables": [t.name for t in tables], "rows": rows})
+    return {"rows": rows}
+'''
+
+
+def test_a_result_reported_only_through_facts_and_score_is_a_finding(tmp_path, project,
+                                                                      plates):
+    _install(project, NAME, plate_files(NAME, FACTS_ONLY))
+    receipt = _run(project, tmp_path, f"{NAME}/plate", {"input_dir": str(plates)})
+    assert receipt["exit_ok"] is True and receipt["produced"] == []
+    assert receipt["status"] == "finding", receipt
 
 
 @pytest.mark.parametrize("kwargs, status", [
-    ({"ok": True, "timed_out": False, "error": "", "results": ["out.json"]}, "finding"),
-    ({"ok": True, "timed_out": False, "error": "", "results": [], "empty": ["out.json"]},
-     "pass"),
-    ({"ok": True, "timed_out": False, "error": "", "results": []}, "pass"),
-    ({"ok": False, "timed_out": False, "error": "ValueError: no input", "results": []}, "pass"),
-    ({"ok": False, "timed_out": True, "error": "", "results": ["out.json"]}, "inconclusive"),
-    ({"ok": False, "timed_out": False, "error": "model completion failed", "results": []},
-     "inconclusive"),
+    ({"ok": True, "timed_out": False, "error": "", "produced": ["out.json"]}, "finding"),
+    ({"ok": True, "timed_out": False, "error": ""}, "finding"),
+    ({"ok": False, "timed_out": False, "error": "ValueError: no input"}, "pass"),
+    ({"ok": False, "timed_out": True, "error": "", "produced": ["out.json"]}, "inconclusive"),
+    ({"ok": False, "timed_out": False, "error": "model completion failed"}, "inconclusive"),
 ])
 def test_the_verdict(kwargs, status):
     assert empty_input.verdict(**kwargs)[0] == status
