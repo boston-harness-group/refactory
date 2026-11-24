@@ -7594,7 +7594,8 @@ class Loop(OuterLoop):
     def _graph_facts(self, board: list[Candidate], described: dict[str, Any]) -> list[str]:
         """`optim.base.graph_facts` for the request: each edit tried by `Run.mechanics` on
         the edited candidate (the seed when none is known), recording nothing and without
-        the code dry run (a sandbox process per edit)."""
+        the code dry run (a sandbox process per edit). A fact not worked out is said in
+        its row and journaled (``graph_facts_not_worked_out``)."""
         from .optim.base import graph_facts
 
         parent = self._edited_candidate(board) or Candidate.from_state(self.mode.state_dict())
@@ -7602,9 +7603,16 @@ class Loop(OuterLoop):
         catalogue = [op for op in nn_edits.catalogue(self.config.edit_preset)
                      if not self.config.allowed_ops or op["op"] in self.config.allowed_ops]
         knobs = [{"name": name, **spec} for name, spec in described["knobs"].items()]
-        return graph_facts(described.get("node_states", []), described["edges"], knobs,
-                           catalogue, lambda edit: run.mechanics(
-                               Proposal(edit=edit), parent, record=False, dry_run_code=False))
+        failures: list[dict[str, str]] = []
+        facts = graph_facts(described.get("node_states", []), described["edges"], knobs,
+                            catalogue, lambda edit: run.mechanics(
+                                Proposal(edit=edit), parent, record=False, dry_run_code=False),
+                            failures)
+        if failures:
+            # Said in the request's rows too; journaled so the run's record keeps it.
+            self._journal("graph_facts_not_worked_out", candidate=parent.id,
+                          failures=failures)
+        return facts
 
     def _describe_parent(self, board: list[Candidate]) -> tuple[dict[str, Any], str]:
         """The graph and knobs of the candidate this step edits, and a note when not.

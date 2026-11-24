@@ -2086,7 +2086,9 @@ branch of each fork can see (`name@maker`, `(+knob k)` for an output that carrie
 knob `k`), and for each step whether removing it, replacing it by one step that sees the
 task, or merging it with the step after it is refused, in the attempt's own words
 (`Run.mechanics` on the edited candidate, without the code dry run). Accepted edits are
-not listed.
+not listed. A fact that cannot be worked out (the attempt raises, the graph or its task
+inputs do not read back) is said in its row, `not worked out (<error>)`, never left
+out, and journaled as `graph_facts_not_worked_out` with each failure.
 
 ### Wiring blocks, repair and checks before scoring
 

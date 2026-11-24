@@ -1538,7 +1538,8 @@ class ProposalContext:
             *(["### What this graph allows",
                "Worked out on the pipeline you edit, by an attempt of each edit: what a new "
                "step's `sees` can name, and which removals, replacements and merges are "
-               "refused, with why.", *self.graph_facts, ""] if self.graph_facts else []),
+               "refused, with why; one that could not be worked out says so. An edit not "
+               "listed for a step was accepted.", *self.graph_facts, ""] if self.graph_facts else []),
             *_node_reference(self),
             "### The rules the validator checks",
             "Every proposal is checked against these rules before anything runs; they are "
@@ -2305,29 +2306,46 @@ def _fork_inputs(fork_id: str, state: dict[str, Any]) -> str:
 
 def graph_facts(node_states: Sequence[dict[str, Any]], edges: Sequence[dict[str, Any]],
                 knobs: Sequence[Mapping[str, Any]], catalogue: Sequence[Mapping[str, Any]],
-                check: Callable[[dict[str, Any]], Any]) -> list[str]:
+                check: Callable[[dict[str, Any]], Any],
+                failures: list[dict[str, str]] | None = None) -> list[str]:
     """Facts about this graph an edit is written against, worked out once by the loop
     and carried as data (``ProposalContext.graph_facts``): what ``"sees": ["task"]``
     gives a new step, what a new branch of each fork can see (`_fork_inputs`), and for
     each step the refusal ``check`` (an attempt's verdict on the edited candidate) gives
     to removing it, replacing it by one step that sees the task, and merging it with the
-    step after it. Facts only; accepted edits are not listed. Nothing when the run
-    permits no core operator or the graph does not read back."""
-    from refactory_dsh.nn.core_ops import TASK, _readable, _Refused, _task_inputs
+    step after it. Accepted edits are not listed. A fact that cannot be worked out is
+    said so in its row (``not worked out (<error>)``), never left out, and appended to
+    ``failures`` (``{"fact", "step", "error"}``) for the run's journal. Nothing when the
+    run permits no core operator."""
+    from refactory_dsh.nn.core_ops import TASK, _readable, _task_inputs
     from refactory_dsh.nn.graph import Graph
     from refactory_dsh.nn.operators import TASK_MEANING
 
+    failed = failures if failures is not None else []
+
+    def not_worked_out(fact: str, step: str, exc: Exception) -> str:
+        error = f"{type(exc).__name__}: {exc}"
+        failed.append({"fact": fact, "step": step, "error": error})
+        return f"{fact} not worked out ({error})"
+
     ops = {op.get("op") for op in catalogue} & set(CORE_OPERATORS)
-    state = _fit_state(node_states, edges, knobs) if ops else None
-    if state is None:
+    if not ops:
         return []
-    graph = Graph.from_state(state["graph"])
+    try:
+        state = _fit_state(node_states, edges, knobs)
+        if state is None:
+            raise ValueError("the graph does not read back")
+        graph = Graph.from_state(state["graph"])
+    except Exception as exc:  # noqa: BLE001 - said in the section and journaled
+        return [f"- The graph's facts are {not_worked_out('the graph', '', exc)}."]
     out: list[str] = []
     try:
         task = sorted(_readable(graph, state, _task_inputs(graph, state)),
                       key=lambda key: (key[0] != "fact", key[1]))
-    except _Refused:
+    except Exception as exc:  # noqa: BLE001 - said in the section and journaled
         task = []
+        out.append(f"- What `\"sees\": [\"{TASK}\"]` gives is "
+                   f"{not_worked_out('the task inputs', '', exc)}.")
     if task:
         out.append(f"- `\"sees\": [\"{TASK}\"]` gives a new step "
                    f"{', '.join(name for _k, name in task)}, where it is there before the "
@@ -2353,11 +2371,8 @@ def graph_facts(node_states: Sequence[dict[str, Any]], edges: Sequence[dict[str,
                 continue
             try:
                 verdict = check(edit)
-            except Exception as exc:  # noqa: BLE001 - a fact not established is not said
-                import logging
-
-                logging.getLogger(__name__).warning("graph fact for %s on %s not worked out: %s",
-                                                    label, node_id, exc)
+            except Exception as exc:  # noqa: BLE001 - said in the row and journaled
+                refused.append(not_worked_out(label, node_id, exc))
                 continue
             if isinstance(verdict, list):
                 reason = "; ".join(str(r).removeprefix("E-precondition: ") for r in verdict)

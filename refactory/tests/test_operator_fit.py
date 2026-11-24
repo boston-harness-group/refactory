@@ -206,3 +206,75 @@ def test_the_facts_give_each_refusal_in_the_attempts_own_words():
     state = _start_state()
     check = _check(state)
     assert isinstance(check({"op": "remove", "step": "compare"}), list)
+
+
+def test_a_fact_that_cannot_be_worked_out_says_so_and_is_kept_for_the_journal():
+    """An attempt that raises leaves a "not worked out" row, never a missing one (which
+    would read as accepted); each failure is handed back for the run's journal."""
+    from refactory_dsh.optim import base
+    from refactory_dsh.optim.memory import state_view
+
+    def broken(edit):
+        raise RuntimeError("no verdict")
+
+    view = state_view(_start_state())
+    failures: list = []
+    facts = base.graph_facts(view.node_states, view.edges, view.knobs,
+                             nn_edits.catalogue("broad"), broken, failures)
+    steps = [n for n, s in _start_state()["graph"]["nodes"].items()
+             if s.get("kind") in ("agent", "op")]
+    for step in steps:
+        row = next(line for line in facts if line.startswith(f"- `{step}`:"))
+        assert "remove not worked out (RuntimeError: no verdict)" in row, row
+    assert failures and {f["step"] for f in failures} == set(steps)
+    assert all(f["error"] == "RuntimeError: no verdict" for f in failures)
+
+
+def test_a_graph_or_task_input_that_does_not_read_back_says_so(monkeypatch):
+    from refactory_dsh.nn import core_ops as ops_mod
+    from refactory_dsh.nn.graph import Graph
+    from refactory_dsh.optim import base
+    from refactory_dsh.optim.memory import state_view
+
+    view = state_view(_start_state())
+    args = (view.node_states, view.edges, view.knobs, nn_edits.catalogue("broad"),
+            _check(_start_state()))
+
+    def boom(*_a, **_k):
+        raise ValueError("unreadable")
+
+    monkeypatch.setattr(ops_mod, "_task_inputs", boom)
+    failures: list = []
+    facts = base.graph_facts(*args, failures)
+    assert facts[0] == ('- What `"sees": ["task"]` gives is the task inputs not worked out '
+                        "(ValueError: unreadable).")
+    assert failures[0]["fact"] == "the task inputs"
+    monkeypatch.setattr(Graph, "from_state", boom)
+    failures = []
+    facts = base.graph_facts(*args, failures)
+    assert len(facts) == 1 and facts[0].startswith(
+        "- The graph's facts are the graph not worked out (ValueError: "), facts
+    assert [f["fact"] for f in failures] == ["the graph"]
+
+
+def test_the_loop_journals_a_fact_it_could_not_work_out(tmp_path, monkeypatch):
+    import json
+
+    from refactory_dsh import strategies
+    from refactory_dsh.loop import LoopConfig
+    from refactory_dsh.outerloop import Run
+
+    def broken(self, *args, **kwargs):
+        raise RuntimeError("no verdict")
+
+    monkeypatch.setattr(Run, "mechanics", broken)
+    loop = strategies.create("default", MODE, LoopConfig(
+        epochs=1, batch_size=1, optimizer="random", seed=1, runs_root=tmp_path,
+        edit_preset="broad"), project=Path("."))
+    seed = Candidate.from_state(loop.mode.state_dict())
+    loop.population.append(seed)
+    ctx = loop._context()
+    assert any("not worked out (RuntimeError: no verdict)" in line for line in ctx.graph_facts)
+    events = [json.loads(line) for line in (loop.root / "journal.jsonl").read_text().splitlines()]
+    journaled = [e for e in events if e["event"] == "graph_facts_not_worked_out"]
+    assert journaled and journaled[-1]["failures"][0]["error"] == "RuntimeError: no verdict"
