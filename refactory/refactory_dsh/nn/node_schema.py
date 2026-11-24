@@ -46,8 +46,10 @@ _CONSTRAINED: dict[str, dict[str, Any]] = {
 #: Node fields only the edit layer sets, never a proposal (`optim.base.proposal_refusal`
 #: refuses them): left out of the schemas the optimizer reads. ``renames`` records what
 #: a code step's run stores its returned outputs under, set by the core operators that
-#: give its outputs new names (`core_ops._output_renames`).
-INTERNAL_FIELDS = frozenset({"renames"})
+#: give its outputs new names (`core_ops._output_renames`). ``sealed_script`` marks a code
+#: node that runs sealed in the Task's tool environment, set by the core operators when the
+#: proposer says ``sealed: true`` on a code step.
+INTERNAL_FIELDS = frozenset({"renames", "sealed_script"})
 
 
 def _fields() -> list[dataclasses.Field]:

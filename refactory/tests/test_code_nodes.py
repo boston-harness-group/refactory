@@ -845,6 +845,699 @@ def test_spine_relooops_like_the_walker(monkeypatch, tmp_path):
     assert sf._compared_facts(graph, walked.facts) == sf._compared_facts(graph, spine_facts)
 
 
+# ── sealed script steps ──────────────────────────────────────────────────
+
+
+#: A sealed code op after ``compare`` that checks the notes file has content.
+SEALED_DIGEST = {"op": "insert_after", "target": "compare",
+                 "node": {"id": "digest", "kind": "op", "call": snippet.RUN,
+                          "reads": ["compare_notes.txt"], "required_reads": ["compare_notes.txt"],
+                          "produces": ["compare_digest"], "writes": ["digest.txt"],
+                          "sealed_script": True,
+                          "code": ("def main(inp):\n"
+                                   "    text = inp['files']['compare_notes.txt']\n"
+                                   "    return {'facts': {'compare_digest': 'DIGEST:' + str(len(text))},\n"
+                                   "            'files': {'digest.txt': str(len(text))}}\n")}}
+
+SEALED_INSERT = {"op": "insert", "after": "compare", "kind": "code", "sealed": True,
+                 "takes_over": "compare"}
+
+
+def test_sealed_script_field_round_trips_through_node_state():
+    node = Node("c", "op", call=snippet.RUN, sealed_script=True,
+                code="def main(inp):\n    return {}\n", inputs=("x",))
+    state = node.to_state()
+    assert state.get("sealed_script") is True
+    back = Node.from_state(state)
+    assert back.sealed_script is True
+    plain = Node("p", "op", call=snippet.RUN, code="def main(inp):\n    return {}\n")
+    assert plain.sealed_script is False
+    assert "sealed_script" not in plain.to_state()
+
+
+def test_v18_exempts_sealed_script_from_the_import_allowlist():
+    """A sealed script node may import any module (the seal is the boundary); V18 only
+    checks that it has code, that the code parses, and that it defines main."""
+    code_openpyxl = ("import openpyxl\n"
+                     "def main(inp):\n    return {'facts': {'x': 'y'}}\n")
+    assert snippet.static_issues(code_openpyxl), "unsealed: openpyxl would be refused"
+    graph = Graph.from_nodes([
+        Node("a", "op", call=snippet.RUN, sealed_script=True, code=code_openpyxl,
+             produces=("x",)),
+    ], [], "a")
+    issues = validate_state({"graph": graph.to_state(), "knobs": {}})
+    assert not any(i.code == "V18" for i in issues), issues
+
+
+def test_v18_still_requires_sealed_script_has_code_and_parses():
+    """Even a sealed script node must have code that parses and defines main."""
+    for bad_code in ("", "   ", "this is not python +++"):
+        graph = Graph.from_nodes([
+            Node("a", "op", call=snippet.RUN, sealed_script=True, code=bad_code,
+                 produces=("x",)),
+        ], [], "a")
+        issues = validate_state({"graph": graph.to_state(), "knobs": {}})
+        assert any(i.code == "V18" for i in issues), (bad_code, issues)
+
+
+def test_unsealed_code_nodes_still_check_imports():
+    """Unsealed code nodes still go through static_issues and are refused bad imports."""
+    code = "import subprocess\ndef main(inp):\n    return {}\n"
+    graph = Graph.from_nodes([
+        Node("a", "op", call=snippet.RUN, code=code, produces=("x",)),
+    ], [], "a")
+    issues = validate_state({"graph": graph.to_state(), "knobs": {}})
+    assert any(i.code == "V18" for i in issues), issues
+
+
+def test_sealed_code_insert_sets_sealed_script_on_the_node():
+    """The core operator ``insert`` with ``sealed: true`` and ``kind: code`` creates a
+    code op with ``sealed_script: true``."""
+    state = _accepted([SEALED_INSERT])
+    new = [nid for nid in state["graph"]["nodes"] if nid not in _applier().seed_state["graph"]["nodes"]]
+    assert len(new) == 1
+    node_state = state["graph"]["nodes"][new[0]]
+    assert node_state.get("sealed_script") is True
+    assert node_state.get("call") == snippet.RUN
+
+
+def test_sealed_code_loop_sets_sealed_script_on_the_gate():
+    """``loop`` with ``judge: code`` and ``sealed: true`` creates a code gate with
+    ``sealed_script: true``."""
+    state = _accepted([{"op": "loop", "step": "decide", "judge": "code", "sealed": True}])
+    graph = sf._graph_of(state)
+    gates = [n for n in graph.nodes.values() if n.kind == "gate" and n.evaluator == snippet.GATE]
+    assert len(gates) == 1
+    assert gates[0].sealed_script is True
+
+
+def test_sealed_code_route_sets_sealed_script_on_the_gate():
+    """``route`` with ``judge: code`` and ``sealed: true`` creates a code gate with
+    ``sealed_script: true``."""
+    state = _accepted([
+        {"op": "insert", "after": "compare", "kind": "code", "takes_over": "compare"},
+        {"op": "route", "after": "compare", "judge": "code", "sealed": True},
+    ])
+    graph = sf._graph_of(state)
+    gates = [n for n in graph.nodes.values() if n.kind == "gate" and n.evaluator == snippet.GATE]
+    assert len(gates) == 1
+    assert gates[0].sealed_script is True
+
+
+def test_lowering_carries_sealed_script_to_spine_declarations():
+    """The lowered declarations carry ``sealed_script: true`` for the spine runner."""
+    state = _accepted([SEALED_INSERT])
+    declared = lowering.node_declarations(state)
+    sealed_nodes = [nid for nid, decl in declared.items()
+                    if decl.get("snippet", {}).get("sealed_script")]
+    assert len(sealed_nodes) == 1
+
+
+def test_spec_includes_sealed_script():
+    """``snippet.spec`` includes ``sealed_script: true`` when the node has it."""
+    node = Node("c", "op", call=snippet.RUN, sealed_script=True,
+                code="def main(inp):\n    return {}\n")
+    s = snippet.spec(node, [])
+    assert s.get("sealed_script") is True
+    plain = Node("p", "op", call=snippet.RUN, code="def main(inp):\n    return {}\n")
+    assert "sealed_script" not in snippet.spec(plain, [])
+
+
+def test_sealed_script_is_internal_and_hidden_from_proposals():
+    """``sealed_script`` is in ``INTERNAL_FIELDS``: the node schema the proposer reads
+    does not mention it."""
+    from refactory_dsh.nn.node_schema import INTERNAL_FIELDS, render_schema
+
+    assert "sealed_script" in INTERNAL_FIELDS
+    text = "\n".join(render_schema())
+    assert "sealed_script" not in text
+
+
+# ── sealed script execution ──────────────────────────────────────────────
+
+_TOOL_ENV_TASK_REF = "item_files_ops:ToolEnvTask"
+
+
+def _sealed_pass(tmp_path: Path) -> Path:
+    """A fake item pass whose Task declares a tool environment (the test interpreter)."""
+    pass_dir = tmp_path / "run" / "passes" / "data" / "item_1"
+    pass_dir.mkdir(parents=True)
+    (pass_dir / ".refactory").mkdir()
+    (pass_dir / ".refactory" / "pass.json").write_text(
+        json.dumps({"task": _TOOL_ENV_TASK_REF}))
+    (pass_dir / ".refactory" / "workspaces").mkdir()
+    return pass_dir
+
+
+@needs_sandbox
+def test_sealed_execute_runs_code_in_the_task_interpreter(tmp_path):
+    """sealed_execute runs code with the task's Python, reads declared files, returns a
+    result — the basic contract."""
+    pass_dir = _sealed_pass(tmp_path)
+    (pass_dir / "data.txt").write_text("hello world")
+    code = ("def main(inp):\n"
+            "    text = open('data.txt').read()\n"
+            "    return {'facts': {'length': len(text)}, 'files': {'out.txt': text.upper()}}\n")
+    result = snippet.sealed_execute(code, {"files": {}, "facts": {}},
+                                    workdir=pass_dir, node_id="digest",
+                                    reads=["data.txt"])
+    assert result["facts"]["length"] == 11
+    assert result["files"]["out.txt"] == "HELLO WORLD"
+
+
+@needs_sandbox
+def test_sealed_execute_imports_packages_the_task_interpreter_has(tmp_path):
+    """The sealed script can import packages from the task's interpreter (not just the
+    stdlib): this is the whole point — openpyxl, pandas, etc."""
+    pass_dir = _sealed_pass(tmp_path)
+    code = ("import json, pathlib\n"
+            "def main(inp):\n"
+            "    return {'facts': {'has_pathlib': str(pathlib.Path('.').resolve())}}\n")
+    result = snippet.sealed_execute(code, {"files": {}, "facts": {}},
+                                    workdir=pass_dir, node_id="check",
+                                    reads=[])
+    assert result["facts"]["has_pathlib"]
+
+
+@needs_sandbox
+@linux_only
+def test_sealed_script_cannot_read_the_run_root(tmp_path):
+    """The sealed script has no access to the run root (same refusal as sealed tool steps):
+    trying to open a file there fails."""
+    pass_dir = _sealed_pass(tmp_path)
+    run_root = tmp_path / "run"
+    secret = run_root / "secret.txt"
+    secret.write_text("CONFIDENTIAL")
+    code = (f"def main(inp):\n"
+            f"    return {{'facts': {{'data': open({str(secret)!r}).read()}}}}\n")
+    with pytest.raises(snippet.SnippetError):
+        snippet.sealed_execute(code, {"files": {}, "facts": {}},
+                               workdir=pass_dir, node_id="snoop",
+                               reads=[])
+
+
+@needs_sandbox
+@linux_only
+def test_sealed_script_cannot_read_other_items(tmp_path):
+    """The sealed script cannot read another item's directory (same refusal as sealed tool
+    steps: other items are under the run root, which is hidden)."""
+    pass_dir = _sealed_pass(tmp_path)
+    other_item = tmp_path / "run" / "passes" / "data" / "item_2"
+    other_item.mkdir(parents=True)
+    (other_item / "secret.txt").write_text("other item's data")
+    code = (f"def main(inp):\n"
+            f"    return {{'facts': {{'data': open({str(other_item / 'secret.txt')!r}).read()}}}}\n")
+    with pytest.raises(snippet.SnippetError):
+        snippet.sealed_execute(code, {"files": {}, "facts": {}},
+                               workdir=pass_dir, node_id="snoop",
+                               reads=[])
+
+
+@needs_sandbox
+@linux_only
+def test_sealed_script_has_no_network(tmp_path):
+    """The sealed script cannot connect to the network."""
+    pass_dir = _sealed_pass(tmp_path)
+    code = ("import socket\n"
+            "def main(inp):\n"
+            "    socket.create_connection(('1.1.1.1', 80), timeout=3)\n")
+    with pytest.raises(snippet.SnippetError):
+        snippet.sealed_execute(code, {"files": {}, "facts": {}},
+                               workdir=pass_dir, node_id="net",
+                               reads=[])
+
+
+@needs_sandbox
+def test_sealed_script_only_sees_declared_reads(tmp_path):
+    """The sealed script can read declared reads but not undeclared files in the workdir."""
+    pass_dir = _sealed_pass(tmp_path)
+    (pass_dir / "visible.txt").write_text("I am visible")
+    (pass_dir / "invisible.txt").write_text("I am invisible")
+    code = ("import os\n"
+            "def main(inp):\n"
+            "    visible = os.path.exists('visible.txt')\n"
+            "    invisible = os.path.exists('invisible.txt')\n"
+            "    return {'facts': {'visible': visible, 'invisible': invisible}}\n")
+    result = snippet.sealed_execute(code, {"files": {}, "facts": {}},
+                                    workdir=pass_dir, node_id="check",
+                                    reads=["visible.txt"])
+    assert result["facts"]["visible"] is True
+    assert result["facts"]["invisible"] is False
+
+
+def test_sealed_execute_refuses_when_task_has_no_tool_environment(tmp_path):
+    """When the Task declares no tool environment, sealed_execute raises with a clear
+    message so the item fails explicitly (not silently)."""
+    pass_dir = tmp_path / "run" / "passes" / "data" / "item_1"
+    pass_dir.mkdir(parents=True)
+    (pass_dir / ".refactory").mkdir()
+    (pass_dir / ".refactory" / "pass.json").write_text(
+        json.dumps({"task": "item_files_ops:FileTask"}))
+    (pass_dir / ".refactory" / "workspaces").mkdir()
+    code = "def main(inp):\n    return {}\n"
+    with pytest.raises(snippet.SnippetError, match="no tool environment"):
+        snippet.sealed_execute(code, {"files": {}, "facts": {}},
+                               workdir=pass_dir, node_id="x", reads=[])
+
+
+@needs_sandbox
+def test_sealed_script_crash_fails_explicitly(tmp_path):
+    """A sealed script that raises fails the item explicitly with the error."""
+    pass_dir = _sealed_pass(tmp_path)
+    code = ("def main(inp):\n"
+            "    raise ValueError('deliberate failure for testing')\n")
+    with pytest.raises(snippet.SnippetError, match="deliberate failure"):
+        snippet.sealed_execute(code, {"files": {}, "facts": {}},
+                               workdir=pass_dir, node_id="crash", reads=[])
+
+
+@needs_sandbox
+def test_sealed_script_verdict_for_gate(tmp_path):
+    """A sealed script used as a gate returns a verdict dict that checked_verdict accepts."""
+    pass_dir = _sealed_pass(tmp_path)
+    (pass_dir / "output.txt").write_text("the answer is 42")
+    code = ("def main(inp):\n"
+            "    text = open('output.txt').read()\n"
+            "    if '42' in text:\n"
+            "        return {'verdict': 'proceed', 'reason': 'answer found'}\n"
+            "    return {'verdict': 'reloop', 'reason': 'answer missing'}\n")
+    result = snippet.sealed_execute(code, {"files": {}, "facts": {}},
+                                    workdir=pass_dir, node_id="gate",
+                                    reads=["output.txt"])
+    assert result["verdict"] == "proceed"
+    assert result["reason"] == "answer found"
+
+
+@needs_sandbox
+def test_sealed_script_verdict_reloop(tmp_path):
+    """A sealed gate that returns 'reloop' — the loop should honour it."""
+    pass_dir = _sealed_pass(tmp_path)
+    (pass_dir / "output.txt").write_text("no answer here")
+    code = ("def main(inp):\n"
+            "    text = open('output.txt').read()\n"
+            "    if '42' in text:\n"
+            "        return {'verdict': 'proceed', 'reason': 'answer found'}\n"
+            "    return {'verdict': 'reloop', 'reason': 'answer missing'}\n")
+    result = snippet.sealed_execute(code, {"files": {}, "facts": {}},
+                                    workdir=pass_dir, node_id="gate",
+                                    reads=["output.txt"])
+    assert result["verdict"] == "reloop"
+
+
+@needs_sandbox
+def test_unsealed_code_still_refuses_non_allowed_imports_at_runtime():
+    """The existing sandbox still refuses imports outside the allowlist: a regression
+    guard ensuring the sealed path is an addition, not a relaxation."""
+    code = "import subprocess\ndef main(inp):\n    return {}\n"
+    with pytest.raises(snippet.SnippetError, match="V18"):
+        snippet.execute(code, {"files": {}, "facts": {}})
+
+
+@needs_sandbox
+@linux_only
+def test_sealed_script_cannot_read_golden_data(tmp_path):
+    """The sealed script cannot read golden/prepared data directories: they sit under the
+    run root, which the seal hides."""
+    pass_dir = _sealed_pass(tmp_path)
+    golden = tmp_path / "run" / "golden" / "answers.txt"
+    golden.parent.mkdir(parents=True)
+    golden.write_text("GOLD ANSWER")
+    code = (f"def main(inp):\n"
+            f"    return {{'facts': {{'data': open({str(golden)!r}).read()}}}}\n")
+    with pytest.raises(snippet.SnippetError):
+        snippet.sealed_execute(code, {"files": {}, "facts": {}},
+                               workdir=pass_dir, node_id="snoop", reads=[])
+
+
+@needs_sandbox
+@linux_only
+def test_sealed_script_cannot_read_run_root(tmp_path):
+    """The sealed script cannot read the run root (the parent of items' pass dirs)."""
+    pass_dir = _sealed_pass(tmp_path)
+    secret = tmp_path / "run" / "secret.txt"
+    secret.write_text("RUN ROOT SECRET")
+    code = (f"def main(inp):\n"
+            f"    return {{'facts': {{'data': open({str(secret)!r}).read()}}}}\n")
+    with pytest.raises(snippet.SnippetError):
+        snippet.sealed_execute(code, {"files": {}, "facts": {}},
+                               workdir=pass_dir, node_id="snoop3", reads=[])
+
+
+@needs_sandbox
+@linux_only
+def test_sealed_script_cannot_read_another_items_pass(tmp_path):
+    """The sealed script cannot read a sibling item's pass directory."""
+    pass_dir = _sealed_pass(tmp_path)
+    sibling = tmp_path / "run" / "passes" / "data" / "item_2"
+    sibling.mkdir(parents=True)
+    (sibling / "answer.txt").write_text("SIBLING SECRET")
+    code = (f"def main(inp):\n"
+            f"    return {{'facts': {{'data': open({str(sibling / 'answer.txt')!r}).read()}}}}\n")
+    with pytest.raises(snippet.SnippetError):
+        snippet.sealed_execute(code, {"files": {}, "facts": {}},
+                               workdir=pass_dir, node_id="snoop2", reads=[])
+
+
+@needs_sandbox
+@linux_only
+def test_sealed_script_cannot_open_network_socket(tmp_path):
+    """The sealed script runs in a network namespace with no interfaces: socket connect fails."""
+    pass_dir = _sealed_pass(tmp_path)
+    code = ("import socket\n"
+            "def main(inp):\n"
+            "    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)\n"
+            "    s.settimeout(2)\n"
+            "    s.connect(('1.1.1.1', 53))\n"
+            "    return {'facts': {'connected': True}}\n")
+    with pytest.raises(snippet.SnippetError):
+        snippet.sealed_execute(code, {"files": {}, "facts": {}},
+                               workdir=pass_dir, node_id="net", reads=[])
+
+
+@needs_sandbox
+@linux_only
+def test_sealed_script_cannot_read_home(tmp_path):
+    """The sealed script cannot read personal files in the home directory. The seal's new
+    root has only the directory tree leading to the interpreter (empty scaffold
+    directories), not dotfiles like ``.bashrc``, ``.ssh``, ``.config``."""
+    pass_dir = _sealed_pass(tmp_path)
+    real_home = os.path.realpath(Path.home())
+    real_dotfiles = {e for e in os.listdir(real_home) if e.startswith(".")}
+    assert real_dotfiles, "setup: test expects the real home to have dotfiles"
+    code = (f"import os, json\n"
+            f"def main(inp):\n"
+            f"    try:\n"
+            f"        entries = os.listdir({real_home!r})\n"
+            f"    except FileNotFoundError:\n"
+            f"        entries = []\n"
+            f"    return {{'facts': {{'entries': json.dumps(entries)}}}}\n")
+    result = snippet.sealed_execute(code, {"files": {}, "facts": {}},
+                                    workdir=pass_dir, node_id="home", reads=[])
+    sealed_entries = set(json.loads(result["facts"]["entries"]))
+    leaked = sealed_entries & real_dotfiles
+    assert not leaked, f"home dotfiles visible inside the seal: {sorted(leaked)}"
+
+
+@needs_sandbox
+def test_sealed_script_timeout_surfaces_as_explicit_error(tmp_path, monkeypatch):
+    """A sealed script exceeding its wall-clock limit is killed and the error names the
+    limit, not a silent failure."""
+    pass_dir = _sealed_pass(tmp_path)
+    code = ("def main(inp):\n"
+            "    while True:\n        pass\n")
+    with pytest.raises(snippet.SnippetError, match="over its 2 s limit"):
+        snippet.sealed_execute(code, {"files": {}, "facts": {}},
+                               workdir=pass_dir, node_id="spin", reads=[],
+                               timeout_s=2)
+
+
+@needs_sandbox
+@linux_only
+def test_sealed_script_timeout_leaves_no_process_behind(tmp_path):
+    """A sealed script that starts a sleeping child and then spins is killed at its wall
+    clock, and its child goes with it (PID namespace, process group)."""
+    pass_dir = _sealed_pass(tmp_path)
+    marker = _marker()
+    code = ("import subprocess\n"
+            "def main(inp):\n"
+            f"    subprocess.Popen(['/bin/sleep', '{marker}'], start_new_session=True)\n"
+            "    while True:\n        pass\n")
+    with pytest.raises(snippet.SnippetError, match="over its 2 s limit"):
+        snippet.sealed_execute(code, {"files": {}, "facts": {}},
+                               workdir=pass_dir, node_id="spin", reads=[],
+                               timeout_s=2)
+    assert _host_processes(f"sleep {marker}") == []
+
+
+@needs_sandbox
+@linux_only
+def test_sealed_script_memory_limit_surfaces_as_explicit_error(tmp_path, monkeypatch):
+    """A sealed script that exceeds the memory cap is killed and surfaces as a
+    SnippetError, not a silent failure. Uses a tight per-process limit (256 MB)."""
+    from refactory_dsh import seal
+    monkeypatch.setattr(seal, "LINUX_LIMITS_UNSCOPED", "-u 128 -v 262144")
+    monkeypatch.setattr(seal, "LINUX_LIMITS", "-u 512 -v 262144")
+    pass_dir = _sealed_pass(tmp_path)
+    code = ("def main(inp):\n"
+            "    blocks = []\n"
+            "    while True:\n"
+            "        blocks.append(bytearray(64 * 1024 * 1024))\n")
+    with pytest.raises(snippet.SnippetError, match="MemoryError|did not finish"):
+        snippet.sealed_execute(code, {"files": {}, "facts": {}},
+                               workdir=pass_dir, node_id="oom", reads=[],
+                               timeout_s=30)
+
+
+def test_sealed_execute_and_workspace_share_tool_path_from_environment():
+    """Both the sealed script path (snippet.sealed_execute) and the sealed agent step path
+    (workspace._tool_path) go through seal.tool_path_from_environment, not their own
+    unpacking of ToolEnvironment."""
+    from refactory_dsh import seal, workspace as ws_mod
+    import inspect
+
+    src_snippet = inspect.getsource(snippet.sealed_execute)
+    src_workspace = inspect.getsource(ws_mod._tool_path)
+    assert "tool_path_from_environment" in src_snippet, \
+        "snippet.sealed_execute should call seal.tool_path_from_environment"
+    assert "tool_path_from_environment" in src_workspace, \
+        "workspace._tool_path should call seal.tool_path_from_environment"
+    for src in (src_snippet, src_workspace):
+        assert "environment.python()" not in src, \
+            "should not unpack ToolEnvironment directly"
+
+
+def _private_tmp_pass(tmp_path: Path) -> Path:
+    """A fake item pass whose Task has private_tmp=True."""
+    pass_dir = tmp_path / "run" / "passes" / "data" / "item_1"
+    pass_dir.mkdir(parents=True)
+    (pass_dir / ".refactory").mkdir()
+    (pass_dir / ".refactory" / "pass.json").write_text(
+        json.dumps({"task": "item_files_ops:PrivateTmpTask"}))
+    (pass_dir / ".refactory" / "workspaces").mkdir()
+    return pass_dir
+
+
+@needs_sandbox
+@linux_only
+def test_sealed_script_private_tmp_is_writable(tmp_path):
+    """A sealed script whose Task declares private_tmp gets a writable /tmp: it can create
+    directories and files there, as sealed agent steps can."""
+    pass_dir = _private_tmp_pass(tmp_path)
+    code = ("import os\n"
+            "def main(inp):\n"
+            "    os.makedirs('/tmp/sub')\n"
+            "    open('/tmp/sub/f.txt', 'w').write('ok')\n"
+            "    return {'facts': {'written': open('/tmp/sub/f.txt').read()}}\n")
+    result = snippet.sealed_execute(code, {"files": {}, "facts": {}},
+                                    workdir=pass_dir, node_id="tmpw", reads=[])
+    assert result["facts"]["written"] == "ok"
+
+
+@needs_sandbox
+@linux_only
+def test_sealed_script_private_tmp_is_fresh_each_run(tmp_path):
+    """Each sealed_execute gets its own /tmp: a file written in the first run is not visible
+    in the second."""
+    pass_dir = _private_tmp_pass(tmp_path)
+    write_code = ("def main(inp):\n"
+                  "    open('/tmp/marker.txt', 'w').write('first')\n"
+                  "    return {'facts': {'done': 'yes'}}\n")
+    snippet.sealed_execute(write_code, {"files": {}, "facts": {}},
+                           workdir=pass_dir, node_id="w1", reads=[])
+    check_code = ("import os\n"
+                  "def main(inp):\n"
+                  "    return {'facts': {'exists': str(os.path.exists('/tmp/marker.txt'))}}\n")
+    result = snippet.sealed_execute(check_code, {"files": {}, "facts": {}},
+                                    workdir=pass_dir, node_id="w2", reads=[])
+    assert result["facts"]["exists"] == "False"
+
+
+@needs_sandbox
+@linux_only
+def test_sealed_script_without_private_tmp_has_readonly_tmp(tmp_path):
+    """A sealed script whose Task does NOT declare private_tmp gets a read-only /tmp:
+    removing the private_tmp binding from tool_path_from_environment is caught."""
+    pass_dir = _sealed_pass(tmp_path)
+    code = ("import os\n"
+            "def main(inp):\n"
+            "    os.makedirs('/tmp/sub')\n"
+            "    return {'facts': {'done': 'yes'}}\n")
+    with pytest.raises(snippet.SnippetError):
+        snippet.sealed_execute(code, {"files": {}, "facts": {}},
+                               workdir=pass_dir, node_id="notmp", reads=[])
+
+
+def _skip_no_libreoffice():
+    if ifo._find_libreoffice() is None:
+        pytest.skip("LibreOffice not found anywhere on PATH")
+
+
+def _skip_no_libreoffice_conversion():
+    """Skip when LibreOffice is absent or the installed LibreOffice cannot convert inside
+    the seal (a portable build under /tmp needs /etc/fonts, which the seal does not bind)."""
+    _skip_no_libreoffice()
+    prog = ifo._find_libreoffice()
+    if not prog or not prog.startswith("/usr"):
+        pytest.skip(f"LibreOffice is not system-installed (program dir {prog}); "
+                    "a portable build under /tmp may lack /etc/fonts inside the seal")
+
+
+def _lo_pass(tmp_path: Path) -> Path:
+    """A fake item pass whose Task declares a tool environment with LibreOffice."""
+    pass_dir = tmp_path / "run" / "passes" / "data" / "item_1"
+    pass_dir.mkdir(parents=True)
+    (pass_dir / ".refactory").mkdir()
+    (pass_dir / ".refactory" / "pass.json").write_text(
+        json.dumps({"task": "item_files_ops:LibreOfficeTask"}))
+    (pass_dir / ".refactory" / "workspaces").mkdir()
+    return pass_dir
+
+
+@needs_sandbox
+def test_sealed_script_with_libreoffice_reaches_soffice_in_the_seal(tmp_path):
+    """[real LibreOffice] A sealed script's ToolEnvironment makes soffice available inside
+    the seal. The soffice wrapper (ToolEnvironment.commands) calls soffice.bin directly with
+    LD_LIBRARY_PATH and SAL_USE_VCLPLUGIN=svp. Sealed scripts get the same private /tmp and
+    commands as agent steps; the local portable LibreOffice crashes on conversion even
+    outside the seal."""
+    _skip_no_libreoffice()
+    pass_dir = _lo_pass(tmp_path)
+    code = ("import os, subprocess, shutil, json\n"
+            "def main(inp):\n"
+            "    soffice = shutil.which('soffice')\n"
+            "    r = subprocess.run(['soffice', '--headless', '--version'],\n"
+            "        capture_output=True, text=True, timeout=15)\n"
+            "    lo_prog = os.path.dirname(os.path.realpath(soffice))\n"
+            "    # Walk up from tool-bin wrapper to find the real LO program dir\n"
+            "    wrapper = open(soffice).read()\n"
+            "    return {'facts': {'rc': str(r.returncode),\n"
+            "                      'version': r.stdout.strip().split('\\n')[0],\n"
+            "                      'soffice_found': str(soffice is not None),\n"
+            "                      'wrapper_ok': str('soffice.bin' in wrapper\n"
+            "                                        or 'soffice' in wrapper)}}\n")
+    result = snippet.sealed_execute(code, {"files": {}, "facts": {}},
+                                    workdir=pass_dir, node_id="probe",
+                                    reads=[], timeout_s=30)
+    assert result["facts"]["rc"] == "0"
+    assert "LibreOffice" in result["facts"]["version"]
+    assert result["facts"]["soffice_found"] == "True"
+    assert result["facts"]["wrapper_ok"] == "True"
+
+
+@needs_sandbox
+def test_sealed_script_libreoffice_converts_workbook(tmp_path):
+    """[real LibreOffice] A sealed script with private_tmp converts an xlsx workbook
+    via soffice --headless --calc --convert-to xlsx.  The formula cell =A1+B1 reads as
+    None with openpyxl (cached value not stored), but after recalculation through
+    LibreOffice it reads as the computed value (30 = 10 + 20)."""
+    _skip_no_libreoffice_conversion()
+    pass_dir = _lo_pass(tmp_path)
+    import openpyxl
+
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws["A1"] = 10
+    ws["B1"] = 20
+    ws["C1"] = "=A1+B1"
+    wb.save(pass_dir / "workbook.xlsx")
+    code = ("import os, subprocess, shutil\n"
+            "import openpyxl\n"
+            "def main(inp):\n"
+            "    wb = openpyxl.load_workbook('workbook.xlsx')\n"
+            "    before = wb.active['C1'].value\n"
+            "    os.makedirs('/tmp/in', exist_ok=True)\n"
+            "    shutil.copy('workbook.xlsx', '/tmp/in/workbook.xlsx')\n"
+            "    r = subprocess.run(\n"
+            "        ['soffice', '-env:UserInstallation=file:///tmp/lo-profile',\n"
+            "         '--headless', '--calc', '--convert-to', 'xlsx',\n"
+            "         '--outdir', '/tmp/out', '/tmp/in/workbook.xlsx'],\n"
+            "        capture_output=True, text=True, timeout=60)\n"
+            "    after = None\n"
+            "    out = '/tmp/out/workbook.xlsx'\n"
+            "    if os.path.isfile(out):\n"
+            "        wb2 = openpyxl.load_workbook(out, data_only=True)\n"
+            "        after = wb2.active['C1'].value\n"
+            "    return {'facts': {'before': repr(before),\n"
+            "                      'after': repr(after),\n"
+            "                      'rc': str(r.returncode),\n"
+            "                      'stderr': r.stderr[:500]}}\n")
+    result = snippet.sealed_execute(code, {"files": {}, "facts": {}},
+                                    workdir=pass_dir, node_id="conv",
+                                    reads=["workbook.xlsx"], timeout_s=60)
+    assert result["facts"]["rc"] == "0", result["facts"].get("stderr", "")
+    assert result["facts"]["after"] == "30", (
+        f"expected C1=30 after recalculation, got {result['facts']['after']} "
+        f"(before={result['facts']['before']})")
+
+
+# ── end-to-end: walker and spine with sealed script steps ────────────────
+
+
+import item_files_ops as ifo
+
+
+@needs_sandbox
+def test_walker_sealed_code_op_reads_workbook_with_openpyxl(tmp_path):
+    """Walker end-to-end: WorkbookTask sets up an xlsx, an agent writes an answer, then a
+    sealed code op reads the workbook with openpyxl and writes a fact (total). The
+    _execute_code dispatcher routes through sealed_execute, not the regular sandbox."""
+    model = _Model({"solve": "INPUT-a INPUT-b"})
+    result = ifo.SealedWorkbookRead().run(tmp_path / "walker", model=model)
+    assert result.exit_ok, result.error
+    assert result.facts["total"] == "15"
+    scores = result.facts["item_scores"]
+    assert len(scores) == 2 and all(r.get("score", 0) > 0 for r in scores)
+
+
+@needs_sandbox
+def test_walker_sealed_code_gate_in_loop_reloops_then_proceeds(tmp_path):
+    """Walker end-to-end: a sealed code gate reads the workbook with openpyxl and answer.txt;
+    it returns reloop when the answer lacks the total, proceed when it has it. The loop
+    sends solve back once per item, then finishes."""
+    model = _Model({}, turns={"solve": ["I don't know", "total is 15"]}, cycle=True)
+    result = ifo.SealedWorkbookLoop().run(tmp_path / "walker", model=model)
+    assert result.exit_ok, result.error
+    scores = result.facts["item_scores"]
+    assert len(scores) == 2
+    solves = _prompts(model, "solve")
+    assert len(solves) == 4, f"expected 2 items x 2 solves = 4, got {len(solves)}"
+    assert "say 15" in solves[1], "reloop reason should mention the total"
+
+
+@needs_sandbox
+@needs_spine
+def test_spine_sealed_code_op_reads_workbook_with_openpyxl(tmp_path):
+    """Spine end-to-end: the same workbook-reading sealed code op, lowered and drained by
+    the real spine. The spine calls `python -m refactory_dsh.run` which calls snippet.run()
+    → _execute_code() → sealed_execute()."""
+    from test_livemath_blocks import _spine
+
+    mode = ifo.SealedWorkbookRead()
+    work = tmp_path / "spine"
+    rc = _spine(mode.build(), work, tmp_path, mode_state=mode.state_dict(),
+                agent_responses={"solve": "INPUT-a INPUT-b"})
+    assert rc == 0, "spine drain failed"
+    facts = json.loads((work / "facts.json").read_text())
+    assert facts["total"] == "15"
+    assert len(facts["item_scores"]) == 2
+
+
+@needs_sandbox
+@needs_spine
+def test_spine_sealed_code_gate_in_loop_reloops_then_proceeds(tmp_path):
+    """Spine end-to-end: a sealed code gate in a loop, drained by the real spine. The gate
+    reads the workbook with openpyxl, returns reloop then proceed."""
+    from test_livemath_blocks import _spine
+
+    mode = ifo.SealedWorkbookLoop()
+    work = tmp_path / "spine"
+    rc = _spine(mode.build(), work, tmp_path, mode_state=mode.state_dict(),
+                agent_responses={"solve": ["I don't know", "total is 15"]})
+    assert rc == 0, "spine drain failed"
+    facts = json.loads((work / "facts.json").read_text())
+    assert len(facts["item_scores"]) == 2
+
+
 # ── the request ───────────────────────────────────────────────────────────
 
 
