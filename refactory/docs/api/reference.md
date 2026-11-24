@@ -27,7 +27,7 @@ The mode library: the ``nn`` of the harness world.
 | class | `Memory` | `(namespace: 'str', kind: 'str' = 'log', retention: 'str' = 'run', description: 'str' = '') -> None` |
 | class | `Mode` | `(state: 'dict[str, Any] \| None' = None) -> 'None'` |
 | class | `Node` | `(id: 'str', kind: 'str', call: 'str' = '', evaluator: 'str' = '', gate_kind: 'str' = 'fn', knobs: 'tuple[str, ...]' = (), reads: 'tuple[str, ...]' = (), required_reads: 'tuple[str, ...]' = (), writes: 'tuple[str, ...]' = (), produces: 'tuple[str, ...]' = (), prompt_template: 'str' = '', system_prompt_template: 'str' = '', role: 'str' = 'ceo', tools: 'tuple[str, ...]' = (), max_iterations: 'int' = 1, on_exhausted: 'str' = '', notes: 'str' = '', blocking: 'bool' = True, score_effect: 'str' = 'affects', targets: 'tuple[str, ...]' = (), optional_targets: 'tuple[str, ...]' = (), sources: 'tuple[str, ...]' = (), subgraph_entry: 'str' = '', subgraph_exit: 'str' = '', task_ref: 'str' = '', source_path: 'str' = '', source_format: 'str' = '', inline_items: 'tuple[dict[str, Any], ...]' = (), limit: 'int' = 0, parallelism: 'int' = 1, parallelism_knob: 'str' = '', resource_role: 'str \| None' = None, feedback_keys: 'tuple[str, ...]' = (), timeout_s: 'int \| None' = None, retry: 'dict[str, Any] \| None' = None, outputs_only: 'bool' = False, workspace: 'dict[str, str] \| None' = None, route: 'dict[str, str] \| None' = None, tool_policy: 'str \| None' = None, keeps_tool_markup: 'bool' = False, field_bindings: 'tuple[tuple[str, str], ...]' = (), code: 'str' = '', inputs: 'tuple[str, ...]' = (), knob_outputs: 'dict[str, tuple[str, ...]] \| None' = None, renames: 'dict[str, dict[str, str \| None]] \| None' = None) -> None` |
-| class | `Package` | `(name: 'str', description: 'str' = '', version: 'str' = '0.1.0', modes: "tuple[type['Mode'], ...]" = (), ops: 'tuple[str, ...]' = (), extends: 'str' = '', requires: 'tuple[str, ...]' = (), trust: 'str' = 'trusted', origin: 'str' = '', strategies: 'tuple[type, ...]' = ()) -> None` |
+| class | `Package` | `(name: 'str', description: 'str' = '', version: 'str' = '0.1.0', modes: "tuple[type['Mode'], ...]" = (), ops: 'tuple[str, ...]' = (), extends: 'str' = '', requires: 'tuple[str, ...]' = (), trust: 'str' = 'trusted', origin: 'str' = '', strategies: 'tuple[type, ...]' = (), optimizers: 'tuple[type, ...]' = ()) -> None` |
 | class | `Port` | `(name: 'str', path: 'str', media_type: 'str' = 'text/markdown', description: 'str' = '') -> None` |
 
 - **`Edge`** — One connection between two nodes, and the verdict that selects it.
@@ -266,12 +266,25 @@ Optimizers: the ``torch.optim`` of the harness world.
 
 | kind | name | signature |
 |---|---|---|
-| function | `create` | `(name: 'str', **kwargs: 'object') -> 'Optimizer'` |
+| function | `available` | `(project: 'Path \| None' = None) -> 'list[str]'` |
+| function | `create` | `(name: 'str', project: 'Path \| None' = None, **kwargs: 'object') -> 'Optimizer'` |
+| function | `is_picker` | `(name: 'str', project: 'Path \| None' = None) -> 'bool'` |
+| function | `is_population` | `(name: 'str', project: 'Path \| None' = None) -> 'bool'` |
 | function | `names` | `() -> 'list[str]'` |
-| function | `picker_names` | `() -> 'list[str]'` |
+| function | `package_optimizers` | `(project: 'Path \| None' = None) -> 'dict[str, type[Optimizer]]'` |
+| function | `picker_names` | `(project: 'Path \| None' = None) -> 'list[str]'` |
+| function | `register` | `(cls: 'type[Optimizer]', name: 'str' = '') -> 'type[Optimizer]'` |
+| function | `resolve` | `(name: 'str', project: 'Path \| None' = None) -> 'type[Optimizer]'` |
 
-- **`create`** — Build an optimizer by name, failing loud on an unknown one.
+- **`available`** — Every selectable optimizer: the library's own and the packages'.
+- **`create`** — Build an optimizer by name (:func:`resolve`), failing loud on an unknown one.
+- **`is_picker`** — Whether ``name`` chooses parents (a :class:`ParentSelector`), and so can be the
+- **`is_population`** — Whether ``name`` is a parent picker that breeds from a population of parents
+- **`names`** — The library's own optimizers; :func:`available` adds the packages'.
+- **`package_optimizers`** — Optimizers the discoverable packages contribute (``Package.optimizers``), by
 - **`picker_names`** — The optimizers that choose parents, and so can be paired with a proposer
+- **`register`** — Make ``cls`` selectable by ``name`` (its class-level ``name`` when not given),
+- **`resolve`** — The class selected by ``name``: the library's own first, then the packages'
 
 
 <a id="refactory_dsh-optim-compose"></a>
@@ -479,14 +492,14 @@ The optimizer loop, named like one.
 | class | `Loop` | `(mode_id: 'str', config: 'LoopConfig \| None' = None, *, project: 'Path \| None' = None, model: 'Any' = None, optimizer: 'Optimizer \| None' = None) -> 'None'` |
 | class | `LoopConfig` | `(epochs: 'int' = 2, batch_size: 'int' = 4, optimizer: 'str' = 'autoresearch', edit_preset: 'str' = 'broad', seed: 'int' = 0, elite: 'int' = 3, max_evaluations: 'int' = 64, holdout: 'float' = 0.3, parsimony: 'float' = 0.01, runs_root: 'Path' = PosixPath('.factory/loop'), max_steps: 'int' = 2000, attempts: 'int' = 3, frozen: 'tuple[str, ...]' = (), intent: 'str' = '', knobs: 'dict[str, Any]' = <factory>, history_limit: 'int' = 200, prior_runs: 'int' = 3, memory_global_root: 'Path \| None' = None, evaluator: 'str' = 'walker', omit_steering: 'bool' = False, dsh_timeout_s: 'int' = 900, resume: 'bool' = False, progress: 'bool' = True, print_events: 'bool' = False, verbose: 'bool' = False, control_poll_s: 'float' = 1.0, strategy: 'str' = 'default', repeats: 'int' = 1, allowed_ops: 'tuple[str, ...]' = (), worker_backend: 'str' = 'dsh', provider: 'str' = '', model: 'str' = '', effort: 'str' = '', permission_mode: 'str' = 'skip', setting_sources: 'str' = '', claude_executable: 'str' = '', role_routes: 'dict[str, Any]' = <factory>, node_routes: 'dict[str, Any]' = <factory>, provider_config: 'dict[str, Any]' = <factory>, max_elapsed_s: 'float \| None' = None, max_tokens: 'int \| None' = None, validation_reserve_s: 'float' = 0, validation_reserve_tokens: 'int' = 0, max_rollouts: 'int \| None' = None, max_concurrent_evaluations: 'int' = 4, max_items_in_flight: 'int \| None' = None, parts_manifest: 'str \| None' = None, seed_results: 'str \| None' = None, val_gate: 'bool \| None' = None, train_minibatch: 'int' = 0, allow_code_nodes: 'bool' = True, new_step_tools: 'bool' = True, early_stop_patience: 'int' = 0, early_stop_at_full_val: 'bool' = False, resolved_profile: 'dict[str, Any]' = <factory>, strategy_options: 'dict[str, Any]' = <factory>, parent_picker: 'str' = '', portfolio: 'str' = '', selection: 'str' = '', pool_size: 'int' = 8, run_ledger: 'bool' = True, lessons: 'bool' = True, step_review: 'bool' = True, structure_guidance: 'bool' = False, analysts: 'bool' = False, analyst_group_size: 'int' = 8, analyst_merge_batch_size: 'int' = 8, analyst_max_batches: 'int' = 0, integrity_judge: 'str \| dict[str, Any]' = 'off') -> None` |
 | class | `LoopError` | `` |
-| function | `default_selection` | `(strategy: 'str', optimizer: 'str', picker: 'str' = '') -> 'str'` |
+| function | `default_selection` | `(strategy: 'str', optimizer: 'str', picker: 'str' = '', project: 'Path \| None' = None) -> 'str'` |
 | function | `gap_standard_error` | `(first: 'float', first_items: 'int', second: 'float', second_items: 'int') -> 'float \| None'` |
 | function | `item_time_spread` | `(records: 'Sequence[Mapping[str, Any]]') -> 'dict[str, Any]'` |
 | function | `main` | `(argv: 'list[str] \| None' = None, *, _client_factory: 'Any' = None) -> 'int'` |
 | function | `node_count` | `(state: 'dict[str, Any]') -> 'int'` |
 | function | `opaque_item_key` | `(item_id: 'str', secret: 'str') -> 'str'` |
 | function | `run` | `(mode_id: 'str', *, config: 'LoopConfig \| None' = None, project: 'Path \| None' = None, model: 'Any' = None) -> 'dict[str, Any]'` |
-| function | `single_parent` | `(strategy: 'str', optimizer: 'str', picker: 'str' = '') -> 'bool'` |
+| function | `single_parent` | `(strategy: 'str', optimizer: 'str', picker: 'str' = '', project: 'Path \| None' = None) -> 'bool'` |
 | function | `uncapped_sealed_steps` | `(runs: 'Path') -> 'dict[str, Any]'` |
 
 - **`EpochSummary`** — One epoch, as the report and the scheduler describe it.
@@ -614,6 +627,7 @@ Discover, list and resolve packages of modes.
 | class | `PackageClash` | `` |
 | function | `add` | `(project: 'Path', source: 'Path', *, as_name: 'str' = '', trust: 'str' = 'generated') -> 'str'` |
 | function | `catalogue` | `(project: 'Path') -> 'dict[str, list[dict[str, Any]]]'` |
+| function | `contributed` | `(attribute: 'str', base: 'type', project: 'Path \| None' = None) -> 'dict[str, type]'` |
 | function | `describe_mode` | `(project: 'Path', identifier: 'str') -> 'dict[str, Any]'` |
 | function | `discover` | `(project: 'Path \| None' = None) -> 'dict[str, Package]'` |
 | function | `discover_names` | `(project: 'Path \| None' = None) -> 'list[str]'` |
@@ -644,6 +658,7 @@ Discover, list and resolve packages of modes.
 - **`PackageClash`** — A package name exists in both the install and the workspace.
 - **`add`** — Copy a package into the workspace, refusing a clash.
 - **`catalogue`** — Modes grouped by package: the only way they are ever listed.
+- **`contributed`** — The classes the discoverable packages list under ``attribute`` (a
 - **`describe_mode`** — One mode's surface, for a person about to optimize it or read a report.
 - **`discover`** — Every package that loads. A package that fails to import is reported.
 - **`discover_names`** — Every package directory, installed or in the workspace.

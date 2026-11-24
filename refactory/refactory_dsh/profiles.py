@@ -221,16 +221,19 @@ def normalize(settings: dict[str, Any]) -> dict[str, Any]:
     # when the name is not one of the library's, so the common case imports nothing.
     strategy_choices = (strategies.names() if result["strategy"] in strategies.STRATEGIES
                         else strategies.available())
-    for key, choices in (("optimizer", optim.names()), ("strategy", strategy_choices),
+    # Likewise a package-contributed optimizer (``Package.optimizers``).
+    optimizer_choices = (optim.names() if result["optimizer"] in optim.REGISTRY
+                         else optim.available())
+    for key, choices in (("optimizer", optimizer_choices), ("strategy", strategy_choices),
                          ("evaluator", ("walker", "dsh")), ("edit_preset", PRESETS),
                          ("worker_backend", ("dsh", "codex", "claude_code"))):
         if result[key] not in choices:
             raise ProfileError(f"unknown {key}: {result[key]}")
     picker = result.get("parent_picker") or ""
     if picker:
-        if picker not in optim.picker_names():
+        if not optim.is_picker(picker):
             raise ProfileError(f"unknown parent_picker: {picker}; known: {', '.join(optim.picker_names())}")
-        if result["optimizer"] in optim.picker_names():
+        if optim.is_picker(result["optimizer"]):
             raise ProfileError(
                 f"the {result['optimizer']} optimizer picks parents itself; pair the "
                 f"{picker} parent picker with a proposer (autoresearch or random)")
@@ -519,8 +522,9 @@ SETTING_HELP = {
     "claude_executable": "claude_code workers only: the Claude Code executable they run, an "
                          "absolute path (default: the one bundled with the Agent SDK)",
     "parent_picker": "pair a parent picker (archive, evolutionary, islands, hill_climb, "
-                     "map_elites) with --optimizer: the picker chooses the candidate each "
-                     "step edits, the optimizer writes the edits (default: none)",
+                     "map_elites, or one a package contributes) with --optimizer: the "
+                     "picker chooses the candidate each step edits, the optimizer writes "
+                     "the edits (default: none)",
     "selection": "with val items (the validation gate): checkpoint applies every change "
                  "whose graph is not broken, scores each applied one on val once and picks "
                  "the best of them; pool keeps the --pool-size best candidates on validation "
@@ -606,7 +610,8 @@ CLI_SETTINGS: dict[str, str] = {
     "batch_size": "candidates proposed per epoch (default: 4)",
     "max_evaluations": "a hard ceiling on evaluated candidates (default: 64)",
     "optimizer": "how candidates are proposed: random, hill_climb, evolutionary, archive, "
-                 "islands, map_elites or autoresearch (default: autoresearch)",
+                 "islands, map_elites, autoresearch or one a package contributes "
+                 "(default: autoresearch)",
     "edit_preset": "which edits are allowed: broad, structure, conservative or knob_only "
                    "(default: broad)",
     "evaluator": "which runtime scores a candidate: walker (fast) or dsh (the spine) "

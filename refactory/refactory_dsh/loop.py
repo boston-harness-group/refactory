@@ -242,11 +242,6 @@ def _item_sources(state: Mapping[str, Any]) -> dict[str, tuple[Any, ...]]:
     return found
 
 
-#: Optimizers and parent pickers that breed from a population of parents (an archive,
-#: a tournament, islands, niche champions). Under ``val_gate`` they default to the
-#: ``pool`` selection (``default_selection``).
-POPULATION_OPTIMIZERS = ("archive", "evolutionary", "islands", "map_elites")
-
 #: ``LoopConfig.selection`` values under ``val_gate``: empty picks the default
 #: (``default_selection``); ``checkpoint`` applies every change whose graph is not broken
 #: and keeps the best on validation as the winner; ``single`` is SkillOpt's line;
@@ -270,20 +265,26 @@ NO_VALIDATION = "no validation items: selecting on train scores"
 PORTFOLIOS = ("", "prompt+pipeline")
 
 
-def default_selection(strategy: str, optimizer: str, picker: str = "") -> str:
+def default_selection(strategy: str, optimizer: str, picker: str = "",
+                      project: Path | None = None) -> str:
     """The ``selection`` a ``val_gate`` run gets when it names none: ``checkpoint`` for
     the default loop with a single-parent optimizer, ``pool`` for every other strategy,
     optimizer or parent picker. A SkillOpt-gate parity run names ``single``."""
-    if single_parent(strategy, optimizer, picker):
+    if single_parent(strategy, optimizer, picker, project):
         return "checkpoint"
     return "pool"
 
 
-def single_parent(strategy: str, optimizer: str, picker: str = "") -> bool:
+def single_parent(strategy: str, optimizer: str, picker: str = "",
+                  project: Path | None = None) -> bool:
     """Whether a run is the default loop with a single-parent optimizer and no
-    population picker: the only runs ``checkpoint`` may select."""
-    return (strategy == "default" and optimizer not in POPULATION_OPTIMIZERS
-            and picker not in POPULATION_OPTIMIZERS)
+    population picker (``optim.is_population``: an archive, a tournament, islands,
+    niche champions, or a package's picker that declares ``population``): the only
+    runs ``checkpoint`` may select."""
+    from refactory_dsh import optim
+
+    return (strategy == "default" and not optim.is_population(optimizer, project)
+            and not optim.is_population(picker, project))
 
 
 def _train_key(candidate: Candidate) -> float:
@@ -798,8 +799,8 @@ class Loop(OuterLoop):
             )
         else:
             self.optimizer = create_optimizer(
-                self.config.optimizer, seed=self.config.seed, k=self.config.attempts
-            )
+                self.config.optimizer, self.project, seed=self.config.seed,
+                k=self.config.attempts)
         if self.config.parent_picker:
             from refactory_dsh.optim import PickedParent, ParentSelector
             if isinstance(self.optimizer, (ParentSelector, PickedParent)):
@@ -808,8 +809,8 @@ class Loop(OuterLoop):
                     f"take the {self.config.parent_picker} parent picker; pair the picker "
                     "with a proposer (--optimizer autoresearch or random)")
             try:
-                picker = create_optimizer(self.config.parent_picker, seed=self.config.seed,
-                                          k=self.config.attempts)
+                picker = create_optimizer(self.config.parent_picker, self.project,
+                                          seed=self.config.seed, k=self.config.attempts)
                 self.optimizer = PickedParent(picker, self.optimizer)  # type: ignore[arg-type]
             except ValueError as exc:
                 raise LoopError(str(exc)) from exc
@@ -817,8 +818,12 @@ class Loop(OuterLoop):
             raise LoopError(f"unknown selection {self.config.selection!r}; known: "
                             f"{', '.join(s for s in SELECTIONS if s)}")
         picker_name = getattr(getattr(self.optimizer, "picker", None), "name", "")
+        #: ``default_selection`` for this run, decided once: a package optimizer's
+        #: class is looked up by discovery, which is not a per-step cost.
+        self._default_selection = default_selection(
+            self.name, self.config.optimizer, picker_name, self.project)
         if (self.config.selection == "checkpoint"
-                and not single_parent(self.name, self.config.optimizer, picker_name)):
+                and self._default_selection != "checkpoint"):
             raise LoopError(
                 "selection checkpoint trains one line of candidates, so it needs the default "
                 f"strategy and a single-parent optimizer; this run has the {self.name} "
@@ -1472,8 +1477,7 @@ class Loop(OuterLoop):
         did."""
         value = recorded.get("selection")
         if value in (None, "") and recorded.get("val_gate") is True:
-            picker = getattr(getattr(self.optimizer, "picker", None), "name", "")
-            if default_selection(self.name, self.config.optimizer, picker) == "checkpoint":
+            if self._default_selection == "checkpoint":
                 return "single"
         return value
 
@@ -1519,8 +1523,7 @@ class Loop(OuterLoop):
         """A ``RESUME_KEEPS`` value as it acts: an empty ``selection`` is the default
         it resolves to."""
         if key == "selection" and not value:
-            picker = getattr(getattr(self.optimizer, "picker", None), "name", "")
-            return default_selection(self.name, self.config.optimizer, picker)
+            return self._default_selection
         return value
 
     def _resolve_val_gate(self) -> None:
@@ -3581,7 +3584,8 @@ class Loop(OuterLoop):
         picked = None if explicit or not callable(choose) else choose(
             ProposalContext(epoch=self.epoch, generation=self.generation,
                             mode_name=self.mode_id, elite=int(self.config.elite),
-                            val_scores=self._val_scores()), parents)
+                            val_scores=self._val_scores(),
+                            val_item_scores=self._val_item_scores()), parents)
         if explicit:
             self._editing_parent = str(explicit)
         elif picked is not None:
@@ -4901,8 +4905,7 @@ class Loop(OuterLoop):
         stored = (self._strategy_state.get("val_gate") or {}).get("selection")
         if stored in ("single", "pool", "checkpoint"):
             return str(stored)
-        picker = getattr(getattr(self.optimizer, "picker", None), "name", "")
-        return default_selection(self.name, self.config.optimizer, picker)
+        return self._default_selection
 
     def _pool(self) -> list[Candidate]:
         """The pool under ``selection`` ``pool``: the judged candidates with the
@@ -6169,6 +6172,7 @@ class Loop(OuterLoop):
             seed_knob_values=self._seed_knob_values(),
             parent=self._edited_id(board),
             val_scores=self._val_scores(),
+            val_item_scores=self._val_item_scores(),
             selection=self.selection_mode(),
             population_parents=(self.selection_mode() == "pool" and self._population_policy()),
             edit_levels=[l for l in self._levels_wanted if l not in self._levels_done],
@@ -6233,6 +6237,19 @@ class Loop(OuterLoop):
         rolled = [cid for cid in scores if self._part_results.get(cid, {}).get("val")]
         shared = self.shared_scores(rolled) if len(rolled) > 1 else None
         return {**scores, **shared[0]} if shared is not None else scores
+
+    def _val_item_scores(self) -> dict[str, dict[str, float]]:
+        """Each judged candidate's per-item val scores (`part_item_scores`, keyed by
+        `opaque_item_key`) under ``val_gate``, for a parent policy that compares
+        candidates item by item; empty otherwise, and never a test score."""
+        if not self.config.val_gate or self._custom_strategy is not None:
+            return {}
+        found: dict[str, dict[str, float]] = {}
+        for cid in self._gate().cache:
+            scores = self.part_item_scores(cid, "val")
+            if scores:
+                found[cid] = scores
+        return found
 
     def _root_state(self) -> dict[str, Any] | None:
         """The root candidate's state (the seed every lineage starts from); ``None``

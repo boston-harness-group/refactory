@@ -83,6 +83,11 @@ class Package:
     #: Outer-loop strategies (``OuterLoop`` subclasses) the package contributes,
     #: each selected by its class-level ``name`` (``strategies.resolve``).
     strategies: tuple[type, ...] = ()
+    #: Optimizers (``optim.Optimizer`` subclasses) the package contributes: parent
+    #: pickers (``optim.ParentSelector``, the ``parent_picker`` setting) and proposers
+    #: (the ``optimizer`` setting), each selected by its class-level ``name``
+    #: (``optim.resolve``), found the way ``strategies`` are.
+    optimizers: tuple[type, ...] = ()
 
     def __post_init__(self) -> None:
         _check(self.name, "package")
@@ -97,11 +102,12 @@ class Package:
             if name in seen:
                 raise PackageError(f"{self.name}: two modes are both named {name!r}")
             seen.add(name)
-        for strategy in self.strategies:
-            if not str(getattr(strategy, "name", "") or ""):
-                raise PackageError(
-                    f"{self.name}: strategy class {strategy.__name__} needs a class-level 'name'"
-                )
+        for label, classes in (("strategy", self.strategies), ("optimizer", self.optimizers)):
+            for cls in classes:
+                if not str(getattr(cls, "name", "") or ""):
+                    raise PackageError(
+                        f"{self.name}: {label} class {cls.__name__} needs a class-level 'name'"
+                    )
         if self.extends:
             _check(self.extends, "extended package")
         for requirement in self.requires:

@@ -874,15 +874,7 @@ def package_strategies(project: Path | None = None) -> dict[str, type[OuterLoop]
     """
     from refactory_dsh import registry
 
-    found: dict[str, type[OuterLoop]] = {}
-    for package in registry.discover(project).values():
-        for cls in package.strategies:
-            if not (isinstance(cls, type) and issubclass(cls, OuterLoop)):
-                raise TypeError(
-                    f"package {package.name!r} lists {cls!r}, which is not an OuterLoop"
-                )
-            found[cls.name] = cls
-    return found
+    return registry.contributed("strategies", OuterLoop, project)  # type: ignore[return-value]
 
 
 def available(project: Path | None = None) -> list[str]:

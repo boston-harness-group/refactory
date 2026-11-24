@@ -597,13 +597,15 @@ class Run:
         return self._loop.shared_scores(candidate_ids, part, latest=latest)  # noqa: SLF001
 
     def part_item_scores(self, candidate: Candidate, part: str = "val") -> dict[str, float]:
-        """Each item's score in the candidate's first finished ``'val'`` or ``'test'``
-        rollout (the one ``ValidationGate`` reads), keyed by a per-run HMAC of the item
-        id (`Loop.part_item_scores`, `opaque_item_key`) and in the parts manifest's
-        order: enough to keep a per-instance frontier on val, as GEPA does, and no item
-        ids, records or workdirs. Empty before a finished rollout."""
-        if part not in ("val", "test"):
-            raise OuterLoopError(f"part_item_scores covers 'val' and 'test', not {part!r}")
+        """Each item's score in the candidate's first finished ``'val'`` rollout (the
+        one ``ValidationGate`` reads), keyed by a per-run HMAC of the item id
+        (`Loop.part_item_scores`, `opaque_item_key`) and in the parts manifest's order:
+        enough to keep a per-instance frontier on val, as GEPA does, and no item ids,
+        records or workdirs. Empty before a finished rollout. Val only: a strategy
+        selects on val, and test is scored once at the end (``FinalEvaluation``), so a
+        per-item test view would only invite selecting on test."""
+        if part != "val":
+            raise OuterLoopError(f"part_item_scores covers 'val' only, not {part!r}")
         return dict(self._loop.part_item_scores(candidate.id, part))  # noqa: SLF001
 
     def part_incidents(self, candidate: Candidate, part: str = "val") -> list[str]:

@@ -1,5 +1,9 @@
 # Outer-loop recovery
 
+To add an optimization method (a parent picker, a proposer, an outer loop), see
+[Adding an optimization method](methods.md): methods are packages that compose the
+core building blocks.
+
 ## WalkerEvaluator
 
 `WalkerEvaluator` enables `enable_recovery` by default on every `mode.evaluate()`

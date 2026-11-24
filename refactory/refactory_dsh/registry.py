@@ -279,6 +279,26 @@ def discover(project: Path | None = None) -> dict[str, Package]:
     return found
 
 
+def contributed(attribute: str, base: type, project: Path | None = None) -> dict[str, type]:
+    """The classes the discoverable packages list under ``attribute`` (a
+    ``Package`` field: ``strategies``, ``optimizers``), by their class-level ``name``.
+
+    The one route by which a package contributes a selectable piece: what it lists is
+    selectable by name, without a registration call and without joining the
+    library's own table. A listed class that is not a ``base`` is a defect of the
+    package and is refused.
+    """
+    found: dict[str, type] = {}
+    for package in discover(project).values():
+        for cls in getattr(package, attribute):
+            if not (isinstance(cls, type) and issubclass(cls, base)):
+                raise TypeError(
+                    f"package {package.name!r} lists {cls!r}, which is not a {base.__name__}"
+                )
+            found[cls.name] = cls  # type: ignore[attr-defined]
+    return found
+
+
 def _state(project: Path) -> dict[str, Any]:
     path = Path(project) / STATE_FILE
     if not path.exists():

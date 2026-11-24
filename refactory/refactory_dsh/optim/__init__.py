@@ -10,6 +10,8 @@ it, so no optimizer can spend evaluation budget on a candidate that cannot run.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from .base import (
     Candidate,
     Optimizer,
@@ -30,46 +32,120 @@ from .policies import (
 )
 from .compose import PickedParent
 
-#: The optimizers the loop can select by name.
-REGISTRY: dict[str, type[Optimizer]] = {
-    RandomOptimizer.name: RandomOptimizer,
-    AutoresearchOptimizer.name: AutoresearchOptimizer,
-    ArchiveSelector.name: ArchiveSelector,
-    EvolutionarySelector.name: EvolutionarySelector,
-    IslandsSelector.name: IslandsSelector,
-    HillClimbSelector.name: HillClimbSelector,
-    MapElitesSelector.name: MapElitesSelector,
-}
+#: The library's own optimizers, by name: filled by :func:`register` below, the one
+#: registration path. A package contributes more through ``Package.optimizers``
+#: (:func:`package_optimizers`), selectable by name without joining this table.
+REGISTRY: dict[str, type[Optimizer]] = {}
+
+
+def register(cls: type[Optimizer], name: str = "") -> type[Optimizer]:
+    """Make ``cls`` selectable by ``name`` (its class-level ``name`` when not given),
+    as the ``optimizer`` setting, or as the ``parent_picker`` setting when it is a
+    :class:`ParentSelector`. Refuses a name already taken by another class: a silent
+    replacement would change what every run naming it does."""
+    if not (isinstance(cls, type) and issubclass(cls, Optimizer)):
+        raise TypeError(f"{cls!r} is not an Optimizer")
+    key = name or str(getattr(cls, "name", "") or "")
+    if not key:
+        raise ValueError(f"{cls.__name__} needs a class-level 'name' to be registered")
+    held = REGISTRY.get(key)
+    if held is not None and held is not cls:
+        raise ValueError(f"optimizer name {key!r} is already registered to {held.__name__}")
+    REGISTRY[key] = cls
+    return cls
+
+
+for _cls in (RandomOptimizer, AutoresearchOptimizer, ArchiveSelector, EvolutionarySelector,
+             IslandsSelector, HillClimbSelector, MapElitesSelector):
+    register(_cls)
+del _cls
+
+
+def package_optimizers(project: Path | None = None) -> dict[str, type[Optimizer]]:
+    """Optimizers the discoverable packages contribute (``Package.optimizers``), by
+    name, found as package strategies are (``registry.contributed``)."""
+    from refactory_dsh import registry
+
+    return registry.contributed("optimizers", Optimizer, project)  # type: ignore[return-value]
 
 
 def names() -> list[str]:
+    """The library's own optimizers; :func:`available` adds the packages'."""
     return sorted(REGISTRY)
 
 
-def picker_names() -> list[str]:
+def available(project: Path | None = None) -> list[str]:
+    """Every selectable optimizer: the library's own and the packages'."""
+    return sorted(set(REGISTRY) | set(package_optimizers(project)))
+
+
+def resolve(name: str, project: Path | None = None) -> type[Optimizer]:
+    """The class selected by ``name``: the library's own first, then the packages'
+    (looked up only when the name is not the library's, so the common case imports
+    no package). Fails loud on an unknown name."""
+    if name in REGISTRY:
+        return REGISTRY[name]
+    contributed = package_optimizers(project)
+    if name in contributed:
+        return contributed[name]
+    known = sorted(set(REGISTRY) | set(contributed))
+    raise ValueError(f"unknown optimizer {name!r}; known: {known}")
+
+
+def is_picker(name: str, project: Path | None = None) -> bool:
+    """Whether ``name`` chooses parents (a :class:`ParentSelector`), and so can be the
+    ``parent_picker`` paired with a proposer; ``False`` for an unknown name."""
+    try:
+        return issubclass(resolve(name, project), ParentSelector)
+    except ValueError:
+        return False
+
+
+def is_population(name: str, project: Path | None = None) -> bool:
+    """Whether ``name`` is a parent picker that breeds from a population of parents
+    (``ParentSelector.population``: an archive, a tournament, islands, niches): under
+    the validation gate it is handed every judged candidate, and the default
+    ``selection`` is ``pool``. ``False`` for an empty or unknown name."""
+    if not name:
+        return False
+    try:
+        cls = resolve(name, project)
+    except ValueError:
+        return False
+    return issubclass(cls, ParentSelector) and bool(getattr(cls, "population", False))
+
+
+def picker_names(project: Path | None = None) -> list[str]:
     """The optimizers that choose parents, and so can be paired with a proposer
-    (the ``parent_picker`` setting)."""
-    return sorted(name for name, cls in REGISTRY.items() if issubclass(cls, ParentSelector))
+    (the ``parent_picker`` setting): the library's and the packages'."""
+    found = dict(package_optimizers(project))
+    found.update(REGISTRY)
+    return sorted(name for name, cls in found.items() if issubclass(cls, ParentSelector))
 
 
-def create(name: str, **kwargs: object) -> Optimizer:
-    """Build an optimizer by name, failing loud on an unknown one.
+def create(name: str, project: Path | None = None, **kwargs: object) -> Optimizer:
+    """Build an optimizer by name (:func:`resolve`), failing loud on an unknown one.
 
     Falling back silently would invalidate every result of the run, because the
     report would not say which optimizer produced them.
     """
-    if name not in REGISTRY:
-        raise ValueError(f"unknown optimizer {name!r}; known: {names()}")
-    return REGISTRY[name](**kwargs)  # type: ignore[arg-type]
+    return resolve(name, project)(**kwargs)  # type: ignore[arg-type]
 
 
 __all__ = [
     "REGISTRY",
+    "available",
+    "is_picker",
+    "is_population",
+    "package_optimizers",
+    "register",
+    "resolve",
     "AutoresearchOptimizer",
     "Candidate",
     "Optimizer",
     "PickedParent",
     "Proposal",
+    "ParentSelector",
     "ProposalContext",
     "RandomOptimizer",
     "Rejection",
