@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import collections
 import contextlib
 import os
 import re
 import shlex
 import shutil
+import statistics
 import sys
 from collections.abc import Iterator
 from pathlib import Path
@@ -434,6 +436,18 @@ def pytest_addoption(parser: pytest.Parser) -> None:
     )
 
 
+def _xdist_options(config: pytest.Config) -> None:
+    workers = config.getoption("numprocesses", default=None)
+    if workers not in (None, 0):
+        dist = config.getoption("dist", default=None)
+        if dist in (None, "no", "load"):
+            config.option.dist = "loadscope"
+        # Under --shard the collection order is longest scope first (_select_shard);
+        # xdist's own reorder, by number of tests, would undo it.
+        if config.option.dist == "loadscope" and _parse_shard(config) is not None:
+            config.option.loadscopereorder = False
+
+
 def pytest_configure(config: pytest.Config) -> None:
     _parse_shard(config)  # a malformed --shard stops here, before any collection
     # The gate reads each marked test's report in the controller, and xdist reports in
@@ -447,11 +461,7 @@ def pytest_configure(config: pytest.Config) -> None:
     # Tests that share a global package registry (test_create, test_edit_design) collide
     # when pytest-xdist distributes individual test IDs from the same module across
     # workers.  ``loadscope`` keeps every test in the same module on one worker.
-    workers = config.getoption("numprocesses", default=None)
-    if workers not in (None, 0):
-        dist = config.getoption("dist", default=None)
-        if dist in (None, "no", "load"):
-            config.option.dist = "loadscope"
+    _xdist_options(config)
     config.addinivalue_line(
         "markers", "integration: slow tests that spawn a real DSH CEO run"
     )
@@ -491,31 +501,84 @@ _TOOLCHAIN: dict[str, str] = {}
 _TOOLCHAIN_RESULT: dict[str, tuple[str, str]] = {}
 
 
-#: Seconds each test file took in CI (`scripts/ci-durations.py` refreshes it), for `--shard`.
+#: Seconds each test file took in CI, and each test function of a long file
+#: (`scripts/ci-durations.py` refreshes it), for `--shard`.
 CI_DURATIONS = Path(__file__).resolve().parent / "ci_durations.json"
 
 
-def _shard_files(files: list[str], shard: int, shards: int) -> set[str]:
-    """The files shard ``shard`` (1-based) of ``shards`` runs. Longest first, each file
-    goes to the least loaded shard, ties to the lowest; a file CI has no time for yet
-    counts as the median. Every shard (and every xdist worker in it) collects the same
-    files and computes the same packing, so together they run each file exactly once."""
+def _load_durations() -> dict[str, float]:
     import json
 
     try:
-        known = {str(k): float(v) for k, v in json.loads(CI_DURATIONS.read_text()).items()}
+        return {str(k): float(v) for k, v in json.loads(CI_DURATIONS.read_text()).items()}
     except (OSError, ValueError):
-        known = {}
-    timed = sorted(known.values())
+        return {}
+
+
+def _test_file(test: str) -> str:
+    return test.split("::")[0].rsplit("/", 1)[-1]
+
+
+def _function_key(test: str) -> str:
+    """``file.py::[Class::]function``, parameter ids dropped: a test function as the
+    durations file names it, the same whatever parametrizations this machine collects."""
+    return "::".join([_test_file(test), *test.split("[", 1)[0].split("::")[1:]])
+
+
+def _shard_plan(tests: list[str], shards: int,
+                known: dict[str, float]) -> tuple[dict[str, int], dict[str, float]]:
+    """Which shard (0-based) runs each test, and the seconds each is expected to take.
+
+    The pieces are whole files, except a file the durations list function by function
+    (one too long to sit on one worker), whose test functions are pieces of their own,
+    each with all its parametrizations. A piece weighs what the durations file says,
+    never what was collected, so a parametrization that exists on one runner and not
+    another (a sandbox probe, a missing tool) cannot move any piece to another shard.
+    Longest first, each piece goes to the least loaded shard, ties to the lowest. A file
+    with no time counts as the median file, a listed file's function with no time as
+    that file's median function. Every shard (and every xdist worker in it) computes the
+    same plan, so together they run each test exactly once."""
+    files_known = {k: v for k, v in known.items() if "::" not in k}
+    split: dict[str, list[float]] = collections.defaultdict(list)
+    for key, value in known.items():
+        if "::" in key:
+            split[key.split("::")[0]].append(value)
+    timed = sorted(files_known.values())
     default = timed[len(timed) // 2] if timed else 1.0
-    weight = {name: known.get(name, default) for name in files}
+    pieces: dict[str, list[str]] = {}
+    size: dict[str, float] = {}
+    for test in tests:
+        name = _test_file(test)
+        piece = _function_key(test) if name in split else name
+        pieces.setdefault(piece, []).append(test)
+    for piece in pieces:
+        if "::" in piece:
+            size[piece] = known.get(piece, statistics.median(split[piece.split("::")[0]]))
+        else:
+            size[piece] = files_known.get(piece, default)
+    weight = {test: size[piece] / len(members)
+              for piece, members in pieces.items() for test in members}
     loads = [0.0] * shards
     owner: dict[str, int] = {}
-    for name in sorted(files, key=lambda name: (-weight[name], name)):
+    for piece in sorted(pieces, key=lambda piece: (-size[piece], piece)):
         index = min(range(shards), key=lambda i: (loads[i], i))
-        owner[name] = index
-        loads[index] += weight[name]
-    return {name for name, index in owner.items() if index == shard - 1}
+        loads[index] += size[piece]
+        owner.update((test, index) for test in pieces[piece])
+    return owner, weight
+
+
+def _longest_scope_first(tests: list[str], weight: dict[str, float]) -> list[str]:
+    """``tests`` with xdist's scopes (a module's functions, or a class) longest first.
+
+    xdist hands a free worker the next scope in collection order, so the long ones go
+    out first and the short ones fill in at the end; a long file met last would run on
+    after every other worker had finished. A scope keeps its tests in their order."""
+    scope_seconds: collections.Counter[str] = collections.Counter()
+    for test in tests:
+        scope_seconds[test.rsplit("::", 1)[0]] += weight[test]
+    position = {test: i for i, test in enumerate(tests)}
+    return sorted(tests, key=lambda t: (-scope_seconds[t.rsplit("::", 1)[0]],
+                                        t.rsplit("::", 1)[0], position[t]))
 
 
 def _parse_shard(config: pytest.Config) -> tuple[int, int] | None:
@@ -537,15 +600,16 @@ def _select_shard(config: pytest.Config, items: list[pytest.Item]) -> None:
     if parsed is None:
         return
     shard, shards = parsed
-    by_file = {item.nodeid.split("::")[0].rsplit("/", 1)[-1]: None for item in items}
-    mine = _shard_files(list(by_file), shard, shards)
-    keep = [item for item in items if item.nodeid.split("::")[0].rsplit("/", 1)[-1] in mine]
-    dropped = [item for item in items if item.nodeid.split("::")[0].rsplit("/", 1)[-1] not in mine]
+    owner, weight = _shard_plan([item.nodeid for item in items], shards, _load_durations())
+    keep = [item for item in items if owner[item.nodeid] == shard - 1]
+    dropped = [item for item in items if owner[item.nodeid] != shard - 1]
     for item in dropped:
         item.stash[_OTHER_SHARD] = True
     if dropped:
         config.hook.pytest_deselected(items=dropped)
-    items[:] = keep
+    order = {test: i for i, test in enumerate(
+        _longest_scope_first([item.nodeid for item in keep], weight))}
+    items[:] = sorted(keep, key=lambda item: order[item.nodeid])
 
 
 def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
