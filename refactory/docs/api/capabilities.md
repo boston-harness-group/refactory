@@ -7779,7 +7779,8 @@ Build a reusable mode package from a brief, name and task/single-shot inputs. Ca
         "data_node",
         "revision_of",
         "requires_input",
-        "smoke_timeout_s"
+        "smoke_timeout_s",
+        "holdout"
       ],
       "notes": "read the brief, set up per-run staging, and publish to the prompts",
       "role": "ceo"
@@ -8065,7 +8066,7 @@ Build a reusable mode package from a brief, name and task/single-shot inputs. Ca
     },
     "parts_manifest": {
       "default": "",
-      "description": "the parts manifest (parts.json with train/val/test id lists) the produced mode's runs use; the smoke samples only its train ids. A relative path is the project's (empty: the profile's, else the holdout fraction's split)",
+      "description": "the parts manifest (parts.json with train/val/test id lists) the produced mode's runs use; the smoke samples only its train ids. A relative path, here or in the profile, is the project's (`refactory optimize` reads one against its working directory) (empty: the profile's, else the holdout fraction's split)",
       "frozen": false,
       "kind": "str",
       "range": [
@@ -8276,7 +8277,7 @@ Build a reusable mode package from a brief, name and task/single-shot inputs. Ca
       "panel": "Mode picker; Run once executes enabled modes including authoring; Optimize requires a scored mode. Use chat for stepwise gates."
     },
     "purpose": "Build a reusable mode package from a brief, name and task/single-shot inputs. Canonical smoke runs before separate QA and Overwatch; repair shares the attempt bound and completion needs current validation and intent evidence.",
-    "reviewed_schema": "c779b8ccc770b5983f4443eb85e626ee713f00afa14066f73d4c32acb25fc82a"
+    "reviewed_schema": "d4cbfcedf956fdbbf67b0f88dd04595d233534e8342ac4329d2d9fb055828b08"
   }
 }
 ```
@@ -8443,7 +8444,8 @@ Build a small reusable package with a strategist, coder and focused QA. Canonica
         "data_node",
         "revision_of",
         "requires_input",
-        "smoke_timeout_s"
+        "smoke_timeout_s",
+        "holdout"
       ],
       "notes": "read the brief, set up per-run staging, and publish to the prompts",
       "role": "ceo"
@@ -8636,7 +8638,7 @@ Build a small reusable package with a strategist, coder and focused QA. Canonica
     },
     "parts_manifest": {
       "default": "",
-      "description": "the parts manifest (parts.json with train/val/test id lists) the produced mode's runs use; the smoke samples only its train ids. A relative path is the project's (empty: the profile's, else the holdout fraction's split)",
+      "description": "the parts manifest (parts.json with train/val/test id lists) the produced mode's runs use; the smoke samples only its train ids. A relative path, here or in the profile, is the project's (`refactory optimize` reads one against its working directory) (empty: the profile's, else the holdout fraction's split)",
       "frozen": false,
       "kind": "str",
       "range": [
@@ -8799,7 +8801,7 @@ Build a small reusable package with a strategist, coder and focused QA. Canonica
       "panel": "Mode picker; Run once executes enabled modes including authoring; Optimize requires a scored mode. Use chat for stepwise gates."
     },
     "purpose": "Build a small reusable package with a strategist, coder and focused QA. Canonical smoke precedes focused QA; structural, runtime and review failures share repair_attempts. Supply a brief, name and task/single-shot inputs.",
-    "reviewed_schema": "260bec8e4446ecd5afeee080b5014640742ab248482db5b380e729d2116d7105"
+    "reviewed_schema": "4d230329b0c0872d9b475ce5d7ea8d107fa333b1a5c52834a234e7a1c21fd820"
   }
 }
 ```
@@ -11148,7 +11150,8 @@ Revise an existing mode package and validate the revision before separate QA and
         "data_node",
         "revision_of",
         "requires_input",
-        "smoke_timeout_s"
+        "smoke_timeout_s",
+        "holdout"
       ],
       "notes": "read the brief, set up per-run staging, and publish to the prompts",
       "role": "ceo"
@@ -11434,7 +11437,7 @@ Revise an existing mode package and validate the revision before separate QA and
     },
     "parts_manifest": {
       "default": "",
-      "description": "the parts manifest (parts.json with train/val/test id lists) the produced mode's runs use; the smoke samples only its train ids. A relative path is the project's (empty: the profile's, else the holdout fraction's split)",
+      "description": "the parts manifest (parts.json with train/val/test id lists) the produced mode's runs use; the smoke samples only its train ids. A relative path, here or in the profile, is the project's (`refactory optimize` reads one against its working directory) (empty: the profile's, else the holdout fraction's split)",
       "frozen": false,
       "kind": "str",
       "range": [
@@ -11645,7 +11648,7 @@ Revise an existing mode package and validate the revision before separate QA and
       "panel": "Mode picker; Run once executes enabled modes including authoring; Optimize requires a scored mode. Use chat for stepwise gates."
     },
     "purpose": "Revise an existing mode package and validate the revision before separate QA and Overwatch. Supply revision_of, name and brief. allow_regression=true skips original execution and numerical comparison, while revised execution and intent evidence remain mandatory.",
-    "reviewed_schema": "a5efd87748c500466b5dba7d64336aac7337fbcbe1dd263bc0499e90fe3aa4b0"
+    "reviewed_schema": "f7e831e44d53ac22baea475914513e9ca60600a99fbac6ab16055d24cbe1c0a9"
   }
 }
 ```
@@ -11807,7 +11810,8 @@ Revise a small mode package with a coder and focused QA after canonical validati
         "data_node",
         "revision_of",
         "requires_input",
-        "smoke_timeout_s"
+        "smoke_timeout_s",
+        "holdout"
       ],
       "notes": "read the brief, set up per-run staging, and publish to the prompts",
       "role": "ceo"
@@ -11990,7 +11994,7 @@ Revise a small mode package with a coder and focused QA after canonical validati
     },
     "parts_manifest": {
       "default": "",
-      "description": "the parts manifest (parts.json with train/val/test id lists) the produced mode's runs use; the smoke samples only its train ids. A relative path is the project's (empty: the profile's, else the holdout fraction's split)",
+      "description": "the parts manifest (parts.json with train/val/test id lists) the produced mode's runs use; the smoke samples only its train ids. A relative path, here or in the profile, is the project's (`refactory optimize` reads one against its working directory) (empty: the profile's, else the holdout fraction's split)",
       "frozen": false,
       "kind": "str",
       "range": [
@@ -12141,7 +12145,7 @@ Revise a small mode package with a coder and focused QA after canonical validati
       "panel": "Mode picker; Run once executes enabled modes including authoring; Optimize requires a scored mode. Use chat for stepwise gates."
     },
     "purpose": "Revise a small mode package with a coder and focused QA after canonical validation. Supply revision_of, name and brief. allow_regression=true skips original execution/comparison but still requires revised validation and intent evidence.",
-    "reviewed_schema": "b44ffeea4e8292da66d3961253dede3e8b1c6043f165adca20af828479bb0fc6"
+    "reviewed_schema": "bca6c09eb35bcf3dafa54442bd1f7ea6332b53a602da341b03d9ac0e75206bf8"
   }
 }
 ```

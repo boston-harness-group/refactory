@@ -131,8 +131,9 @@ class CreateMode(Mode):
                 "", "str",
                 description="the parts manifest (parts.json with train/val/test id lists) "
                             "the produced mode's runs use; the smoke samples only its train "
-                            "ids. A relative path is the project's (empty: the profile's, "
-                            "else the holdout fraction's split)",
+                            "ids. A relative path, here or in the profile, is the project's "
+                            "(`refactory optimize` reads one against its working directory) "
+                            "(empty: the profile's, else the holdout fraction's split)",
             ),
             "check_attempt_cap": Knob(
                 8, "int", lo=0,
@@ -200,7 +201,7 @@ class CreateMode(Mode):
             # are knobs. Naming no Task and not asking for `single_shot` is refused
             # here, before the first model call.
             knobs=("name", "brief", "task_ref", "single_shot", "data_node",
-                   "revision_of", "requires_input", "smoke_timeout_s"),
+                   "revision_of", "requires_input", "smoke_timeout_s", "holdout"),
             writes=("brief.json", "research-review.txt", "strategy-review.txt", "validation.txt",
                     "staging/source-snapshot.json"),
             produces=("name", "brief", "extends", "revision_of", "intent", "validation",

@@ -771,7 +771,7 @@
       "enum": [],
       "values": [],
       "frozen": false,
-      "description": "the parts manifest (parts.json with train/val/test id lists) the produced mode's runs use; the smoke samples only its train ids. A relative path is the project's (empty: the profile's, else the holdout fraction's split)",
+      "description": "the parts manifest (parts.json with train/val/test id lists) the produced mode's runs use; the smoke samples only its train ids. A relative path, here or in the profile, is the project's (`refactory optimize` reads one against its working directory) (empty: the profile's, else the holdout fraction's split)",
       "required": false
     },
     "check_attempt_cap": {

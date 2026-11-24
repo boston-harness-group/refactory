@@ -1641,9 +1641,29 @@ def test_gate_smoke_stops_on_a_refused_split_and_does_not_repair(tmp_path, monke
 
     monkeypatch.setattr(create_ops, "smoke", _refused)
     monkeypatch.setattr(create_ops, "repair", lambda *a, **kw: repairs.append(a) or "reloop")
-    with pytest.raises(ValueError, match="validation split_refused: SplitRefused: data node data"):
+    with pytest.raises(ValueError, match="the smoke split does not match the Task: data node data: none .*Give a profile or parts_manifest"):
         create_ops.gate_smoke(ctx)
     assert repairs == []
+
+
+@pytest.mark.parametrize("holdout", ["1.5", "half", "-0.1", 1])
+def test_a_holdout_the_smoke_cannot_use_stops_the_run_at_its_first_node(tmp_path, monkeypatch, holdout):
+    """A holdout that is not empty or a number from 0 to below 1 is refused by
+    `prepare_create`, before any model call, not first at the smoke."""
+    from refactory_dsh import nn
+
+    ctx = nn.RunContext(tmp_path / "run", facts={}, knobs={"holdout": holdout, "brief": "b"},
+                        enforce_writes=False)
+    with pytest.raises(create_ops.SplitRefused, match="holdout"):
+        create_ops.prepare_create(ctx)
+
+
+@pytest.mark.parametrize(("holdout", "expected"), [("", None), (None, None), (0, 0.0), ("0.25", 0.25)])
+def test_an_empty_holdout_is_not_given_and_zero_is(tmp_path, holdout, expected):
+    from refactory_dsh import nn
+
+    ctx = nn.RunContext(tmp_path, facts={}, knobs={"holdout": holdout}, enforce_writes=False)
+    assert create_ops._given_holdout(ctx) == expected
 
 
 def test_a_manifest_some_of_whose_train_ids_the_task_lacks_is_warned_about(tmp_path, monkeypatch):

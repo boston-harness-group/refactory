@@ -34,7 +34,7 @@ import type { UserQuestionService } from '@deepseek-ai/dsh-user-questions'
 import type { JsonValue } from '@deepseek-ai/dsh-util-values'
 import { HALT, Spine, validateGraph } from './spine.ts'
 import type { NodeView, SpineNext, TerminalHalt } from './spine.ts'
-import { commandOf, isDeterministic, runDataCommand, runDeterministic, runWarningsOf } from './execute.ts'
+import { commandOf, isDeterministic, repeatsOnRedo, runDataCommand, runDeterministic, runWarningsOf } from './execute.ts'
 import type { CommandFailure, CommandOutcome, CommandRunnerConfig } from './execute.ts'
 import type { WorkflowGraph } from './types.ts'
 import { isToolPolicy } from './types.ts'
@@ -3136,14 +3136,15 @@ export function apply(ctx: Context, config: Config): void {
       }
       // Nor is a redo that would only repeat a halt verdict from a gate the runtime
       // evaluates (a code gate, such as a smoke whose outcome is uncertain): one where the
-      // redone node, the gate and every node between them are deterministic. Each of those
-      // runs its command again on what it read before, so the gate decides as it did. An
-      // agent node on the way can produce something new, so a redo through one stays the
-      // CEO's, as does any redo after a halt at an agent or user gate.
+      // redone node, the gate and every node between them are commands (`repeatsOnRedo`).
+      // Each of those runs again on what it read before, so the gate decides as it did. An
+      // agent node on the way -- dispatched to a worker or driven by the CEO -- can produce
+      // something new, so a redo through one stays the CEO's, as does any redo after a halt
+      // at an agent or user gate.
       const rerun = halted?.reason === 'verdict' && halted.gate !== undefined
         && config.executeCommands && isDeterministic(spine.view(halted.gate))
         ? spine.between(args.node, halted.gate) : []
-      if (rerun.length > 0 && rerun.every(nid => isDeterministic(spine.view(nid)))) {
+      if (rerun.length > 0 && rerun.every(nid => repeatsOnRedo(spine.view(nid)))) {
         throw new Error(`gate ${halted!.gate} halted the run${halted!.detail ? `: ${halted!.detail}` : ''}. `
           + `Redoing ${args.node === halted!.gate ? 'the gate' : args.node} reruns only commands `
           + `(${rerun.join(', ')}) on what they read before, so it would repeat the halt. `

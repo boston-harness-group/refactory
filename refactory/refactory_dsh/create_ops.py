@@ -1493,6 +1493,8 @@ def prepare_create(ctx: Any) -> dict[str, Any]:
     from refactory_dsh import target_guard
 
     project = project_for_writes(workdir=ctx.workdir)
+    # A holdout the smoke could not use is said now, before the first model call.
+    _given_holdout(ctx)
     # First, run the original prepare to get all the standard facts.
     prepared = prepare(ctx)
     name = str(prepared["name"])
@@ -1620,6 +1622,23 @@ class SplitRefused(ValueError):
     Not a defect in the produced code, so `gate_smoke` stops rather than repairs."""
 
 
+def _given_holdout(ctx: Any) -> float | None:
+    """The ``holdout`` knob as a fraction, or None when it is not given (missing or
+    empty; 0 is given). Anything else than a number from 0 to below 1 is `SplitRefused`,
+    at the run's first node (`prepare_create`) as well as at the smoke."""
+    raw = ctx.knob("holdout", "")
+    text = "" if raw is None else str(raw).strip()
+    if not text:
+        return None
+    try:
+        value = float(text)
+    except ValueError as exc:
+        raise SplitRefused(f"holdout {text!r} is not a number from 0 to below 1") from exc
+    if not 0 <= value < 1:
+        raise SplitRefused(f"holdout {value} must be at least 0 and less than 1")
+    return value
+
+
 def _smoke_split(ctx: Any) -> tuple[dict[str, Any], dict[str, Any]]:
     """The split the produced mode's real runs use, for `sandbox.smoke`'s sample, and a
     record of it for ``smoke.json``.
@@ -1645,11 +1664,9 @@ def _smoke_split(ctx: Any) -> tuple[dict[str, Any], dict[str, Any]]:
             settings = dict(profiles.load(project, name)["settings"])
         except (profiles.ProfileError, OSError, ValueError, KeyError) as exc:
             raise SplitRefused(f"profile {name!r} cannot be read from {project}: {exc}") from exc
-    # A holdout of 0 is given (LiveMath's): only a missing or empty value is not.
-    raw_given = ctx.knob("holdout", "")
-    given = "" if raw_given is None else str(raw_given).strip()
-    if given:
-        holdout_from, raw = "knobs", given
+    given_holdout = _given_holdout(ctx)
+    if given_holdout is not None:
+        holdout_from, raw = "knobs", given_holdout
     elif settings.get("holdout") is not None:
         holdout_from, raw = "profile", settings["holdout"]
     else:
@@ -1970,6 +1987,11 @@ def gate_smoke(ctx: Any) -> str:
             return Verdict("halt", reason)
         evidence.record(ctx, {"status": kind, "detail": detail,
                               "smoke": receipt, "revision": ctx.read_json("revision.json", None)})
+        if kind == "split_refused":
+            raise ValueError(
+                f"the smoke split does not match the Task: {exc}. Give a profile or "
+                "parts_manifest whose train ids are items of the Task (and a holdout from 0 "
+                "to below 1), then start a new run; code repair was not attempted")
         evidence.stop_unrepairable(kind, detail)
         from refactory_dsh.fast_ops import _repair
         return (_repair if "repair_attempts" in ctx.knobs else repair)(ctx, [detail])

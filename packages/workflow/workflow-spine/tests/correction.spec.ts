@@ -1229,7 +1229,11 @@ describe('applyControls integration', () => {
     expect(readFileSync(join(workdir, 'builds'), 'utf8')).toBe('built\n')
   })
 
-  it('after a fn gate halts, a redo through an agent node upstream of it is the CEO\'s', async () => {
+  it.each([
+    ['driven by the CEO', undefined],
+    // As every agent node is on the default worker route (`workers.lower_workflow`).
+    ['dispatched to a worker', 'echo dispatched'],
+  ])('after a fn gate halts, a redo through an agent node upstream of it (%s) is the CEO\'s', async (_how, dispatch) => {
     const workdir = scratch()
     const reason = 'smoke timed out (inactivity, limit 3600s); code repair was not attempted'
     // An agent node feeds the gate directly; a command runs before the agent.
@@ -1237,7 +1241,8 @@ describe('applyControls integration', () => {
       name: 't', start_node: 'build',
       nodes: {
         build: { _type: 'FnNode', id: 'build', command: `echo built >> ${join(workdir, 'builds')}`, reads: [], writes: [] },
-        draft: { _type: 'AgentNode', id: 'draft', role: 'builder', prompt_template: 'D', reads: [], writes: [] },
+        draft: { _type: 'AgentNode', id: 'draft', role: 'builder', prompt_template: 'D', reads: [], writes: [],
+                 ...(dispatch === undefined ? {} : { dispatch_command: dispatch }) },
         gate_smoke: { _type: 'GateNode', id: 'gate_smoke', evaluator_type: 'fn',
                       evaluator_command: `printf '%s\\n%s\\n' '${reason}' halt`, reads: [] },
         register: { _type: 'AgentNode', id: 'register', role: 'builder', prompt_template: 'R', reads: [], writes: [] },
@@ -1251,15 +1256,48 @@ describe('applyControls integration', () => {
     }
     const ctx = await mount(graph, { workdir, executeCommands: true })
     ctx.provide('shell', realShell())
-    await call(ctx, 'wf_next')
-    await call(ctx, 'wf_done', { node: 'draft' })
-    const next = await call(ctx, 'wf_next') as { status: string; halted?: { gate?: string; reason: string } }
+    let next = await call(ctx, 'wf_next') as { status: string; halted?: { gate?: string; reason: string } }
+    if (dispatch === undefined) {
+      await call(ctx, 'wf_done', { node: 'draft' })
+      next = await call(ctx, 'wf_next') as typeof next
+    }
     expect(next.halted).toMatchObject({ gate: 'gate_smoke', reason: 'verdict' })
     await expect(call(ctx, 'wf_redo', { node: 'gate_smoke' }))
       .rejects.toThrow(/Redoing the gate reruns only commands/)
     // The agent feeder can answer differently.
     const viaAgent = await call(ctx, 'wf_redo', { node: 'draft' }) as { status: string }
     expect(viaAgent.status).toBe('redone')
+  })
+
+  it('an agent side branch that does not lead to a fn gate does not make a redo of commands useful', async () => {
+    const workdir = scratch()
+    // build -> check -> smoke -> gate_smoke, all commands; check's other outcome goes to an
+    // agent that never reaches gate_smoke, so a redo of build still repeats the halt.
+    const graph: WorkflowGraph = {
+      name: 't', start_node: 'build',
+      nodes: {
+        build: { _type: 'FnNode', id: 'build', command: 'true', reads: [], writes: [] },
+        check: { _type: 'GateNode', id: 'check', evaluator_type: 'fn', evaluator_command: 'echo proceed', reads: [] },
+        side: { _type: 'AgentNode', id: 'side', role: 'builder', prompt_template: 'S', reads: [], writes: [] },
+        smoke: { _type: 'FnNode', id: 'smoke', command: 'true', reads: [], writes: [] },
+        gate_smoke: { _type: 'GateNode', id: 'gate_smoke', evaluator_type: 'fn',
+                      evaluator_command: `printf '%s\\n%s\\n' 'no' halt`, reads: [] },
+        register: { _type: 'AgentNode', id: 'register', role: 'builder', prompt_template: 'R', reads: [], writes: [] },
+      },
+      edges: [
+        { source: 'build', target: 'check' },
+        { source: 'check', target: 'smoke', condition: 'proceed' },
+        { source: 'check', target: 'side', condition: 'reloop' },
+        { source: 'smoke', target: 'gate_smoke' },
+        { source: 'gate_smoke', target: 'register', condition: 'proceed' },
+      ],
+    }
+    const ctx = await mount(graph, { workdir, executeCommands: true })
+    ctx.provide('shell', realShell())
+    const next = await call(ctx, 'wf_next') as { halted?: { gate?: string } }
+    expect(next.halted).toMatchObject({ gate: 'gate_smoke' })
+    await expect(call(ctx, 'wf_redo', { node: 'build' }))
+      .rejects.toThrow(/Redoing build reruns only commands \(build, check, smoke, gate_smoke\)/)
   })
 
   it('a command upstream of an agent feeder of a fn gate may be redone after its halt', async () => {
