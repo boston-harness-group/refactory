@@ -857,8 +857,11 @@ optimizer, at no extra compute (train records only):
   runtimes (`items.refused_at_cap`, verdicts read whatever their case, as both route:
   the walker's `_visit_gate`, the spine's node runner from the gate's declared reloop
   verdicts and cap), so it is never read as a rerun. Each changed item is one line
-  (`_moved_line`): the items' traces are under "Trajectories", never repeated here. It
-  also shows the edit that made the child whole (a `set_knob` as the lines it changed),
+  (`_moved_line`). For each child's first broken and first fixed item, the replies that
+  moved follow (`_moved_replies`): each step whose reply changed, is new or is gone, the
+  parent's reply and the child's, each at most `EDIT_REPLY_CHARS` (4000) characters, head
+  and tail; a reply "Trajectories" or this section already shows is named by where it
+  is. It also shows the edit that made the child whole (a `set_knob` as the lines it changed),
   what it built, its prediction checked against the items, and the gate's decision on
   it, and warns that the two were scored in different rounds with different seeds, so
   some changes may be noise. Without a parent (the seed) or without shared items, it
@@ -1150,19 +1153,19 @@ paired with a parent picker), on the train records the request carries:
 - **Success analysts.** The passed items likewise (seed + 1): what made them work and
   where it comes from.
 - **Merge and rank.** Failure findings merge level by level in batches of
-  `analyst_merge_batch_size` lists (8), then success findings; a final merge with
-  failure priority returns one de-duplicated list ranked by items covered and impact.
+  `analyst_merge_batch_size` lists (8), then success findings; a final merge keeps both
+  sides' findings (a failure and a success finding about the same step are two facts)
+  in one list ordered by items covered, then impact. Merges are told, as the analysts
+  are, to say what happens and not what to do.
   As in SkillOpt, one list is not merged, the final merge runs only when both sides
   found something, and an unreadable merge keeps every input finding (failures first).
 - Each ranked failure finding
   also shows its attribution (`steps: first went wrong at ...`); success findings show
   none.
-- **The request** shows "What the analysts found, ranked" (up to 16 findings, 30000
-  characters) before the item results. Each finding is shown whole, as SkillOpt shows
-  its analysts' edits: its text, where (a structure note too), how the steps took part,
-  every evidence quote, line breaks kept; only when the findings pass the section's room
-  are the longest texts cut to one length (never below 100 characters), each cut marked
-  `… [cut: N chars]`. An analyst's reply whose top-level JSON object does not parse is
+- **The request** shows "What the analysts found, ranked" before the item results:
+  every merged finding, whole, as SkillOpt shows its analysts' edits: its text, where
+  (a structure note too), how the steps took part, every item id and every evidence
+  quote, line breaks kept. Its size is reported, never capped. An analyst's reply whose top-level JSON object does not parse is
   said to be invalid JSON, with the parser's message and where (`reply_object`); it is
   not repaired, and no object nested inside it is read as the answer. A fenced block
   counts only when its opening and closing fences each start a line, so a fence quoted
@@ -1363,11 +1366,8 @@ optimizer's model writes ONE memory note (`optim/memory.py`), as SkillOpt's meta
   observations of what the traces show, each naming its items. It forbids next steps,
   priorities, lessons, meta-lessons, principles and regression-risk advice, and any claim
   about what can or cannot work, be built or be edited. Domain-free; train items only.
-- **What it writes.** `{"reasoning", "memory"}`. Any section of the answer headed as
-  advice (next steps, priorities, recommendations, lessons, risks, ...) and any
-  bold-labelled advice paragraph (`**Key lesson**: ...`) is dropped before the note is
-  kept (`memory.without_advice`); an answer that is only advice leaves no note, which
-  counts as a failed pass (below). SkillOpt sets no length (its real runs wrote
+- **What it writes.** `{"reasoning", "memory"}`, the note kept as written: the prompt
+  forbids advice, and nothing filters the answer. SkillOpt sets no length (its real runs wrote
   3.4-5.8k characters); the note is kept within 6000 characters, a longer one cut with
   the cut said.
 - **Who reads it.** Every analyst call and every merge call (where SkillOpt shows its
@@ -2073,9 +2073,20 @@ the same digest as before, so it still resumes.
 
 **What the optimizer is told.** The request's "How nodes compose" section
 (`optim.base.composition_section`) describes the four kinds: what each reads and writes,
-how a gate gets its verdict, and how loops and forks are formed, facts only; each
-operator's own example is on its line under the operations. Code nodes appear in the
-section only when the run offers them.
+how a gate gets its verdict, how loops and forks are formed, and what happens when a call
+runs out of output or crashes, as facts (with `structure_guidance` on, one generic
+paragraph on what makes a new step pay off is added); each operator's own example is on
+its line under the operations. Code nodes appear in the section only when the run
+offers them.
+
+**What this graph allows.** The reference also carries facts about the edited graph,
+worked out once per request by the loop (`Loop._graph_facts`, `optim.base.graph_facts`,
+`ProposalContext.graph_facts`): what `"sees": ["task"]` gives a new step, what a new
+branch of each fork can see (`name@maker`, `(+knob k)` for an output that carries text
+knob `k`), and for each step whether removing it, replacing it by one step that sees the
+task, or merging it with the step after it is refused, in the attempt's own words
+(`Run.mechanics` on the edited candidate, without the code dry run). Accepted edits are
+not listed.
 
 ### Wiring blocks, repair and checks before scoring
 
@@ -2626,11 +2637,11 @@ pipeline view (at most 12 lines a candidate, the rest counted).
 
 **Naming inputs.** `"sees"` takes `"task"`, step ids, or single fact or file names there
 before the new step (that input alone); the catalogue says so, a name that is not there is
-refused with the names that are, and each fork's row in the operator table lists what a new
+refused with the names that are, and "What this graph allows" says for each fork what a new
 branch there can name, `(+knob k)` marking an output that carries text knob `k`.
 
 **What `"task"` gives.** `operators.task_inputs` is the one definition the operator line,
-the pipeline view, the step-carries table and the operators' wiring read: the task's own
+the pipeline view, "What this graph allows" and the operators' wiring read: the task's own
 input, once, as the model steps receive it. A name is out when an agent makes it, when an
 op makes it with a text knob's value, or when a node that takes such a name in makes it.
 Of the rest, it is what is there before some model step and made by an op of the mode

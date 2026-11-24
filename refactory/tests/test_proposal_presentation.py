@@ -439,7 +439,8 @@ def test_past_structural_edits_keep_every_steps_wiring_in_every_section():
     # The reasoning and its full rejected edits point to the edit section, which shows
     # them at the full edits' budget, rather than saying the wiring again.
     assert 'under "What the last edit changed" above' in reasoning
-    assert 'Whole under "What the last edit changed" above' in full and '"id"' not in full
+    assert 'Its edits are whole under "What the last edit changed" above' in full
+    assert '"id"' not in full
     assert len(tried) < 6000, "the history stays bounded"
 
 

@@ -226,11 +226,11 @@ def test_graded_changes_list_the_largest_moves_each_way():
     assert change["up"] == ["i7", "i6", "i5"] and change["down"] == ["i0", "i1", "i2"]
 
 
-def test_every_changed_item_is_named_in_one_line_and_no_reply_is_repeated():
+def test_every_changed_item_is_named_in_one_line_and_two_show_their_replies():
     """Twenty broken items with long replies: every one is named in one line, with its
-    answers and the step whose reply changed; no reply is shown here (the items' traces
-    are under "Trajectories")."""
-    from refactory_dsh.optim.base import _edit_change_lines
+    answers and the step whose reply changed; the first broken item shows the reply that
+    moved, parent's and child's, each within ``EDIT_REPLY_CHARS``; the rest show none."""
+    from refactory_dsh.optim.base import EDIT_REPLY_CHARS, _edit_change_lines
 
     def rec(item: str, passed: bool, reply: str) -> dict[str, Any]:
         return {"id": item, "passed": passed, "score": float(passed),
@@ -245,8 +245,10 @@ def test_every_changed_item_is_named_in_one_line_and_no_reply_is_repeated():
     for k in range(20):
         assert (f"- Item i{k} -- broken (child c), score 1 -> 0: parent passed; child "
                 "answered wrong; `t` 1 -> 1 run(s), reply changed.") in text
-        assert f"OLD-{k}" not in text and f"NEW-{k}" not in text and f"KEPT i{k}" not in text
-    assert "#### Item" not in text and len(text) < 5000
+        assert (f"OLD-{k} " in text) is (k == 0) and (f"NEW-{k} " in text) is (k == 0)
+        assert f"KEPT i{k}" not in text, "a reply that did not move is not shown"
+    assert "#### Replies that moved on item i0 (broken, child c)" in text
+    assert "z" * (EDIT_REPLY_CHARS + 1) not in text and "y" * (EDIT_REPLY_CHARS + 1) not in text
 
 def test_the_optimizer_sees_its_earlier_reasoning_beside_what_happened(tmp_path, monkeypatch):
     """The latest round's proposals in full -- the rationale, prediction and diagnosis
@@ -348,9 +350,10 @@ def test_the_gate_note_states_its_resolution_and_when_a_rejected_change_may_be_b
     assert ("the mean over 25 validation items, so one item is 1/25 = 0.04 of it, and a "
             "rejection can come down to a single item") in known
     assert "must not be proposed again unchanged" in known
-    # Building on a rejected change is about a fixable mechanism, not its net count.
-    assert ("A rejected change can hold the right idea with a fixable mechanism, whatever its "
-            "net count") in known
+    # A rejected change is said as a fact: where its edits and moved items are.
+    assert ("The latest rejected change's full edits and the items it moved are under "
+            "\"Your earlier reasoning\".") in known
+    assert "fixable mechanism" not in known and "build on" not in known
     assert "strongly positive" not in known
     assert "did not generalise" not in known and "do not build on" not in known
     unknown = ProposalContext(history=rows, leaderboard=rows[:1]).render()
@@ -415,7 +418,9 @@ def test_the_latest_rejected_candidate_is_shown_in_full_whatever_its_net():
     assert full.startswith("### Full edits of mine, the latest rejected candidate "
                            "(1 fixed / 7 broken)")
     # Its edits are whole once, in its own block, which the full-edits heading points to.
-    assert text.count(long) == 1 and long not in full and "Whole in its block above" in full
+    assert text.count(long) == 1 and long not in full
+    assert "Its edits are whole in its block above. It was rejected" in full
+    assert "built on" not in full and "fix what went wrong" not in full
     assert "OLDVALUE" not in full and "KEPTVALUE" not in full
     huge = [entry("big", 3, 0, "Z" * 9000)]
     big = ProposalContext(reasoning=huge).render()
@@ -460,7 +465,7 @@ def test_the_latest_rejected_change_says_what_went_wrong_in_it():
                            ).render()
     block = text[text.index("### Full edits of loopy"):].split("\n## ", 1)[0]
     assert "CHECK-CRITERIA" in block
-    assert "What went wrong in it (how it moved the items it changed):" in block
+    assert "How it moved the items it changed:" in block
     assert "gate solve_check gave" in block and "first reply was already right" in block
     assert 'reviewed under "Did the added steps contribute?"' in block
     # Pointed to only when that section reviews this candidate's step.
@@ -468,14 +473,12 @@ def test_the_latest_rejected_change_says_what_went_wrong_in_it():
                             ).render()
     other = other[other.index("### Full edits of loopy"):].split("\n## ", 1)[0]
     assert "Did the added steps contribute?" not in other
-    # A text-only rejected change says what there is: its counts, and that no step-level
-    # account is available.
+    # A text-only rejected change says what there is: its counts.
     knob = [{**rows[0], "id": "words", "effect": {}, "added": False,
              "edit": [{"op": "set_knob", "name": "k", "value": "NEW"}]}, *rows[1:]]
     words = ProposalContext(reasoning=knob).render()
     words = words[words.index("### Full edits of words"):].split("\n## ", 1)[0]
-    assert ("What went wrong in it: it broke 7 train item(s) and fixed 1 against its parent; "
-            "no step-by-step account") in words
+    assert "What it did: it broke 7 train item(s) and fixed 1 against its parent." in words
 
 
 #: A child whose structural edit made items fail mechanically (LiveMath B-s42, round 2):

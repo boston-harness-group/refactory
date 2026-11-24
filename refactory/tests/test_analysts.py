@@ -1359,16 +1359,6 @@ def test_a_finding_is_shown_whole_with_its_line_breaks_and_quotes():
     assert "[cut:" not in section
 
 
-def test_findings_past_the_sections_room_are_cut_to_fit_and_each_cut_is_said():
-    many = [{**FULL, "finding": f"FINDING-{k} " + "F" * 5000} for k in range(analysts.SHOWN_FINDINGS)]
-    lines = analysts.section_lines({"findings": many, "batches": []})
-    shown = [line for line in lines if __import__("re").match(r"\d+\. \[", line)]
-    assert len(shown) == analysts.SHOWN_FINDINGS, "every finding is still shown"
-    assert len("\n".join(lines)) <= analysts.SECTION_CHARS
-    assert all("FINDING-" in line and "… [cut: " in line for line in shown)
-    assert "more finding(s) not shown" not in "\n".join(lines)
-
-
 def test_an_errored_items_error_is_said_once():
     error = "compare: CompletionTimeout: model completion timed out after 1798s"
     record = {**_rec("f0", False, error=error), "fail_reason": error}

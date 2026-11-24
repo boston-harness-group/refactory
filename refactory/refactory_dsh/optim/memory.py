@@ -4,7 +4,7 @@ Once per epoch, from epoch 2, before the epoch's proposal, the optimizer's model
 compares two rollouts on the same train items and writes ONE memory note: the run's
 record, facts only -- each change tried, whether it was kept, not kept or refused and
 why, which train items it fixed and broke, what keeps failing, and short observations
-of what the traces show; never advice (`MEMORY_SYSTEM`, `without_advice`). It is
+of what the traces show; never advice (`MEMORY_SYSTEM`). It is
 the loop's cross-round memory, shown to every analyst call, every merge call and the
 proposal request (`format_context`, `request_lines`). It never edits the graph.
 
@@ -51,9 +51,9 @@ SkillOpt's mechanism (``skillopt/optimizer/meta_skill.py``, ``slow_update.py``, 
 - **What it writes**: ``{"reasoning", "memory"}`` (``meta_skill_content``). Unlike
   SkillOpt's ``meta_skill.md`` coach note, the note is a factual record with no next
   steps, priorities, lessons or regression-risk advice, and no claim about what can or
-  cannot work: a later call reads facts, and the proposer alone designs. A section of
-  the answer headed as advice is dropped (`without_advice`). SkillOpt sets no length;
-  its real runs wrote 3.4-5.8k characters, so the note is kept within ``MEMORY_CHARS``.
+  cannot work: a later call reads facts, and the proposer alone designs. SkillOpt sets
+  no length; its real runs wrote 3.4-5.8k characters, so the note is kept within
+  ``MEMORY_CHARS``.
 - **How it is shown**: SkillOpt's ``format_meta_skill_context`` wording (meta_skill.py
   18-30), to analysts, merges and the proposal request.
 
@@ -68,7 +68,6 @@ from __future__ import annotations
 
 import json
 import random
-import re
 from typing import Any, Mapping, Sequence
 
 from . import evidence
@@ -309,48 +308,13 @@ def answer_text(chars: int = MEMORY_CHARS) -> str:
             "}")
 
 
-#: A heading that opens advice rather than record (`without_advice`): next steps,
-#: priorities, recommendations, lessons, principles, regression risks.
-ADVICE_HEADING = re.compile(
-    r"(?i)\b(next|to try|try next|recommend\w*|suggest\w*|priorit\w*|lessons?|"
-    r"meta-?lessons?|principles?|advice|guidance|risks?|should|avoid|strategy|"
-    r"what works best)\b")
-
-
-def without_advice(note: str) -> str:
-    """``note`` without its advice: every Markdown section (a heading line and the lines
-    up to the next heading of the same or a higher level) whose heading names advice
-    (`ADVICE_HEADING`), and every bold-label paragraph that does
-    (``**Key lesson**: ...``). The record keeps facts only; what remains is kept as
-    written."""
-    out: list[str] = []
-    dropping: int | None = None
-    for line in note.splitlines():
-        heading = re.match(r"^(#{1,6})\s+(.*)", line)
-        if heading:
-            level = len(heading.group(1))
-            if dropping is not None and level > dropping:
-                continue
-            dropping = level if ADVICE_HEADING.search(heading.group(2)) else None
-            if dropping is not None:
-                continue
-        elif dropping is not None:
-            continue
-        label = re.match(r"^\s*(?:[-*]\s+)?\*\*([^*]+)\*\*\s*:", line)
-        if label and ADVICE_HEADING.search(label.group(1)):
-            continue
-        out.append(line)
-    return re.sub(r"\n{3,}", "\n\n", "\n".join(out)).strip()
-
-
 def parse_note(payload: Any) -> dict[str, str] | None:
-    """The answer's note without its advice (`without_advice`), within ``MEMORY_CHARS``
-    (cut with the cut said), and its reasoning, or ``None`` when it carries no note
-    (meta_skill.py:70-75) or nothing but advice."""
+    """The answer's note within ``MEMORY_CHARS`` (cut with the cut said) and its
+    reasoning, or ``None`` when it carries no note (meta_skill.py:70-75)."""
     if not isinstance(payload, Mapping):
         return None
     note = payload.get("memory", payload.get("meta_skill_content"))
-    note = without_advice(str(note)) if note not in (None, "") else ""
+    note = str(note).strip() if note not in (None, "") else ""
     if not note:
         return None
     if len(note) > MEMORY_CHARS:

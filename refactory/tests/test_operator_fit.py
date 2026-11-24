@@ -160,3 +160,49 @@ def test_an_unreadable_graph_gives_placeholder_examples_and_warns(caplog):
     assert "operator examples use placeholders" in caplog.text
 
 
+
+
+# ── the graph's facts in the reference (`base.graph_facts`) ──────────────────
+
+
+def _facts(state: dict, protected=()) -> list[str]:
+    from refactory_dsh.optim import base
+    from refactory_dsh.optim.memory import state_view
+
+    view = state_view(state)
+    return base.graph_facts(view.node_states, view.edges, view.knobs,
+                            nn_edits.catalogue("broad"), _check(state, protected))
+
+
+def test_the_facts_name_what_sees_task_gives_on_this_pipeline():
+    """A branch that `sees: ["task"]` gets the question once (prepare's user_prompt), never
+    compare's prompt fact or the item record: the facts list exactly that, in the words
+    the operator line uses."""
+    from refactory_dsh.nn.graph import Graph
+    from refactory_dsh.nn.operators import TASK_MEANING
+
+    state = _start_state()
+    names = sorted(name for _kind, name in core_ops._task_inputs(
+        Graph.from_state(state["graph"]), state))
+    assert names == ["user_prompt"]
+    assert ('- `"sees": ["task"]` gives a new step user_prompt, where it is there before the '
+            f"step: {TASK_MEANING}.") in _facts(state)
+
+
+def test_the_facts_say_what_a_new_branch_of_a_fork_can_see():
+    assert ("- fork `step_fork`: a new branch here can see: compare_prompt@prepare (+knob "
+            "compare_task), hypotheses_prompt@notes_prompts (+knob hypotheses_task), "
+            "precision_prompt@notes_prompts (+knob precision_task), user_prompt@prepare, "
+            "compare_notes.txt@compare, current_item.json@data; \"task\" gives user_prompt."
+            ) in _facts(_start_state())
+
+
+def test_the_facts_give_each_refusal_in_the_attempts_own_words():
+    facts = "\n".join(_facts(_start_state()))
+    compare = next(line for line in facts.splitlines() if line.startswith("- `compare`:"))
+    assert "remove is refused (" in compare and "leaves steps without an input only it makes" \
+        in compare, compare
+    # Every refusal said is the attempt's own: each listed edit is refused by it.
+    state = _start_state()
+    check = _check(state)
+    assert isinstance(check({"op": "remove", "step": "compare"}), list)

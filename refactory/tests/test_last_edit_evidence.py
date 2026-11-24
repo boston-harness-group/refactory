@@ -50,7 +50,8 @@ def test_the_s4_round_two_request_stays_bounded_and_says_no_trace_twice():
     text = context().render()
     section = _section(text)
     assert len(text) < REQUEST_BOUND, len(text)
-    assert len(section) <= 12000, len(section)  # the edits, counts and one line per item
+    # The edits, counts, one line per item, and two items' moved replies at a fixed cap.
+    assert len(section) <= 12000 + 2 * 2 * 5 * base.EDIT_REPLY_CHARS, len(section)
     rest = text.replace(section, "")
     repeated = [w for w in _windows(section) if w in rest]
     assert repeated == [], (len(repeated), repeated[0][:200])
@@ -63,7 +64,9 @@ def test_every_changed_item_is_named_once_in_one_line_and_no_trace_is_repeated()
     section = _section(context().render())
     listed = re.findall(r"(?m)^- Item (\w+) -- (\w+) \(child c2\)", section)
     assert sorted(listed) == sorted(FLIPPED.items()), "each changed item once"
-    assert "#### Item" not in section and "Parent's reply" not in section
+    blocks = re.findall(r"(?m)^#### Replies that moved on item (\w+) \((\w+), child c2\)$",
+                        section)
+    assert [kind for _item, kind in blocks] == ["broken", "fixed"], blocks
     line = next(line for line in section.splitlines() if line.startswith("- Item "))
     assert ("`check` 1 -> 1 run(s), reply changed; `final` 1 -> 1 run(s), reply changed; "
             "`alt` 0 -> 1 run(s), new; `merge` 0 -> 1 run(s), new.") in line
