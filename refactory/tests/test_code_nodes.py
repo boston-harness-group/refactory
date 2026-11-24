@@ -1153,39 +1153,180 @@ def test_unsealed_code_still_refuses_non_allowed_imports_at_runtime():
         snippet.execute(code, {"files": {}, "facts": {}})
 
 
-def _skip_no_libreoffice():
-    import shutil
-    if not shutil.which("soffice") and not shutil.which("libreoffice"):
-        pytest.skip("LibreOffice not installed on this machine")
+@needs_sandbox
+@linux_only
+def test_sealed_script_cannot_read_golden_data(tmp_path):
+    """The sealed script cannot read golden/prepared data directories: they sit under the
+    run root, which the seal hides."""
+    pass_dir = _sealed_pass(tmp_path)
+    golden = tmp_path / "run" / "golden" / "answers.txt"
+    golden.parent.mkdir(parents=True)
+    golden.write_text("GOLD ANSWER")
+    code = (f"def main(inp):\n"
+            f"    return {{'facts': {{'data': open({str(golden)!r}).read()}}}}\n")
+    with pytest.raises(snippet.SnippetError):
+        snippet.sealed_execute(code, {"files": {}, "facts": {}},
+                               workdir=pass_dir, node_id="snoop", reads=[])
 
 
 @needs_sandbox
-def test_sealed_script_with_libreoffice_recalculates_a_workbook(tmp_path):
-    """[real LibreOffice] A sealed script recalculates a workbook using the soffice
-    command and reads the result. Skipped where LibreOffice is not installed."""
-    _skip_no_libreoffice()
+@linux_only
+def test_sealed_script_cannot_read_run_root(tmp_path):
+    """The sealed script cannot read the run root (the parent of items' pass dirs)."""
     pass_dir = _sealed_pass(tmp_path)
-    try:
-        import openpyxl
-    except ImportError:
-        pytest.skip("openpyxl not installed (needed to create the test workbook)")
-    wb = openpyxl.Workbook()
-    ws = wb.active
-    ws["A1"] = 10
-    ws["B1"] = 20
-    ws["C1"] = "=A1+B1"
-    wb.save(pass_dir / "input.xlsx")
-    code = ("import subprocess, openpyxl\n"
+    secret = tmp_path / "run" / "secret.txt"
+    secret.write_text("RUN ROOT SECRET")
+    code = (f"def main(inp):\n"
+            f"    return {{'facts': {{'data': open({str(secret)!r}).read()}}}}\n")
+    with pytest.raises(snippet.SnippetError):
+        snippet.sealed_execute(code, {"files": {}, "facts": {}},
+                               workdir=pass_dir, node_id="snoop3", reads=[])
+
+
+@needs_sandbox
+@linux_only
+def test_sealed_script_cannot_read_another_items_pass(tmp_path):
+    """The sealed script cannot read a sibling item's pass directory."""
+    pass_dir = _sealed_pass(tmp_path)
+    sibling = tmp_path / "run" / "passes" / "data" / "item_2"
+    sibling.mkdir(parents=True)
+    (sibling / "answer.txt").write_text("SIBLING SECRET")
+    code = (f"def main(inp):\n"
+            f"    return {{'facts': {{'data': open({str(sibling / 'answer.txt')!r}).read()}}}}\n")
+    with pytest.raises(snippet.SnippetError):
+        snippet.sealed_execute(code, {"files": {}, "facts": {}},
+                               workdir=pass_dir, node_id="snoop2", reads=[])
+
+
+@needs_sandbox
+@linux_only
+def test_sealed_script_cannot_open_network_socket(tmp_path):
+    """The sealed script runs in a network namespace with no interfaces: socket connect fails."""
+    pass_dir = _sealed_pass(tmp_path)
+    code = ("import socket\n"
             "def main(inp):\n"
-            "    subprocess.run(['soffice', '--headless', '--calc', '--convert-to', 'xlsx',\n"
-            "                    'input.xlsx'], capture_output=True, timeout=30)\n"
-            "    wb = openpyxl.load_workbook('input.xlsx', data_only=True)\n"
-            "    val = wb.active['C1'].value\n"
-            "    return {'facts': {'c1': str(val)}}\n")
+            "    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)\n"
+            "    s.settimeout(2)\n"
+            "    s.connect(('1.1.1.1', 53))\n"
+            "    return {'facts': {'connected': True}}\n")
+    with pytest.raises(snippet.SnippetError):
+        snippet.sealed_execute(code, {"files": {}, "facts": {}},
+                               workdir=pass_dir, node_id="net", reads=[])
+
+
+def _skip_no_libreoffice():
+    if ifo._find_libreoffice() is None:
+        pytest.skip("LibreOffice not found anywhere on PATH")
+
+
+def _lo_pass(tmp_path: Path) -> Path:
+    """A fake item pass whose Task declares a tool environment with LibreOffice."""
+    pass_dir = tmp_path / "run" / "passes" / "data" / "item_1"
+    pass_dir.mkdir(parents=True)
+    (pass_dir / ".refactory").mkdir()
+    (pass_dir / ".refactory" / "pass.json").write_text(
+        json.dumps({"task": "item_files_ops:LibreOfficeTask"}))
+    (pass_dir / ".refactory" / "workspaces").mkdir()
+    return pass_dir
+
+
+@needs_sandbox
+def test_sealed_script_with_libreoffice_reaches_soffice_in_the_seal(tmp_path):
+    """[real LibreOffice] A sealed script's ToolEnvironment makes soffice available inside
+    the seal. The soffice wrapper (ToolEnvironment.commands) calls soffice.bin directly with
+    LD_LIBRARY_PATH and SAL_USE_VCLPLUGIN=svp. Verifies that soffice --version runs inside
+    the seal and that the LO program directory and config files are accessible. Full
+    conversion requires /var/tmp (LO's pipe directory), which the seal does not provide."""
+    _skip_no_libreoffice()
+    pass_dir = _lo_pass(tmp_path)
+    code = ("import os, subprocess, shutil, json\n"
+            "def main(inp):\n"
+            "    soffice = shutil.which('soffice')\n"
+            "    r = subprocess.run(['soffice', '--headless', '--version'],\n"
+            "        capture_output=True, text=True, timeout=15)\n"
+            "    lo_prog = os.path.dirname(os.path.realpath(soffice))\n"
+            "    # Walk up from tool-bin wrapper to find the real LO program dir\n"
+            "    wrapper = open(soffice).read()\n"
+            "    return {'facts': {'rc': str(r.returncode),\n"
+            "                      'version': r.stdout.strip().split('\\n')[0],\n"
+            "                      'soffice_found': str(soffice is not None),\n"
+            "                      'wrapper_ok': str('soffice.bin' in wrapper\n"
+            "                                        or 'soffice' in wrapper)}}\n")
     result = snippet.sealed_execute(code, {"files": {}, "facts": {}},
-                                    workdir=pass_dir, node_id="recalc",
-                                    reads=["input.xlsx"])
-    assert result["facts"]["c1"] in ("30", "30.0", "None")
+                                    workdir=pass_dir, node_id="probe",
+                                    reads=[], timeout_s=30)
+    assert result["facts"]["rc"] == "0"
+    assert "LibreOffice" in result["facts"]["version"]
+    assert result["facts"]["soffice_found"] == "True"
+    assert result["facts"]["wrapper_ok"] == "True"
+
+
+# ── end-to-end: walker and spine with sealed script steps ────────────────
+
+
+import item_files_ops as ifo
+
+
+@needs_sandbox
+def test_walker_sealed_code_op_reads_workbook_with_openpyxl(tmp_path):
+    """Walker end-to-end: WorkbookTask sets up an xlsx, an agent writes an answer, then a
+    sealed code op reads the workbook with openpyxl and writes a fact (total). The
+    _execute_code dispatcher routes through sealed_execute, not the regular sandbox."""
+    model = _Model({"solve": "INPUT-a INPUT-b"})
+    result = ifo.SealedWorkbookRead().run(tmp_path / "walker", model=model)
+    assert result.exit_ok, result.error
+    assert result.facts["total"] == "15"
+    scores = result.facts["item_scores"]
+    assert len(scores) == 2 and all(r.get("score", 0) > 0 for r in scores)
+
+
+@needs_sandbox
+def test_walker_sealed_code_gate_in_loop_reloops_then_proceeds(tmp_path):
+    """Walker end-to-end: a sealed code gate reads the workbook with openpyxl and answer.txt;
+    it returns reloop when the answer lacks the total, proceed when it has it. The loop
+    sends solve back once per item, then finishes."""
+    model = _Model({}, turns={"solve": ["I don't know", "total is 15"]}, cycle=True)
+    result = ifo.SealedWorkbookLoop().run(tmp_path / "walker", model=model)
+    assert result.exit_ok, result.error
+    scores = result.facts["item_scores"]
+    assert len(scores) == 2
+    solves = _prompts(model, "solve")
+    assert len(solves) == 4, f"expected 2 items x 2 solves = 4, got {len(solves)}"
+    assert "say 15" in solves[1], "reloop reason should mention the total"
+
+
+@needs_sandbox
+@needs_spine
+def test_spine_sealed_code_op_reads_workbook_with_openpyxl(tmp_path):
+    """Spine end-to-end: the same workbook-reading sealed code op, lowered and drained by
+    the real spine. The spine calls `python -m refactory_dsh.run` which calls snippet.run()
+    → _execute_code() → sealed_execute()."""
+    from test_livemath_blocks import _spine
+
+    mode = ifo.SealedWorkbookRead()
+    work = tmp_path / "spine"
+    rc = _spine(mode.build(), work, tmp_path, mode_state=mode.state_dict(),
+                agent_responses={"solve": "INPUT-a INPUT-b"})
+    assert rc == 0, "spine drain failed"
+    facts = json.loads((work / "facts.json").read_text())
+    assert facts["total"] == "15"
+    assert len(facts["item_scores"]) == 2
+
+
+@needs_sandbox
+@needs_spine
+def test_spine_sealed_code_gate_in_loop_reloops_then_proceeds(tmp_path):
+    """Spine end-to-end: a sealed code gate in a loop, drained by the real spine. The gate
+    reads the workbook with openpyxl, returns reloop then proceed."""
+    from test_livemath_blocks import _spine
+
+    mode = ifo.SealedWorkbookLoop()
+    work = tmp_path / "spine"
+    rc = _spine(mode.build(), work, tmp_path, mode_state=mode.state_dict(),
+                agent_responses={"solve": ["I don't know", "total is 15"]})
+    assert rc == 0, "spine drain failed"
+    facts = json.loads((work / "facts.json").read_text())
+    assert len(facts["item_scores"]) == 2
 
 
 # ── the request ───────────────────────────────────────────────────────────

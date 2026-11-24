@@ -8,6 +8,7 @@ when its ``answer.txt`` holds the item's own input.
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from types import MappingProxyType
 from typing import Any
@@ -254,6 +255,163 @@ class SealedMissingEnv(SealedLook):
 
     name = "item_files_sealed_missing_env"
     task_ref = f"{MODULE}:MissingEnvTask"
+
+
+class WorkbookTask(ToolEnvTask):
+    """`ToolEnvTask` whose setup creates an xlsx workbook for each item (A1, B1 values)."""
+
+    name = "item_files_workbook"
+    item_files = MappingProxyType({"input": INPUT, "workbook": "workbook.xlsx"})
+
+    def setup(self, instance: TaskInstance, workspace: Path, **_kw: Any) -> None:
+        super().setup(instance, workspace)
+        import openpyxl
+
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws["A1"] = 10
+        ws["B1"] = 5
+        wb.save(Path(workspace) / "workbook.xlsx")
+
+
+def _find_libreoffice() -> str | None:
+    """The soffice binary's program directory, if one is installed."""
+    import os
+    import shutil
+
+    for cmd in ("soffice", "libreoffice"):
+        path = shutil.which(cmd)
+        if path:
+            return os.path.realpath(os.path.dirname(os.path.realpath(path)))
+    return None
+
+
+def _lo_commands() -> dict[str, str]:
+    prog = _find_libreoffice()
+    if not prog:
+        raise RuntimeError("LibreOffice not found")
+    soffice_bin = os.path.join(prog, "soffice.bin")
+    if not os.path.isfile(soffice_bin):
+        soffice_bin = os.path.join(prog, "soffice")
+    return {"soffice": (f'#!/bin/sh\n'
+                        f'export SAL_USE_VCLPLUGIN=svp\n'
+                        f'export LD_LIBRARY_PATH="{prog}${{LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}}"\n'
+                        f'export SAL_TMPDIR=/tmp\n'
+                        f'export TMPDIR=/tmp\n'
+                        f'exec "{soffice_bin}" "$@"\n')}
+
+
+def _lo_reads() -> list[str]:
+    prog = _find_libreoffice()
+    if not prog:
+        raise RuntimeError("LibreOffice not found")
+    lo_root = os.path.dirname(prog)
+    return [prog, os.path.join(lo_root, "share")] if os.path.isdir(os.path.join(lo_root, "share")) else [prog]
+
+
+LO_TOOL_SUMMARY = "python3 + soffice (LibreOffice headless)"
+
+
+class LibreOfficeTask(FileTask):
+    """`FileTask` whose sealed steps get the test interpreter and soffice."""
+
+    name = "item_files_libreoffice"
+    item_files = MappingProxyType({"input": INPUT, "workbook": "workbook.xlsx"})
+    tool_environment = ToolEnvironment(
+        summary=LO_TOOL_SUMMARY, python=test_interpreter,
+        commands=_lo_commands, reads=_lo_reads, private_tmp=True,
+    )
+
+    def setup(self, instance: TaskInstance, workspace: Path, **_kw: Any) -> None:
+        super().setup(instance, workspace)
+        import openpyxl
+
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws["A1"] = 10
+        ws["B1"] = 20
+        ws["C1"] = "=A1+B1"
+        wb.save(Path(workspace) / "workbook.xlsx")
+
+
+#: Code for a sealed op that reads a workbook with openpyxl and returns the total.
+WORKBOOK_READ_CODE = (
+    "import openpyxl\n"
+    "def main(inp):\n"
+    "    wb = openpyxl.load_workbook('workbook.xlsx')\n"
+    "    ws = wb.active\n"
+    "    total = ws['A1'].value + ws['B1'].value\n"
+    "    return {'facts': {'total': str(total)},\n"
+    "            'files': {'result.txt': str(total)}}\n"
+)
+
+#: Code for a sealed gate that reads a workbook, checks if the answer mentions the total.
+WORKBOOK_GATE_CODE = (
+    "import openpyxl\n"
+    "def main(inp):\n"
+    "    wb = openpyxl.load_workbook('workbook.xlsx')\n"
+    "    ws = wb.active\n"
+    "    total = ws['A1'].value + ws['B1'].value\n"
+    "    answer = open('answer.txt').read()\n"
+    "    if str(total) in answer:\n"
+    "        return {'verdict': 'proceed', 'reason': f'answer has {total}'}\n"
+    "    return {'verdict': 'reloop', 'reason': f'say {total}'}\n"
+)
+
+
+class SealedWorkbookRead(ItemFilesMode):
+    """Agent writes an answer, then a sealed code op reads the workbook with openpyxl."""
+
+    name = "sealed_workbook_read"
+    task_ref = f"{MODULE}:WorkbookTask"
+    data_writes: tuple[str, ...] = ("current_item.json", INPUT, "workbook.xlsx")
+
+    def build(self) -> nn.Graph:
+        from refactory_dsh.snippet import RUN
+
+        graph = nn.Graph()
+        graph.add(nn.Node("data", "data", subgraph_entry="solve", subgraph_exit="read_wb",
+                          task_ref=self.task_ref, writes=self.data_writes,
+                          produces=("item_scores", "total"),
+                          parallelism_knob="data_parallelism",
+                          knobs=("data_parallelism",)))
+        graph.add(nn.Node("solve", "agent", prompt_template="Write your answer.",
+                          writes=(ANSWER,), tool_policy="none"))
+        graph.add(nn.Node("read_wb", "op", call=RUN, sealed_script=True,
+                          reads=("workbook.xlsx",), required_reads=("workbook.xlsx",),
+                          produces=("total",), writes=("result.txt",),
+                          code=WORKBOOK_READ_CODE))
+        graph.connect("solve", "read_wb")
+        return graph
+
+
+class SealedWorkbookLoop(ItemFilesMode):
+    """Agent writes an answer, a sealed code gate reads the workbook and loops."""
+
+    name = "sealed_workbook_loop"
+    task_ref = f"{MODULE}:WorkbookTask"
+    data_writes: tuple[str, ...] = ("current_item.json", INPUT, "workbook.xlsx")
+
+    def build(self) -> nn.Graph:
+        from refactory_dsh.nn.loops import LOOP_END_CALL
+        from refactory_dsh.snippet import GATE
+
+        graph = nn.Graph()
+        graph.add(nn.Node("data", "data", subgraph_entry="solve", subgraph_exit="done",
+                          task_ref=self.task_ref, writes=self.data_writes,
+                          produces=("item_scores",), parallelism_knob="data_parallelism",
+                          knobs=("data_parallelism",)))
+        graph.add(nn.Node("solve", "agent", prompt_template="Write your answer.",
+                          writes=(ANSWER,), tool_policy="none"))
+        graph.add(nn.Node("check_wb", "gate", evaluator=GATE, sealed_script=True,
+                          reads=("workbook.xlsx", ANSWER),
+                          required_reads=("workbook.xlsx", ANSWER),
+                          max_iterations=1, code=WORKBOOK_GATE_CODE))
+        graph.add(nn.Node("done", "op", call=LOOP_END_CALL))
+        graph.connect("solve", "check_wb")
+        graph.connect("check_wb", "solve", condition="reloop")
+        graph.connect("check_wb", "done", condition="proceed")
+        return graph
 
 
 class AgentPass(ItemFilesMode):

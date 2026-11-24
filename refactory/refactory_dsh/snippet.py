@@ -828,8 +828,9 @@ def sealed_execute(code: str, inp: Any, *, workdir: Path, node_id: str,
                            "a sealed script step needs one (its interpreter)")
     _ref, environment = found
     runs = run_roots(workdir)
-    root = Path(tempfile.mkdtemp(dir=workdir / ".refactory" / "workspaces",
-                                 prefix=f"{node_id}-sealed-"))
+    ws_parent = workdir / ".refactory" / "workspaces"
+    ws_parent.mkdir(parents=True, exist_ok=True)
+    root = Path(tempfile.mkdtemp(dir=ws_parent, prefix=f"{node_id}-sealed-"))
     ws = root / "workspace"
     bin_dir = root / "tool-bin"
     try:
