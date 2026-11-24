@@ -473,6 +473,11 @@ def pytest_configure(config: pytest.Config) -> None:
         "accepts; the tests/model_credential.py hook skips it with a stated reason "
         "when this machine has none",
     )
+    config.addinivalue_line(
+        "markers",
+        "no_integration: opt out of the integration skip for a test inside an "
+        "integration-marked module; the test runs without --run-integration",
+    )
 
 
 #: nodeid -> tool, for every test that declares it needs a real external tool.
@@ -559,7 +564,7 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
         return
     skip = pytest.mark.skip(reason="pass --run-integration to run DSH inner-loop tests")
     for item in items:
-        if "integration" in item.keywords:
+        if "integration" in item.keywords and "no_integration" not in item.keywords:
             item.add_marker(skip)
 
 

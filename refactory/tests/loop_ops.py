@@ -885,3 +885,16 @@ class SmokeTask(Task):
     def verify(self, instance: TaskInstance, workspace: Any, **kw: Any) -> VerifyResult:
         passed = instance.id in self.PASSED
         return VerifyResult(passed=passed, score=1.0 if passed else 0.0)
+
+
+def name_the_smoked_package(ctx: Any) -> dict[str, Any]:
+    """What a create run's earlier nodes leave for `create_ops.gate_smoke`: the package's
+    name and directory as facts, and the brief and strategy its evidence record reads.
+    For the smoke gate's own tests, which run the real gate on both runtimes."""
+    from refactory_dsh import registry
+    from refactory_dsh.paths import project_for_nodes
+
+    name = str(ctx.knob("package_name"))
+    ctx.write_json("brief.json", {"brief": "smoke it"})
+    ctx.write_json("strategy.json", {"acceptance_criteria": ["it runs"]})
+    return {"name": name, "brief": "smoke it", "artifact": str(registry.where(name, project_for_nodes()))}

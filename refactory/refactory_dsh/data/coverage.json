@@ -117,7 +117,7 @@
         "panel": "Mode picker; Run once executes enabled modes including authoring; Optimize requires a scored mode. Use chat for stepwise gates."
       },
       "purpose": "Build a reusable mode package from a brief, name and task/single-shot inputs. Canonical smoke runs before separate QA and Overwatch; repair shares the attempt bound and completion needs current validation and intent evidence.",
-      "reviewed_schema": "3fddccba946f8bf6d63e2d7b4c59d50a346a8193a3a79a547be985dc1159ffd3"
+      "reviewed_schema": "d4cbfcedf956fdbbf67b0f88dd04595d233534e8342ac4329d2d9fb055828b08"
     },
     "default_pack/create_fast": {
       "doc": "refactory/docs/authoring-validation.md",
@@ -137,7 +137,7 @@
         "panel": "Mode picker; Run once executes enabled modes including authoring; Optimize requires a scored mode. Use chat for stepwise gates."
       },
       "purpose": "Build a small reusable package with a strategist, coder and focused QA. Canonical smoke precedes focused QA; structural, runtime and review failures share repair_attempts. Supply a brief, name and task/single-shot inputs.",
-      "reviewed_schema": "1f3437b748a7372075d53eaff9a6e1d1527c82be8d9abf70289bf86fe47f04a3"
+      "reviewed_schema": "4d230329b0c0872d9b475ce5d7ea8d107fa333b1a5c52834a234e7a1c21fd820"
     },
     "default_pack/design": {
       "doc": "refactory/docs/authoring-validation.md",
@@ -224,7 +224,7 @@
         "panel": "Mode picker; Run once executes enabled modes including authoring; Optimize requires a scored mode. Use chat for stepwise gates."
       },
       "purpose": "Revise an existing mode package and validate the revision before separate QA and Overwatch. Supply revision_of, name and brief. allow_regression=true skips original execution and numerical comparison, while revised execution and intent evidence remain mandatory.",
-      "reviewed_schema": "184ce0afc0773fd7318dab012f721a9160cd84b03834893eb6622d0090ef279d"
+      "reviewed_schema": "f7e831e44d53ac22baea475914513e9ca60600a99fbac6ab16055d24cbe1c0a9"
     },
     "default_pack/edit_fast": {
       "doc": "refactory/docs/authoring-validation.md",
@@ -244,7 +244,7 @@
         "panel": "Mode picker; Run once executes enabled modes including authoring; Optimize requires a scored mode. Use chat for stepwise gates."
       },
       "purpose": "Revise a small mode package with a coder and focused QA after canonical validation. Supply revision_of, name and brief. allow_regression=true skips original execution/comparison but still requires revised validation and intent evidence.",
-      "reviewed_schema": "a030bca98b76bd46b990b05b557fa2ea0040aaa3d25b8b2d0c683434301f7054"
+      "reviewed_schema": "bca6c09eb35bcf3dafa54442bd1f7ea6332b53a602da341b03d9ac0e75206bf8"
     },
     "fix_pack/make_pass": {
       "doc": "refactory/docs/tutorials/01-write-a-mode.md",

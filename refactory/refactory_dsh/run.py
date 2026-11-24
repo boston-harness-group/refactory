@@ -611,8 +611,21 @@ def main(argv: list[str] | None = None) -> int:
             file=sys.stderr,
         )
         return 2
+    # A watched run (`activity.WATCH_ENV`) sees this node's output as it is written and
+    # can end its process group if it is stopped; any other run takes no part in this.
+    from refactory_dsh import activity
+
+    record = activity.record_process()
+    activity.tee_output()
     try:
-        produced = run_node(argv[0], node_id=node_id or None)
+        return _run_and_report(argv[0], node_id)
+    finally:
+        activity.forget_process(record)
+
+
+def _run_and_report(target: str, node_id: str) -> int:
+    try:
+        produced = run_node(target, node_id=node_id or None)
     except BuildLoopStop as exc:
         print(FAILURE_MARKER, file=sys.stderr)
         print(format_failure_detail(exc), file=sys.stderr)
@@ -630,7 +643,6 @@ def main(argv: list[str] | None = None) -> int:
             print(_clipped(reason))
         print(produced.strip())
     return 0
-
 
 if __name__ == "__main__":  # pragma: no cover - the entry point
     raise SystemExit(main())

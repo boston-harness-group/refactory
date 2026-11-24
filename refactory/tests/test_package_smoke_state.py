@@ -8,8 +8,10 @@ the person is that it says the package has not been shown to run.
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
+import pytest
 from refactory_dsh import create_ops, nn, registry, sandbox
 from refactory_dsh.create_ops import STAGING_DIR, register
 from refactory_dsh.steering import Ledger
@@ -201,3 +203,173 @@ def test_the_package_record_changes_once_after_registering(tmp_path, monkeypatch
     monkeypatch.setattr(create_ops, "smoke", revised)
     assert create_ops.gate_smoke(ctx) == "proceed"
     assert writes == [] and registry.smoke_state(NAME, project) == "passed"
+
+
+
+# ── a smoke that stops before its run ends halts the run, once, on both runtimes ──
+
+QUIET = "quiet_smoke_pkg"
+
+#: The created package: one mode whose only work goes quiet for a minute, so its smoke
+#: is stopped for inactivity, the outcome `create_ops.gate_smoke` cannot judge.
+_QUIET_FILES = {
+    "__init__.py": (
+        "from refactory_dsh.nn import Package\n"
+        "from .mode import Quiet\n\n"
+        f"PACKAGE = Package(name={QUIET!r}, modes=(Quiet,), ops=('refactory_packages.{QUIET}.ops',))\n"
+    ),
+    "ops.py": (
+        "import time\n\n"
+        "def wait(ctx):\n"
+        "    time.sleep(60)\n"
+        "    ctx.write_json('best.json', {'best': 1.0})\n"
+        "    return {'best': 1.0}\n"
+    ),
+    "mode.py": (
+        "from refactory_dsh import nn\n\n"
+        "class Quiet(nn.Mode):\n"
+        "    name = 'quiet'\n"
+        "    def build(self):\n"
+        "        g = nn.Graph()\n"
+        f"        g.add(nn.Node('wait', 'op', call='refactory_packages.{QUIET}.ops:wait',"
+        " writes=('best.json',), produces=('best',)))\n"
+        "        return g\n"
+    ),
+}
+
+#: The reason the halt carries (`create_ops.gate_smoke`), as the person reads it.
+_HALT = "smoke timed out (inactivity, limit 2s); code repair was not attempted"
+
+
+class _SmokeGate(nn.Mode):
+    """Create's smoke gate as create wires it (reloop to the authoring node), after a node
+    that leaves what the gate reads. The real `create_ops.gate_smoke` runs it."""
+
+    name = "smoke_gate"
+
+    @classmethod
+    def declare(cls):
+        return {
+            "package_name": nn.Knob(QUIET, "str"),
+            "smoke_timeout_s": nn.Knob(2, "int", lo=1, hi=86400),
+            "smoke_items": nn.Knob(3, "int", lo=1),
+            "attempts": nn.Knob(10, "int", lo=0),
+        }
+
+    def build(self):
+        graph = nn.Graph()
+        graph.add(nn.Node("emit", "op", call="loop_ops:name_the_smoked_package",
+                          knobs=("package_name",), writes=("brief.json", "strategy.json"),
+                          produces=("name", "brief", "artifact")))
+        graph.add(nn.Node("smoke", "gate", evaluator="refactory_dsh.create_ops:gate_smoke",
+                          knobs=("smoke_timeout_s", "smoke_items", "attempts"),
+                          reads=("brief.json", "strategy.json"),
+                          writes=("smoke.json", "revision.json", "authoring-evidence.json",
+                                  "validation.txt"),
+                          produces=("smoke_score", "smoke_ok", "smoke_model", "smoke_reason",
+                                    "before_score", "after_score", "regressed", "revision_note",
+                                    "runtime_evidence", "validation", "attempts_used",
+                                    "check_attempts_used", "convergence_extras_used",
+                                    "convergence_granted")))
+        graph.add(nn.Node("done", "op", call="loop_ops:noop"))
+        graph.connect("emit", "smoke")
+        graph.connect("smoke", "done", condition="proceed")
+        graph.connect("smoke", "emit", condition="reloop")
+        return graph
+
+
+def _quiet_project(tmp_path: Path, monkeypatch) -> Path:
+    project = git_repo(tmp_path / "project")
+    root = registry.workspace_root(project) / QUIET
+    root.mkdir(parents=True)
+    for filename, body in _QUIET_FILES.items():
+        (root / filename).write_text(body)
+    registry.install_workspace(project)
+    monkeypatch.setenv("REFACTORY_PROJECT", str(project))
+    return project
+
+
+def _smokes(run: Path) -> list[Path]:
+    """The smoke runs a run made: `create_ops.smoke` gives each its own directory."""
+    return sorted(path for path in (run / "smoke").glob("*") if path.is_dir())
+
+
+def test_a_smoke_stopped_for_inactivity_halts_the_walker_run_once(tmp_path, monkeypatch):
+    """Walker: the real gate halts with its reason instead of failing or reworking the
+    package, the reason reaches the run's status, and the smoke ran once."""
+    _quiet_project(tmp_path, monkeypatch)
+    run = tmp_path / "run"
+    result = _SmokeGate().evaluate(run)
+    assert result.halted is True, result.error
+    assert _HALT in (result.error or "")
+    assert result.gate_verdicts.get("smoke") == "halt"
+    status = json.loads((run / ".refactory" / "spine-status.json").read_text())
+    assert status["status"] == "halted" and _HALT in status["error"]
+    assert len(_smokes(run)) == 1
+    assert json.loads((run / "smoke.json").read_text())["timeout_kind"] == "inactivity"
+
+
+def test_a_smoke_stopped_for_inactivity_halts_the_spine_run_once(tmp_path, monkeypatch,
+                                                                 graph_profile_home):
+    """Spine: the same graph, lowered and run by the graph profile's spine
+    (`graph-owner.mjs`, the real spine row with no CEO model), the gate run as DSH runs
+    it (`python -m refactory_dsh.run`). The gate's printed reason is the halt's, in the
+    run's status, and the smoke ran once."""
+    from refactory_dsh.dsh_runtime import run_on_dsh
+    from tests_support import graph_owner_launcher
+
+    launcher = graph_owner_launcher(tmp_path / "dsh")
+    if launcher is None:
+        pytest.skip("the spine owner needs Node and the installed workspace (pnpm install)")
+    _quiet_project(tmp_path, monkeypatch)
+    monkeypatch.setenv("DSH_CLI", str(launcher))
+    tests = str(Path(__file__).resolve().parent)
+    monkeypatch.setenv("PYTHONPATH", os.pathsep.join(
+        part for part in (tests, os.environ.get("PYTHONPATH", "")) if part))
+    run = tmp_path / "run"
+    done = run_on_dsh(_SmokeGate().state_dict(), run, name="smoke-gate", timeout_s=600)
+    status = json.loads((run / ".refactory" / "spine-status.json").read_text())
+    assert status["status"] == "halted", (status, done.stderr[-3000:])
+    assert _HALT in status["error"], status
+    assert len(_smokes(run)) == 1
+    assert json.loads((run / "smoke.json").read_text())["timeout_kind"] == "inactivity"
+
+
+# ── a halt's reason reaches the walker's status from inside a fork or a data pass ──
+
+def _fork_with_halting_branch() -> nn.Graph:
+    """fork -> (body -> gate, side) -> join, the gate out of retries and declared ``halt``."""
+    graph = nn.Graph()
+    graph.add(nn.Node("fork", "fork", targets=("body", "side")))
+    graph.add(nn.Node("body", "op", call="loop_ops:count_visit",
+                      writes=("visits.json",), produces=("visits",)))
+    graph.add(nn.Node("gate", "gate", evaluator="loop_ops:always_retry", max_iterations=2,
+                      on_exhausted="halt"))
+    graph.add(nn.Node("side", "op", call="loop_ops:noop"))
+    graph.add(nn.Node("join", "join", sources=("gate", "side")))
+    graph.add(nn.Node("done", "op", call="loop_ops:noop"))
+    graph.connect("fork", "join")
+    graph.connect("body", "gate")
+    graph.connect("gate", "body", condition="retry")
+    graph.connect("gate", "join", condition="proceed")
+    graph.connect("side", "join")
+    graph.connect("join", "done")
+    return graph
+
+
+@pytest.mark.parametrize("shape", ["fork", "pass", "pass-at-once"])
+def test_a_halt_inside_a_fork_or_a_data_pass_keeps_its_reason_on_the_walker(tmp_path, shape):
+    """The gate's reason -- here the cap that refused its retry -- is in the run's error
+    and its status, wherever the halt happened, as the spine keeps it; not only which
+    gate halted."""
+    from refactory_dsh.nn.executor import execute
+    from test_loop_exhaustion import _loop_graph
+
+    graph = (_fork_with_halting_branch() if shape == "fork"
+             else _loop_graph(parallelism=3 if shape == "pass-at-once" else 1, on_exhausted="halt"))
+    run = tmp_path / "run"
+    result = execute(graph, run, max_steps=400)
+    assert result.halted, result.error
+    assert "halted the run: max_iterations of 2" in str(result.error), result.error
+    status = json.loads((run / ".refactory" / "spine-status.json").read_text())
+    assert "max_iterations of 2" in status["error"], status

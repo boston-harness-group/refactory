@@ -98,6 +98,8 @@ export interface TerminalHalt {
   reason: 'verdict' | 'max_iterations' | 'cancelled' | 'incomplete'
   /** Sink nodes the run never reached, when reason is 'incomplete'. */
   unreached?: string[]
+  /** The gate's own reason text (correction #4: halt reason reaches the person). */
+  detail?: string
 }
 
 /**
@@ -602,6 +604,33 @@ export class Spine {
 
   private outgoing(nid: string): WorkflowEdge[] {
     return this.edges.filter(edge => edge.source === nid)
+  }
+
+  /**
+   * The nodes on some path from `from` to `to`, both included, never leaving `to` (so a
+   * gate's own reloop edge adds nothing): what a redo of `from` reruns before `to`
+   * decides again. Empty when `to` cannot be reached from `from`.
+   * @param from - the node a redo starts at.
+   * @param to - the node the path ends at.
+   * @returns their ids.
+   */
+  between(from: string, to: string): string[] {
+    const walk = (start: string, step: (nid: string) => string[], stop: string): Set<string> => {
+      const seen = new Set([start])
+      const queue = [start]
+      while (queue.length > 0) {
+        const nid = queue.shift()!
+        if (nid === stop) continue
+        for (const next of step(nid)) {
+          if (!seen.has(next)) { seen.add(next); queue.push(next) }
+        }
+      }
+      return seen
+    }
+    const forward = walk(from, nid => this.outgoing(nid).map(edge => edge.target), to)
+    if (!forward.has(to)) return []
+    const backward = walk(to, nid => this.edges.filter(edge => edge.target === nid).map(edge => edge.source), from)
+    return [...forward].filter(nid => backward.has(nid))
   }
 
   private unconditionalTarget(nid: string): string | undefined {
@@ -1288,8 +1317,9 @@ export class Spine {
       record()
       delete this.gateReasons[gate]
       if (target === undefined) {
-        // Terminal halt: end the whole run
-        this.halted = { gate, reason: 'verdict' }
+        // Terminal halt: end the whole run.  Carry the gate's reason text so
+        // recordStatus writes it to spine-status.json (correction #4).
+        this.halted = { gate, reason: 'verdict', ...(feedback ? { detail: feedback } : {}) }
         this.cursor = []
         this.afters = new Map()
       } else {
