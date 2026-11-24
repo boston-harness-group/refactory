@@ -404,6 +404,18 @@ def sealed_environment(_real_gh_shim: tuple[Path, Path]) -> Any:
     return sealed
 
 
+def _positive_seconds(value: str) -> float:
+    """``--time-budget``'s type: a positive number of seconds."""
+    import argparse
+    try:
+        seconds = float(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"not a number of seconds: {value!r}") from None
+    if not seconds > 0:
+        raise argparse.ArgumentTypeError(f"must be more than 0 seconds: {value!r}")
+    return seconds
+
+
 def pytest_addoption(parser: pytest.Parser) -> None:
     parser.addoption(
         "--run-integration",
@@ -424,6 +436,20 @@ def pytest_addoption(parser: pytest.Parser) -> None:
         metavar="I/N",
         help="run only shard I of N: test files packed by their CI durations "
              "(tests/ci_durations.json), so N parallel jobs together run every test once",
+    )
+    parser.addoption(
+        "--run-slow",
+        action="store_true",
+        default=False,
+        help="run tests marked @pytest.mark.slow (they run in nightly CI)",
+    )
+    parser.addoption(
+        "--time-budget",
+        type=_positive_seconds,
+        default=None,
+        metavar="SECONDS",
+        help="fail any test whose call phase exceeds SECONDS unless it is marked @pytest.mark.slow "
+             "(off by default; PR CI passes it in .github/workflows/ci.yml)",
     )
     parser.addoption(
         "--toolchain-gate",
@@ -487,6 +513,10 @@ def pytest_configure(config: pytest.Config) -> None:
         "markers",
         "no_integration: opt out of the integration skip for a test inside an "
         "integration-marked module; the test runs without --run-integration",
+    )
+    config.addinivalue_line(
+        "markers",
+        "slow: test exceeds the CI time budget and runs only in nightly",
     )
 
 
@@ -624,6 +654,12 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
         for item in items:
             if "structure_fuzz_long" in item.keywords:
                 item.add_marker(skip_long)
+    if not config.getoption("--run-slow", default=False):
+        skip_slow = pytest.mark.skip(
+            reason="pass --run-slow to run slow tests; they run nightly")
+        for item in items:
+            if item.get_closest_marker("slow") is not None:
+                item.add_marker(skip_slow)
     if config.getoption("--run-integration", default=False):
         return
     skip = pytest.mark.skip(reason="pass --run-integration to run DSH inner-loop tests")
@@ -770,3 +806,29 @@ def configured_model_home(monkeypatch: pytest.MonkeyPatch) -> Path:
     home = Path(os.environ["DSH_HOME"])
     assert os.path.realpath(home) not in _REAL_DSH_HOMES, "configured_model_home needs the sealed DSH home"
     return model_home_with_a_key(home)
+
+
+# ── per-test time budget (opt-in via --time-budget) ─────────────────────────────
+
+@pytest.hookimpl(hookwrapper=True)
+def pytest_runtest_makereport(item: pytest.Item, call: pytest.CallInfo[None]) -> Iterator[None]:
+    """Fail a test whose call phase exceeds --time-budget unless it carries @pytest.mark.slow.
+
+    The budget is off by default: design-run checks, local runs and the nightly job never
+    get it. Only PR CI passes it, in ``.github/workflows/ci.yml`` (`design.CI_TIME_BUDGET_S`).
+    """
+    outcome = yield
+    report: pytest.TestReport = outcome.get_result()
+    if report.when != "call" or not report.passed:
+        return
+    budget = item.config.getoption("--time-budget", default=None)
+    if budget is None:
+        return
+    if item.get_closest_marker("slow") is not None:
+        return
+    if report.duration > budget:
+        report.outcome = "failed"
+        report.longrepr = (
+            f"Test took {report.duration:.1f}s, exceeding the {budget:g}s budget. "
+            "Mark it @pytest.mark.slow or speed it up."
+        )

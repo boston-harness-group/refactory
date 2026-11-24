@@ -297,17 +297,34 @@ GATED_STRATEGIES = [n for n in strategies.names()
 UNGATED_STRATEGIES = ["best_of_n", "autoscientists", "reflective"]
 
 
+@pytest.fixture(scope="module")
+def shared_run(tmp_path_factory: pytest.TempPathFactory) -> Any:
+    """``shared_run(name, val_gate)``: one four-epoch model-proposer run of a strategy,
+    made the first time a test asks for it and read by every later test that asks for
+    the same one. Four tests below read that same run; none of them changes it. The run
+    is made inside the asking test, so it has that test's isolation."""
+    runs: dict[tuple[str, bool], tuple[Loop, ComboModel]] = {}
+
+    def run(name: str, val_gate: bool) -> tuple[Loop, ComboModel]:
+        if (name, val_gate) not in runs:
+            model = ComboModel()
+            root = tmp_path_factory.mktemp(f"{name}-{'gated' if val_gate else 'ungated'}")
+            runs[name, val_gate] = (_run(name, root, model, val_gate=val_gate, epochs=4), model)
+        return runs[name, val_gate]
+
+    return run
+
+
 # ── 1. every strategy x {random, autoresearch} ─────────────────────────────
 
 
 @pytest.mark.parametrize("name", strategies.names())
-def test_every_strategy_runs_with_the_model_proposer_and_its_edits_score(tmp_path, name):
+def test_every_strategy_runs_with_the_model_proposer_and_its_edits_score(shared_run, name):
     """The model's edits are applied to the candidate the request showed, evaluated,
     and (under the gate) judged by it: the best candidate carries more than one of the
     model's fixes, so a later request edited an earlier model edit."""
-    model = ComboModel()
     gated = name in GATED_STRATEGIES
-    loop = _run(name, tmp_path, model, val_gate=gated, epochs=4)
+    loop, model = shared_run(name, gated)
     assert loop.optimizer.proposal_failures == [], loop.optimizer.proposal_failures
     assert model.requests, f"{name} never asked the model"
     children = [c for c in _children(loop) if c.evaluated]
@@ -514,12 +531,11 @@ def test_an_ungated_run_scores_its_last_proposals(tmp_path, picker):
 
 
 @pytest.mark.parametrize("name", strategies.names())
-def test_no_strategy_leaves_its_last_round_unscored_without_the_gate(tmp_path, name):
+def test_no_strategy_leaves_its_last_round_unscored_without_the_gate(shared_run, name):
     """Every strategy, ungated: a search that ends on its epoch limit scores what its
     last epoch proposed (strategies that drive their own epochs -- reflective,
     adaptive_meta, the curricula -- used to leave it), and each evaluation is counted."""
-    model = ComboModel()
-    loop = _run(name, tmp_path, model, epochs=4)
+    loop, _model = shared_run(name, False)
     assert loop.optimizer.proposal_failures == []
     if loop.epochs:
         assert loop.epochs[-1].accepted, f"{name}: the last epoch proposed nothing to score"
@@ -544,11 +560,10 @@ def test_no_strategy_leaves_its_last_round_unscored_without_the_gate(tmp_path, n
 
 
 @pytest.mark.parametrize("name", GATED_STRATEGIES)
-def test_no_strategy_leaves_its_last_round_ungated(tmp_path, name):
+def test_no_strategy_leaves_its_last_round_ungated(shared_run, name):
     """Every strategy the gate runs with: the last epoch's proposals are scored and
     judged by the gate before the run reports, as the default loop's are."""
-    model = ComboModel()
-    loop = _run(name, tmp_path, model, val_gate=True, epochs=4)
+    loop, _model = shared_run(name, True)
     assert loop.epochs[-1].accepted, f"{name}: the last epoch proposed nothing to score"
     assert loop._unevaluated() == [], f"{name} left its last round unscored"
     assert {c.id for c in loop.population} == _gated(loop), f"{name} left a candidate ungated"
@@ -775,9 +790,8 @@ def test_map_elites_keeps_each_structural_child_in_its_own_group_and_edits_it_ag
     ("best_of_n", "independent variants of the seed"),
     ("autoscientists", "independent lines of attack"),
 ])
-def test_the_strategy_decision_is_in_the_request_text(tmp_path, name, expected):
-    model = ComboModel()
-    loop = _run(name, tmp_path, model, val_gate=name in GATED_STRATEGIES, epochs=4)
+def test_the_strategy_decision_is_in_the_request_text(shared_run, name, expected):
+    _loop, model = shared_run(name, name in GATED_STRATEGIES)
     decided = [r for r in model.requests if r.decision]
     assert decided, f"{name}'s decision never reached a request"
     if expected is None:  # adaptive_meta decides "no meta" while it progresses: still data

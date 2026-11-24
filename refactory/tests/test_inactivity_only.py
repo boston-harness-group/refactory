@@ -9,7 +9,7 @@ model client: the walker (`nn.executor`) in process, the spine through its real 
 whose dispatched worker (`worker_node`) rebuilds the client from the spec
 `workers.lower_workflow` wrote. The scripted session shows activity as the worker
 observer does: it touches the session's activity file (`model.activity_path`).
-Test-only values stand for production's: 5 s of inactivity for 600 s, and a backstop of
+Test-only values stand for production's: 2 s of inactivity for 600 s, and a backstop of
 seconds for 14400 s. The per-completion ``timeout_s`` is 3 s, so a session bounded by it
 would end long before the active one finishes.
 """
@@ -31,7 +31,13 @@ from refactory_dsh.model import DshModelClient, activity_path
 from refactory_dsh.nn.executor import CURRENT_ITEM, execute
 from test_crashed_step_retry import RUNTIMES, _sessions, _spine
 
-FAKE_DSH = '''import json, os, pathlib, re, subprocess, sys, time
+FAKE_DSH = '''import json, os, pathlib, re, signal, subprocess, sys, time
+child = None
+def stop(*_):              # as DSH does on shutdown: it ends the tool processes it owns
+    if child is not None:
+        child.kill()
+    sys.exit(143)
+signal.signal(signal.SIGTERM, stop)
 prompt = sys.stdin.read()
 mode, seconds = re.search(r"(active|idle|busy) (\\d+)", prompt).groups()
 item = pathlib.Path("current_item.json")
@@ -40,11 +46,11 @@ if item.exists() and json.loads(item.read_text()).get("id") != "0":
 activity = pathlib.Path(os.environ["REFACTORY_WORKER_RECEIPT"]).with_suffix(".activity")
 end = time.time() + int(seconds)
 if mode == "busy" and int(seconds):   # a process runs beneath a model that streams nothing
-    subprocess.Popen(["sleep", seconds])
+    child = subprocess.Popen(["sleep", seconds])
 while time.time() < end:
-    if mode == "active":     # a frame streamed every second, as the observer records it
+    if mode == "active":     # a frame streamed every 0.4 s, as the observer records it
         activity.touch()
-    time.sleep(1)
+    time.sleep(0.4)
 print("right")
 '''
 
@@ -63,7 +69,7 @@ class Session:
 
     def client(self) -> DshModelClient:
         return DshModelClient(worker_backend="dsh", provider="p", model="m", dsh_cli=str(self.cli),
-                              attempts=1, timeout_s=3, inactivity_s=5, backstop_s=self.backstop_s)
+                              attempts=1, timeout_s=3, inactivity_s=2, backstop_s=self.backstop_s)
 
 
 def _graph(prompt: str, *, tools: bool = False) -> nn.Graph:
@@ -105,44 +111,44 @@ def _item(run: Path) -> Path:
 
 @pytest.mark.parametrize("runtime", RUNTIMES)
 def test_an_active_session_runs_past_any_wall(tmp_path, runtime):
-    """[both runtimes] (a) Active every second for 20 s, inactivity 5 s, no wall: the
+    """[both runtimes] (a) Active every 0.4 s for 8 s, inactivity 2 s, no wall: the
     session completes and its item is scored -- not stopped by inactivity, nor by the
-    per-completion timeout_s (3 s), nor by the backstop (well past 20 s)."""
-    record, elapsed, run = _run(runtime, "active 20", tmp_path, backstop_s=120)
+    per-completion timeout_s (3 s), nor by the backstop (well past 8 s)."""
+    record, elapsed, run = _run(runtime, "active 8", tmp_path, backstop_s=60)
     assert record["passed"] is True and record["error_kind"] is None, record
-    assert elapsed >= 20
+    assert elapsed >= 8
     assert _sessions(_item(run)) == ["completed"]
 
 
 @pytest.mark.parametrize("runtime", RUNTIMES)
 def test_an_idle_session_ends_on_inactivity(tmp_path, runtime):
-    """[both runtimes] (b) Silent past the 5 s inactivity limit: stopped as a timeout,
-    "of inactivity", long before its 60 s are up."""
-    record, elapsed, run = _run(runtime, "idle 60", tmp_path, backstop_s=120)
+    """[both runtimes] (b) Silent past the 2 s inactivity limit: stopped as a timeout,
+    "of inactivity", long before its 30 s are up."""
+    record, elapsed, run = _run(runtime, "idle 30", tmp_path, backstop_s=60)
     assert record["passed"] is False and record["error_kind"] == "timeout", record
-    assert "timed out after 5s of inactivity" in record["error_text"]
-    assert elapsed < 40
+    assert "timed out after 2s of inactivity" in record["error_text"]
+    assert elapsed < 30
     assert _sessions(_item(run)) == ["timed_out"]
 
 
 @pytest.mark.parametrize("runtime", RUNTIMES)
 def test_the_backstop_fires_only_past_its_value_and_is_the_models_failure(tmp_path, runtime):
-    """[both runtimes] (c) The backstop (10 s) leaves a session active for 6 s alone, and
+    """[both runtimes] (c) The backstop (6 s) leaves a session active for 3 s alone, and
     stops one still active past it: the model's own failure (``backstop``), neither a
     timeout nor a harness incident."""
-    record, _, _ = _run(runtime, "active 6", tmp_path / "under", backstop_s=10)
+    record, _, _ = _run(runtime, "active 3", tmp_path / "under", backstop_s=6)
     assert record["passed"] is True and record["error_kind"] is None, record
 
-    record, elapsed, run = _run(runtime, "active 60", tmp_path / "past", backstop_s=10)
+    record, elapsed, run = _run(runtime, "active 30", tmp_path / "past", backstop_s=6)
     assert record["passed"] is False and record["error_kind"] == "backstop", record
     assert not harness_incident(record), "scored 0, never rerun or left out of the score"
     assert "still writing" in record["error_text"]
     # The spine names it by its worker's own line (`items.WORKER_ERROR_MARKER`), with its
     # type, as the walker does: never by a `worker:` line a quoted reply could hold.
     assert record["error_text"].startswith("solve: HarnessBackstop: model session hit"), record
-    assert "hit the harness backstop after 10s" in record["error_text"]
+    assert "hit the harness backstop after 6s" in record["error_text"]
     assert "timed out" not in record["error_text"]
-    assert 10 <= elapsed < 45
+    assert 6 <= elapsed < 30
     assert _sessions(_item(run)) == ["harness_backstop"]
 
 
@@ -151,25 +157,25 @@ def test_a_running_process_is_no_activity_in_a_session_without_tools(tmp_path, r
     """[both runtimes] (d) A session with no tools whose model streams nothing while a
     process runs beneath it (a background job, a loop) ends on inactivity: only the
     model's stream is its sign of life."""
-    record, elapsed, run = _run(runtime, "busy 60", tmp_path, backstop_s=120)
+    record, elapsed, run = _run(runtime, "busy 30", tmp_path, backstop_s=60)
     assert record["passed"] is False and record["error_kind"] == "timeout", record
-    assert "timed out after 5s of inactivity" in record["error_text"]
-    assert elapsed < 40
+    assert "timed out after 2s of inactivity" in record["error_text"]
+    assert elapsed < 30
     assert _sessions(_item(run)) == ["timed_out"]
 
 
 @pytest.mark.parametrize("runtime", RUNTIMES)
 def test_a_tool_that_outlives_a_quiet_model_is_an_inactivity_timeout_at_the_backstop(tmp_path, runtime):
     """[both runtimes] (e) In a session with tools a running tool command keeps the
-    session alive past the 5 s inactivity limit, up to the backstop (10 s). Stopped
+    session alive past the 2 s inactivity limit, up to the backstop (6 s). Stopped
     there with no model frame for longer than the limit, it timed out on inactivity
     (``timeout``), not a harness incident."""
-    record, elapsed, run = _run(runtime, "busy 60", tmp_path, backstop_s=10, tools=True)
+    record, elapsed, run = _run(runtime, "busy 30", tmp_path, backstop_s=6, tools=True)
     assert record["passed"] is False and record["error_kind"] == "timeout", record
     assert re.search(r"model completion timed out after \d+s of inactivity \(no model output; a "
-                     r"tool command was still running at the 10s harness backstop\)",
+                     r"tool command was still running at the 6s harness backstop\)",
                      record["error_text"]), record["error_text"]
-    assert 10 <= elapsed < 45
+    assert 6 <= elapsed < 30
     assert _sessions(_item(run)) == ["timed_out"]
 
 

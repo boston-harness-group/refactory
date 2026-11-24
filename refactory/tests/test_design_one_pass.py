@@ -372,6 +372,21 @@ def test_only_design_modes_builder_checks_each_correction_fails_without_its_chan
             if node is not None and "## Before you stop" in node.prompt_template] == []
 
 
+def test_both_design_modes_builders_and_reviewers_get_the_test_writing_rules():
+    """The five test-writing rules (no per-case runtime runs, no real sleeps, extend the
+    existing file, no machine state, the CI time budget) reach design's and design_fast's
+    builders and code reviewers; design_fast's builder gets the rules, not the revert check."""
+    from refactory_dsh.design import CI_TIME_BUDGET_S, TEST_REVIEW_RULES, TEST_RULES
+    from refactory_dsh.fast import DesignFastMode
+
+    design, fast = DesignMode().build().nodes, DesignFastMode().build().nodes
+    assert f"({CI_TIME_BUDGET_S} s)" in TEST_RULES and f"({CI_TIME_BUDGET_S} s)" in TEST_REVIEW_RULES
+    assert TEST_RULES in design["emit"].prompt_template
+    assert TEST_RULES in fast["emit"].prompt_template
+    assert TEST_REVIEW_RULES in design["code_reviewer"].prompt_template
+    assert TEST_REVIEW_RULES in fast["focused_qa"].prompt_template
+
+
 def test_the_workspace_builder_runs_the_tests_its_change_touches_not_the_full_suite():
     """In the live trial (dm-149) the workspace builder ran the full suites several times:
     11.6 of its 27 minutes, before the self-check and the check ran them again. Design's and

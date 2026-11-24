@@ -11,7 +11,7 @@ from dataclasses import replace
 from refactory_dsh import delivery, repo_change
 from refactory_dsh.create_ops import MARKER_RULE, SEVERITY_RULE
 from refactory_dsh.create import CreateMode
-from refactory_dsh.design import DesignMode
+from refactory_dsh.design import TEST_REVIEW_RULES, TEST_RULES, DesignMode
 from refactory_dsh.edit import EditMode
 from refactory_dsh.nn import Graph, Knob, Node
 
@@ -116,6 +116,7 @@ def _qa_nodes(graph: Graph, *, artifact: bool, design: bool = False) -> None:
     focused_qa_prompt = (
         qa_prompt + "\nEach entry in `findings` is a BLOCKING finding. " + SEVERITY_RULE + " " + MARKER_RULE
         + " A check of something non-core that fails ends its name with `[non-core]`.\n"
+        + (TEST_REVIEW_RULES if design else "")
         + (ARTIFACT_QA if artifact else "")
         + ("{{review_instructions}}\nChanged functions:\n{{changed_functions}}\n\n"
            if design else "")
@@ -404,6 +405,7 @@ class DesignFastMode(DesignMode):
                 "or prior acceptance histories. Do not delegate or launch research, reviewer agents "
                 "or an optimizer.\n"
                 + WORKSPACE_BRIEFING
+                + "\n## Writing tests\n" + TEST_RULES
                 + "The runtime runs the requested check and one focused QA review next. Preserve all "
                 "requested behavior. Do not invoke downstream graph operations yourself. When the "
                 "repair feedback names verifier findings, answer each in your final message: the "

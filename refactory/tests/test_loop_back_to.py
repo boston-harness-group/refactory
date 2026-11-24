@@ -407,6 +407,8 @@ def test_nested_loops_run_on_the_walker(tmp_path, monkeypatch):
             assert nodes.count(step) == 2, (step, nodes)
 
 
+@pytest.mark.slow(reason="one spine run of S4 with two nested loops, every step a process of its own: "
+                  "~70 s in CI; the walker runs the same graph in PR CI (test_nested_loops_run_on_the_walker)")
 @needs_spine
 def test_nested_loops_run_on_the_spine(tmp_path, monkeypatch):
     _patch_task(monkeypatch)

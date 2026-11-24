@@ -67,6 +67,34 @@ BESIDE_CHECK_VERIFIER_NOTE = (
     "its own. Do not run the whole check yourself.\n"
 )
 
+#: PR CI's per-test time budget (`--time-budget` in `.github/workflows/ci.yml`): a test
+#: whose call takes longer fails there unless it is marked `slow` (run nightly).
+CI_TIME_BUDGET_S = 90
+
+#: How a builder writes tests, in both design modes' emit prompts.
+TEST_RULES = (
+    "- Test logic in-process, with one full spine or walker run per feature for runtime "
+    "parity, not one per case.\n"
+    "- No real sleeps in tests: use an injected clock.\n"
+    "- Extend the module's existing test file, retire tests the change supersedes, and state "
+    "the net test count in the PR.\n"
+    "- No dependence on machine state: use temp paths, and skip with a reason when a resource "
+    "is unavailable.\n"
+    f"- A test over the CI time budget ({CI_TIME_BUDGET_S} s) needs an explicit `slow` mark and "
+    "a reason.\n"
+)
+
+#: The same rules for both design modes' code reviewers: findings like any other.
+TEST_REVIEW_RULES = (
+    "A test that breaks a test-writing rule is a finding, tagged as any other: it runs a full "
+    "spine or walker per parametrized case instead of testing the logic in-process (one "
+    "runtime run per feature for parity); it sleeps for real instead of using an injected "
+    "clock; it adds a test file where the module's existing one could be extended, or the "
+    "net test count is not stated; it depends on machine state (absolute paths, host "
+    "resources) instead of temp paths and a skip with a reason; it runs over the CI time "
+    f"budget ({CI_TIME_BUDGET_S} s) without a `slow` mark and its reason.\n"
+)
+
 #: What design mode's builder checks before it answers (approved 2026-10-26): every extra
 #: build round the QA judge caused was a gate correction with no test that exercises it,
 #: or a fix whose test still passes with the fix reverted. Design mode only. The builder
@@ -82,7 +110,7 @@ EMIT_CHECKLIST = (
     "- Avoid a test that calls the helper under test instead of driving the real path the "
     "brief names, test inputs nothing uses (such as a verdict list nothing consumes), and "
     "assertions on results the test built by hand.\n"
-)
+) + TEST_RULES
 
 #: Where design mode's builder works (`workspace.py`): a prepared clone of the last
 #: attempt, whose diff the runtime writes into emit.txt. design_fast's builder too.
@@ -1239,6 +1267,7 @@ class DesignMode(Mode):
                 "the result: the files at the artifact path, and the diff named above.\n\n"
                 + _ACCEPTANCE_BASELINE
                 + UPDATED_TESTS_NOTE
+                + TEST_REVIEW_RULES
                 + "You are the code reviewer. Read the delivered files against the design "
                 "and the brief: is every file the design names present, does it do what "
                 "the design says, and would it run? Trace input values through parsing "

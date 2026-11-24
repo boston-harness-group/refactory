@@ -1481,6 +1481,9 @@ def test_prepare_checks_limit_follows_the_knobs_to_their_bounds():
     assert capped.graph().nodes["prepare_check"].max_iterations == (20 + 25 + 1) * 2 + 25 + 20 + 1
 
 
+@pytest.mark.slow(reason="89 reloops of a whole design run at the knobs' bounds, each step a "
+                  "process of its own: ~80 s in CI; the same loop at smaller knobs runs in PR CI "
+                  "(test_the_worst_case_ends_in_the_build_loop_stop_not_the_iteration_limit)")
 def test_the_worst_case_at_the_knobs_bounds_still_ends_in_the_stop(tmp_path, monkeypatch):
     """Five attempts of five fix-ups each, two refusals before every applied emission: 89
     reloops of prepare_check, under its limit of 102 and twice the old fixed 45. The pinned

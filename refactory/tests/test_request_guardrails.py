@@ -17,6 +17,7 @@ when it says more; it must not say the same thing twice.
 from __future__ import annotations
 
 import collections
+import json
 import re
 from dataclasses import replace
 from pathlib import Path
@@ -75,62 +76,73 @@ def _records(mode_name: str, tmp: Path, runs: int = 3) -> list[dict[str, Any]]:
             for r in _rollout(mode_name, tmp, run)]
 
 
-@pytest.fixture
-def requests(tmp_path, monkeypatch) -> dict[str, list[tuple[str, list[dict[str, Any]]]]]:
-    """Every call kind's requests, each with the records it shows."""
+@pytest.fixture(scope="module")
+def requests(tmp_path_factory, sealed_environment) -> dict[str, list[tuple[str, list[dict[str, Any]]]]]:
+    """Every call kind's requests, each with the records it shows.
+
+    Module-scoped: all tests read this fixture without mutation, so a single build
+    serves every test in the module.
+    """
     from test_evidence import _nested_record
     from test_livemath_blocks import _patch_task
 
-    _patch_task(monkeypatch)
-    built: dict[str, list[tuple[str, list[dict[str, Any]]]]] = {}
-    shapes = {"S4": ("livemath/skill_graph", _records("livemath/skill_graph", tmp_path)),
-              "S1": ("livemath/solver", _records("livemath/solver", tmp_path)),
-              "nested": ("livemath/skill_graph", [_nested_record(i) for i in range(6)])}
-    for name, (mode_name, records) in shapes.items():
-        loop = strategies.create("default", mode_name, LoopConfig(
-            epochs=1, batch_size=1, optimizer="random", seed=1,
-            runs_root=tmp_path / name / "run", edit_preset="broad"), project=Path("."))
-        seed = Candidate.from_state(loop.mode.state_dict())
-        seed.evaluated, seed.score = True, 0.5
-        loop.population.append(seed)
-        loop._train_item_records[seed.id] = records
-        ctx = replace(loop._context(), item_records=records,
-                      analysis={"findings": [{"source": "failure", "finding": "F",
-                                              "items": [records[0]["id"]]}],
-                                "batches": [], "group_size": 8}, **_history(records))
-        built.setdefault("proposal", []).append((ctx.render(), records))
-        pipeline = analysts.pipeline_text(ctx)
-        # One rollout of each item per batch (a batch's items are distinct items).
-        distinct = list({str(r["id"]).split("#")[0]: r for r in records}.values())
-        fails = [r for r in distinct if not r.get("passed")][:8] or distinct[:8]
-        passes = [r for r in distinct if r.get("passed")][:8] or distinct[:8]
-        built.setdefault("analyst_failure", []).append(
-            (analysts.analyst_batch(ctx, "failure", 1, 1, fails, pipeline)[0], fails))
-        built.setdefault("analyst_success", []).append(
-            (analysts.analyst_batch(ctx, "success", 1, 1, passes, pipeline)[0], passes))
-        finding = {"source": "failure", "finding": "F", "items": [records[0]["id"]]}
-        built.setdefault("analyst_merge", []).append(
-            (analysts.merge_prompt(ctx, "failure", [[finding], [finding]], 1, pipeline), []))
-        if name == "nested":
-            before = [_nested_record(i) for i in range(6)]
-            after = [{**_nested_record(i + 100), "id": f"n{i}"} for i in range(6)]
-        else:  # two rollouts of the same items
-            before = _rollout(mode_name, tmp_path / name, 10)
-            after = _rollout(mode_name, tmp_path / name, 11)
-        entries, _missing = memory.pairs(before, after, [r["id"] for r in after[:6]])
-        compared = [*before[:6], *after[:6]]
-        side = {"id": seed.id, "pipeline": pipeline, "rollout": "train"}
-        request = memory.MemoryRequest(epoch=3, mode_name=mode_name, prev=side, curr=side,
-                                       changes=[], previous_note="", entries=entries)
-        built.setdefault("memory", []).append((request()[0], compared))
-        built.setdefault("memory_compare", []).append(
-            (request.compare_prompt(entries, 1, 1)[0], compared))
-        step = next(e["node"] for e in records[0]["exchanges"])
-        samples = [{"item": r["id"], "input": r["exchanges"][0]["prompt"],
-                    "output": r["exchanges"][0]["response"]} for r in records[:3]]
-        built.setdefault("step_review", []).append(
-            (feedback.review_prompt({"step": step, "candidate": seed.id, "kind": "insert",
-                                     "samples": samples}, mode_name), records[:3]))
+    root = tmp_path_factory.mktemp("guardrails")
+    tmp_path = root / "data"
+    tmp_path.mkdir()
+    with sealed_environment(root):
+        patch = pytest.MonkeyPatch()
+        try:
+            _patch_task(patch)
+            built: dict[str, list[tuple[str, list[dict[str, Any]]]]] = {}
+            shapes = {"S4": ("livemath/skill_graph", _records("livemath/skill_graph", tmp_path)),
+                      "S1": ("livemath/solver", _records("livemath/solver", tmp_path)),
+                      "nested": ("livemath/skill_graph", [_nested_record(i) for i in range(6)])}
+            for name, (mode_name, records) in shapes.items():
+                loop = strategies.create("default", mode_name, LoopConfig(
+                    epochs=1, batch_size=1, optimizer="random", seed=1,
+                    runs_root=tmp_path / name / "run", edit_preset="broad"), project=Path("."))
+                seed = Candidate.from_state(loop.mode.state_dict())
+                seed.evaluated, seed.score = True, 0.5
+                loop.population.append(seed)
+                loop._train_item_records[seed.id] = records
+                ctx = replace(loop._context(), item_records=records,
+                              analysis={"findings": [{"source": "failure", "finding": "F",
+                                                      "items": [records[0]["id"]]}],
+                                        "batches": [], "group_size": 8}, **_history(records))
+                built.setdefault("proposal", []).append((ctx.render(), records))
+                pipeline = analysts.pipeline_text(ctx)
+                distinct = list({str(r["id"]).split("#")[0]: r for r in records}.values())
+                fails = [r for r in distinct if not r.get("passed")][:8] or distinct[:8]
+                passes = [r for r in distinct if r.get("passed")][:8] or distinct[:8]
+                built.setdefault("analyst_failure", []).append(
+                    (analysts.analyst_batch(ctx, "failure", 1, 1, fails, pipeline)[0], fails))
+                built.setdefault("analyst_success", []).append(
+                    (analysts.analyst_batch(ctx, "success", 1, 1, passes, pipeline)[0], passes))
+                finding = {"source": "failure", "finding": "F", "items": [records[0]["id"]]}
+                built.setdefault("analyst_merge", []).append(
+                    (analysts.merge_prompt(ctx, "failure", [[finding], [finding]], 1, pipeline), []))
+                if name == "nested":
+                    before = [_nested_record(i) for i in range(6)]
+                    after = [{**_nested_record(i + 100), "id": f"n{i}"} for i in range(6)]
+                else:
+                    before = _rollout(mode_name, tmp_path / name, 10)
+                    after = _rollout(mode_name, tmp_path / name, 11)
+                entries, _missing = memory.pairs(before, after, [r["id"] for r in after[:6]])
+                compared = [*before[:6], *after[:6]]
+                side = {"id": seed.id, "pipeline": pipeline, "rollout": "train"}
+                request = memory.MemoryRequest(epoch=3, mode_name=mode_name, prev=side, curr=side,
+                                               changes=[], previous_note="", entries=entries)
+                built.setdefault("memory", []).append((request()[0], compared))
+                built.setdefault("memory_compare", []).append(
+                    (request.compare_prompt(entries, 1, 1)[0], compared))
+                step = next(e["node"] for e in records[0]["exchanges"])
+                samples = [{"item": r["id"], "input": r["exchanges"][0]["prompt"],
+                             "output": r["exchanges"][0]["response"]} for r in records[:3]]
+                built.setdefault("step_review", []).append(
+                    (feedback.review_prompt({"step": step, "candidate": seed.id, "kind": "insert",
+                                             "samples": samples}, mode_name), records[:3]))
+        finally:
+            patch.undo()
     return built
 
 

@@ -747,6 +747,8 @@ def test_the_runs_variables_reach_the_dsh_process_but_not_the_shell(tmp_path, mo
     """The DSH process keeps the run's own variables (its observer reads them); the shell it
     runs a command in, `bash -c` as DSH's bash tool does, does not see them (H2)."""
     monkeypatch.setattr(workspace, "_sandbox_runner", lambda root: ("landlock", ""))
+    monkeypatch.setenv("PYTEST_DEBUG_TEMPROOT", str(tmp_path))
+    monkeypatch.setenv("TMPDIR", str(tmp_path))
     for name in RUN_ONLY:
         monkeypatch.setenv(name, f"/run-only/{name}")
     from refactory_dsh.budgets import ResourceLimits, RunBudget

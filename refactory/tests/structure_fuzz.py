@@ -1725,16 +1725,33 @@ class Fuzzer:
         self.code_nodes = code_nodes
         self.stats = Stats()
 
-    def run(self, edits: int) -> Stats:
+    def run(self, edits: int, *, share: tuple[int, int] | None = None) -> Stats:
+        """Walk until ``edits`` edits are tried. With ``share=(i, k)``, only every k-th
+        walk from the i-th is checked and counted: the others are still walked (without the
+        walker) so each walk starts where it does in the whole run, and the k shares
+        together check exactly the walks the whole run checks while none of them fails."""
         names = sorted(self.seeds)
         NOTES.clear()
         walk = 0
         while self.stats.tried < edits and not self._stopped():
             name = names[walk % len(names)]
-            self._walk(self.seeds[name], walk, edits)
+            if share is None or walk % share[1] == share[0]:
+                self._walk(self.seeds[name], walk, edits)
+            else:
+                self._skip(self.seeds[name], walk, edits)
             walk += 1
         self.stats.notes.update(NOTES)
         return self.stats
+
+    def _skip(self, seed: Seed, walk: int, budget: int) -> None:
+        """Walk another share's walk for its count of tried edits alone."""
+        kept, walker, shrink = self.stats, self.walker, self.shrink
+        self.stats, self.walker, self.shrink = Stats(tried=kept.tried), False, False
+        try:
+            self._walk(seed, walk, budget)
+        finally:
+            kept.tried = self.stats.tried
+            self.stats, self.walker, self.shrink = kept, walker, shrink
 
     def _walk(self, seed: Seed, walk: int, budget: int) -> None:
         rng = random.Random(f"{self.seed}:{seed.name}:{walk}")

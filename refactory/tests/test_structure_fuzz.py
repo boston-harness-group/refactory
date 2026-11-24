@@ -100,15 +100,27 @@ def test_quick_tier_every_accepted_edit_is_sound():
     assert not stats.findings, _report(stats)
 
 
+#: The core operators' walk: its edits, and the tests its walker checks are shared over.
+CORE_EDITS = 1500
+CORE_SHARES = 4
+
+
 def test_the_core_operators_own_checks_are_reached_and_sound():
     """'takes_over' (taken and refused), a field an operator would ignore, a route that
     loses an input and a 'fallback' outside a pass are drawn and reached, and every edit
-    accepted on the way is sound."""
-    stats = sf.Fuzzer(QUICK_SEED, walker=True).run(1500)
+    accepted on the way is sound: here statically, and on the walker in the test below."""
+    stats = sf.Fuzzer(QUICK_SEED, walker=False).run(CORE_EDITS)
     assert not stats.findings, _report(stats)
     for path in ("ignored field refused", "lost input refused", "takes_over accepted",
                  "takes_over: target not first", "fallback: outside a pass"):
         assert stats.paths[path] > 0, (path, dict(stats.paths))
+
+
+@pytest.mark.parametrize("share", range(CORE_SHARES))
+def test_every_edit_the_core_operators_walk_accepts_runs_on_the_walker(share):
+    """The same walk, every accepted state on the walker: a fixed share of its walks each."""
+    stats = sf.Fuzzer(QUICK_SEED, walker=True).run(CORE_EDITS, share=(share, CORE_SHARES))
+    assert stats.walker_runs > 0 and not stats.findings, _report(stats)
 
 
 def _map_cases() -> list[tuple[str, dict]]:
