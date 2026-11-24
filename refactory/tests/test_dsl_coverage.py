@@ -251,3 +251,115 @@ def test_the_docs_carry_the_maps_table():
     shown = text[text.index(START) + len(START):text.index(END)].strip()
     assert shown == coverage.table_markdown(), (
         "the table in docs/outer-loop.md is not the map's; paste coverage.table_markdown()")
+
+
+# ── every operation an entry names for a field can set it (no overclaim) ──────────
+
+
+#: A new sealed agent step written out in full, for the operations that take a node object.
+_LOOK_NODE = {"id": "look", "kind": "agent", "prompt_template": "Look.", "writes": ["look.txt"],
+              "produces": ["look"], "tools": ["bash"], "tool_policy": None,
+              "workspace": {"kind": "scratch"}}
+_LOOK = {"op": "insert", "before": "solve", "id": "look", "kind": "agent", "text": "Look.",
+         "to": "solve"}
+_POLISH = {"op": "insert", "after": "solve", "id": "polish", "kind": "agent",
+           "text": "Polish.", "takes_over": "solve"}
+_PAIR = {"op": "parallelize", "after": "look", "new": [
+    {"kind": "agent", "text": "A.", "id": "pa", "to": "solve"},
+    {"kind": "agent", "text": "B.", "id": "pb", "to": "solve"}]}
+
+
+def _with(spec: dict, **field) -> dict:
+    return {**spec, **field}
+
+
+def _field_examples(field: dict) -> dict[str, tuple[str, list[dict]]]:
+    """For each operation, a proposal on the per-item pass (`item_files_ops.AgentPass`, or
+    SpreadsheetBench's Solver for ``map``, which needs a per-item list) whose new step
+    carries ``field`` (``{"tools": [...]}`` or ``{"route": {...}}``)."""
+    node = {**_LOOK_NODE, **({"route": field["route"]} if "route" in field else {})}
+    return {
+        "add_node": ("agent_pass", [{"op": "add_node", "position": {"before": "solve"},
+                                     "node": node}]),
+        "insert_before": ("agent_pass", [{"op": "insert_before", "target": "solve", "node": node}]),
+        "insert_after": ("agent_pass", [{"op": "insert_after", "target": "solve", "node": node}]),
+        "wrap": ("agent_pass", [_LOOK, {"op": "wrap", "target": "look", "node": {
+            **node, "id": "watch", "writes": ["watch.txt"], "produces": ["watch"]}}]),
+        "parallel": ("agent_pass", [_LOOK, {"op": "parallel", "target": "look", "branches": [
+            {**node, "id": "left", "writes": ["left.txt"], "produces": ["left"]},
+            {**node, "id": "right", "writes": ["right.txt"], "produces": ["right"]}]}]),
+        "split": ("agent_pass", [{"op": "split", "step": "solve", "into": [
+            _with({"kind": "agent", "text": "Plan."}, **field),
+            {"kind": "agent", "text": "Answer."}]}]),
+        "loop": ("agent_pass", [_with({"op": "loop", "step": "solve", "judge": "agent"},
+                                      **field)]),
+        "insert": ("agent_pass", [_with(_LOOK, **field)]),
+        "parallelize": ("agent_pass", [_LOOK, {**_PAIR, "new": [
+            _with(_PAIR["new"][0], **field), _PAIR["new"][1]]}]),
+        "branch": ("agent_pass", [_LOOK, _PAIR, _with({"op": "branch", "fork": "look_fork",
+                                                       "kind": "agent", "text": "C.",
+                                                       "id": "pc", "to": "solve"}, **field)]),
+        "route": ("agent_pass", [_POLISH, _with({"op": "route", "after": "solve",
+                                                 "judge": "agent"}, **field)]),
+        "merge": ("agent_pass", [_LOOK, {"op": "insert", "after": "look", "id": "look2",
+                                         "kind": "agent", "text": "Again.", "takes_over": "look"},
+                                 _with({"op": "merge", "steps": ["look", "look2"]}, **field)]),
+        "fallback": ("agent_pass", [_with({"op": "fallback", "step": "solve", "kind": "agent",
+                                           "text": "Simpler."}, **field)]),
+        "map": ("solver", [_with({"op": "map", "after": "frame", "over": "solver_prompt",
+                                  "text": "Do one.", "to": "solve"}, **field)]),
+    }
+
+
+def _field_attempt(seed: str, edits: list[dict]):
+    import item_files_ops as ifo
+    from refactory_dsh.optim import Optimizer, Proposal
+    from refactory_dsh.workers import StepRoutes
+    from refactory_packages.spreadsheetbench import mode as sb_mode
+
+    mode = ifo.AgentPass() if seed == "agent_pass" else sb_mode.Solver()
+    optimizer = Optimizer()
+    optimizer.sealed_tools = (True, "")
+    optimizer.step_routes = StepRoutes(sf.ROUTE_BASE, node_routes=sf.ROUTE_MAPS)
+    parent = Candidate.from_state(mode.state_dict())
+    out = optimizer.attempt(Proposal(edits=edits), parent, mode.invariants(), True, (),
+                            protected=mode.edit_protected(), record=False)
+    return parent, out
+
+
+def _created(field: str) -> list[str]:
+    entry = next(e for e in coverage.entries() if (e.group, e.name) == ("node field", field))
+    assert isinstance(entry.create, tuple), entry
+    return list(entry.create)
+
+
+@pytest.mark.parametrize("op", _created("tools"))
+def test_every_operation_the_map_names_for_tools_makes_a_sealed_tool_step(op):
+    """The map says each of these makes a step with tools: each one does, sealed."""
+    from refactory_dsh.workspace import is_sealed
+
+    seed, edits = _field_examples({"tools": ["bash"]})[op]
+    parent, out = _field_attempt(seed, edits)
+    assert isinstance(out, Candidate), (op, out)
+    new = [n for k, n in out.state["graph"]["nodes"].items()
+           if k not in parent.state["graph"]["nodes"] and n.get("tools")]
+    assert new and all(is_sealed(n) for n in new), (op, new)
+
+
+@pytest.mark.parametrize("op", _created("route"))
+def test_every_operation_the_map_names_for_route_gives_a_new_step_its_own_route(op):
+    """The map says each of these may give a new agent step its own route: each one does
+    (``route`` itself through a step in its 'to'; a judge takes its step's)."""
+    route = {"model": "m-small"}
+    examples = _field_examples({"route": route})
+    if op == "route":
+        examples["route"] = ("agent_pass", [_POLISH, {"op": "route", "after": "solve",
+                                                      "judge": "agent", "to": {
+            "keep": "polish", "redo": {"kind": "agent", "text": "Redo.", "route": route,
+                                       "takes_over": "solve"}}}])
+    seed, edits = examples[op]
+    parent, out = _field_attempt(seed, edits)
+    assert isinstance(out, Candidate), (op, out)
+    new = [n for k, n in out.state["graph"]["nodes"].items()
+           if k not in parent.state["graph"]["nodes"] and n.get("route")]
+    assert new and all(n["route"].get("model") == "m-small" for n in new), (op, new)

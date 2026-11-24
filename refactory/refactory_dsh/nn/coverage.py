@@ -64,6 +64,11 @@ DECISIONS: dict[str, str] = {
                 "score against 'a time-out counts as a failure', and touch node_retry on both "
                 "runtimes); the workspace kind and the model role; binding a new setting on an "
                 "existing step; and the per-sub-item experiment",
+    "neighbour settings": "a core operator's new step takes its timeout, role and workspace "
+                          "kind from its neighbour (`core_ops._step_nodes`), and keeps a "
+                          "reply that writes out tool calls only as a copy of a step that "
+                          "does; only `add_node`, a node written out in full, sets them "
+                          "freely -- the deferred settings above, left so on purpose",
 }
 
 
@@ -100,6 +105,13 @@ _ADD = ("add_node", "insert_after", "insert_before", "wrap", "split", "parallel"
 _GATE_ADD = ("add_node", "wrap", "loop", "route")
 _NEW = ("add_node", "insert_after", "insert_before", "wrap", "split", "parallel", "loop",
         "insert", "parallelize", "branch", "route", "merge")
+#: The operations whose new step may have sealed tools: every one that makes a step,
+#: an agent judge of a loop or route included (``tests/test_dsl_coverage.py`` makes one
+#: with each).
+_TOOLS = (*_NEW, "fallback", "map")
+#: The operations whose new agent step may name its own route (DECISIONS['step routes']).
+_ROUTES = ("add_node", "insert", "branch", "merge", "split", "parallelize", "route",
+           "fallback", "map")
 _STEP_REMOVE = ("remove_node", "bypass", "remove")
 _GATE_REMOVE = ("remove_node", "add_edge", "remove")
 _FORK_CREATE = ("parallel", "parallelize", "add_node")
@@ -167,10 +179,9 @@ _FIELDS: dict[str, tuple[Aspect, Aspect]] = {
     "code": (_NEW, ("set_knob",)),
     "role": (_NEW, Gap("deferred", "the model role among the run's routes")),
     # A step's own model, effort and cap, among the run's routes (DECISIONS['step routes']).
-    "route": (("add_node", "insert", "branch", "merge", "split", "parallelize", "route"),
-              _REPLACE),
-    "tools": (_NEW, Gap("excluded by decision", "tools are not a configure setting")),
-    "tool_policy": (_NEW, Gap("excluded by decision", "tools are not a configure setting")),
+    "route": (_ROUTES, _REPLACE),
+    "tools": (_TOOLS, Gap("excluded by decision", "tools are not a configure setting")),
+    "tool_policy": (_TOOLS, Gap("excluded by decision", "tools are not a configure setting")),
     "outputs_only": (_NEW, Gap("excluded by decision", "not a configure setting")),
     "keeps_tool_markup": (_NEW, Gap("excluded by decision", "not a configure setting")),
     "knob_outputs": (_NEW, Gap("excluded by decision",

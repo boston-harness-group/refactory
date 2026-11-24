@@ -59,6 +59,11 @@ def _check_driver_mid_run(workdir: Path) -> str | None:
     return None
 
 
+def _declared(workdir: Path, node: str) -> dict[str, Any]:
+    from refactory_dsh.run import declarations
+    return declarations(workdir, node)
+
+
 def execute(spec: dict[str, Any], workdir: Path) -> dict[str, Any]:
     # When pinned, override model_context so workers use the pin's paths
     # for nested dispatch and DSH CLI resolution.
@@ -185,7 +190,10 @@ def execute(spec: dict[str, Any], workdir: Path) -> dict[str, Any]:
         capture_final=_capture_final, rule=spec.get('retry'),
         timeout_s=spec['model_context'].get('node_wall_s'), budget=getattr(client, '_budget', None),
         workspace=dispatch_workspace, tool_policy=tool_policy,
-        keeps_tool_markup=bool(spec.get('keeps_tool_markup')))
+        keeps_tool_markup=bool(spec.get('keeps_tool_markup')),
+        # The verdict gate that reads this answer, as the lowering declared it
+        # (`lowering.judge_verdict`), as the walker takes it from the graph.
+        verdict=_declared(workdir, node).get('verdict'))
     for check in spec.get('post_checks', []):
         artifact = _path(workdir, check['path'])
         if check.get('must_exist', True) and not artifact.exists():

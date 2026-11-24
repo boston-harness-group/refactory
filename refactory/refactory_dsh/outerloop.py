@@ -134,11 +134,19 @@ class Run:
         to the run's token and time budgets; under ``veto`` an ``exploit`` is refused
         here (``E-integrity``), so every strategy's proposals pass the same judge.
 
+        Before that judge, the wiring warnings the edit adds are shown to the proposer
+        (``Loop._wiring_check``), which may fix them or keep the change; never a refusal.
+
         Then, in the default loop, the smoke check (``Loop._smoke_check``): the candidate
         is run on up to two of its parent's train items, and a run that fails with an
         error is refused (``E-smoke``), a mechanics refusal a repair may fix. A custom
         strategy's proposals are not smoked."""
         outcome = self.mechanics(proposal, parent)
+        # The wiring warnings the edit adds, shown to the proposer before anything judges
+        # or runs the candidate (``Loop._wiring_check``): it may fix them or keep the change.
+        wiring = getattr(self._loop, "_wiring_check", None)
+        if not isinstance(outcome, list) and callable(wiring):
+            outcome = wiring(self, proposal, parent, outcome)
         check = getattr(self._loop, "_integrity_check", None)
         if not isinstance(outcome, list) and callable(check):
             outcome = check(proposal, parent, outcome)
