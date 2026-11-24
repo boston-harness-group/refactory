@@ -110,7 +110,11 @@ def _check_types(settings: dict[str, Any]) -> None:
             raise ProfileError(f"{field.name} must be {problem}, not {settings[field.name]!r}")
 
 
-def normalize(settings: dict[str, Any]) -> dict[str, Any]:
+def normalize(settings: dict[str, Any], project: Path | None = None) -> dict[str, Any]:
+    """Validate and complete ``settings``. Strategy, optimizer and parent picker names
+    are looked up in ``project``'s usable packages too (``registry.usable_packages``:
+    its package folder and the installed ones, a package switched off left out), as
+    the run that uses them does; without a project, in the installed packages only."""
     from refactory_dsh import optim, strategies
     from refactory_dsh.nn.edits import PRESETS, catalogue, removed
 
@@ -220,10 +224,10 @@ def normalize(settings: dict[str, Any]) -> dict[str, Any]:
     # A package-contributed strategy (``Package.strategies``) is looked up only
     # when the name is not one of the library's, so the common case imports nothing.
     strategy_choices = (strategies.names() if result["strategy"] in strategies.STRATEGIES
-                        else strategies.available())
+                        else strategies.available(project))
     # Likewise a package-contributed optimizer (``Package.optimizers``).
     optimizer_choices = (optim.names() if result["optimizer"] in optim.REGISTRY
-                         else optim.available())
+                         else optim.available(project))
     for key, choices in (("optimizer", optimizer_choices), ("strategy", strategy_choices),
                          ("evaluator", ("walker", "dsh")), ("edit_preset", PRESETS),
                          ("worker_backend", ("dsh", "codex", "claude_code"))):
@@ -231,9 +235,10 @@ def normalize(settings: dict[str, Any]) -> dict[str, Any]:
             raise ProfileError(f"unknown {key}: {result[key]}")
     picker = result.get("parent_picker") or ""
     if picker:
-        if not optim.is_picker(picker):
-            raise ProfileError(f"unknown parent_picker: {picker}; known: {', '.join(optim.picker_names())}")
-        if optim.is_picker(result["optimizer"]):
+        if not optim.is_picker(picker, project):
+            raise ProfileError(f"unknown parent_picker: {picker}; known: "
+                               f"{', '.join(optim.picker_names(project))}")
+        if optim.is_picker(result["optimizer"], project):
             raise ProfileError(
                 f"the {result['optimizer']} optimizer picks parents itself; pair the "
                 f"{picker} parent picker with a proposer (autoresearch or random)")
@@ -250,7 +255,7 @@ def normalize(settings: dict[str, Any]) -> dict[str, Any]:
         if not isinstance(result[key], dict):
             raise ProfileError(f"{key} must be an object")
     try:
-        strategies.check_options(result["strategy"], result["strategy_options"])
+        strategies.check_options(result["strategy"], result["strategy_options"], project)
     except ValueError as error:
         raise ProfileError(str(error)) from error
     from refactory_dsh.worker_config import validate_provider_config
@@ -284,7 +289,8 @@ def normalize(settings: dict[str, Any]) -> dict[str, Any]:
     if outside:
         # The selected strategy's own required ops are permitted with any preset,
         # as ``Loop.permitted_ops`` adds them (#493 G34).
-        outside -= set(getattr(strategies.resolve(result["strategy"]), "required_ops", ()))
+        outside -= set(getattr(strategies.resolve(result["strategy"], project),
+                               "required_ops", ()))
     if outside:
         raise ProfileError("allowed_ops must belong to the selected edit preset "
                            "or the selected strategy's required ops")
@@ -341,7 +347,7 @@ def save(project: Path, name: str, spec: dict[str, Any]) -> dict[str, Any]:
     supplied = spec.get("settings") or {}
     routing = resolve_workers(project, supplied)
     profile = {"schema_version": SCHEMA_VERSION, "name": name, "version": 0,
-               "settings": normalize({**supplied, **routing["settings"]}),
+               "settings": normalize({**supplied, **routing["settings"]}, project),
                "contract": {"objective": str(contract.get("objective") or "Maximize the mode's immutable score"),
                             "required_artifacts": required, "selection_rule": SELECTION_RULE}}
     # Only a spec that validated creates the profile's directory, and a version is
@@ -386,7 +392,7 @@ def resolve(project: Path, mode_id: str, *, name: str = "", version: int | None 
         routing = resolve_workers(project, {key: value for key, value in (overrides or {}).items() if key in FIELDS},
                                   profile={key: value for key, value in profile["settings"].items() if key in FIELDS})
         chosen.update(routing["settings"])
-    settings = normalize(chosen) if validate_settings else {**defaults(), **chosen}
+    settings = normalize(chosen, project) if validate_settings else {**defaults(), **chosen}
     _package, klass = registry.resolve(project, mode_id)
     mode = klass()
     state = mode.state_dict()

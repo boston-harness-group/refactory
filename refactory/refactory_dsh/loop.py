@@ -1286,7 +1286,9 @@ class Loop(OuterLoop):
             # a resume compares real values (``_keep_recorded_run_shape``).
             self.config.selection = self.selection_mode()
         saved = self.root / "config.json"
+        sources = self._package_sources()
         if self.config.resume and saved.exists():
+            self._check_package_sources(saved, sources)
             try:
                 before = int(json.loads(saved.read_text()).get("train_minibatch") or 0)
             except (OSError, ValueError, json.JSONDecodeError):
@@ -1298,7 +1300,8 @@ class Loop(OuterLoop):
                     f"this run scores minibatches of {before} train items; resume it with "
                     f"train_minibatch {before}, or start a new run")
         saved.write_text(
-            json.dumps({"mode": self.mode_id, **self.config.to_dict()}, indent=2, default=str)
+            json.dumps({"mode": self.mode_id, **self.config.to_dict(),
+                        "package_sources": sources}, indent=2, default=str)
         )
         # Recorded for every run, so its seed results can be exported for later ones.
         from refactory_dsh import seed_cache
@@ -1416,6 +1419,51 @@ class Loop(OuterLoop):
             batch_size=self.config.batch_size,
             optimizer=self.search_name(),
         )
+
+    def _package_sources(self) -> dict[str, dict[str, str]]:
+        """Which package, at which version, provides this run's strategy, optimizer
+        and parent picker when a package does (``Package.strategies``,
+        ``Package.optimizers``), by setting; the library's own are left out. Recorded
+        in ``config.json``, so a resume can refuse a different implementation under
+        the same name (`_check_package_sources`)."""
+        from refactory_dsh import optim, registry, strategies
+        from refactory_dsh.optim import Optimizer
+
+        found: dict[str, dict[str, str]] = {}
+        for key, name, attribute, base, core in (
+                ("strategy", self.config.strategy, "strategies", OuterLoop, strategies.STRATEGIES),
+                ("optimizer", self.config.optimizer, "optimizers", Optimizer, optim.REGISTRY),
+                ("parent_picker", self.config.parent_picker, "optimizers", Optimizer,
+                 optim.REGISTRY)):
+            if not name or name in core:
+                continue
+            entry = registry.contributions(attribute, base, self.project, reserved=core).get(name)
+            if entry is not None:
+                found[key] = {"name": name, "package": entry[1].name,
+                              "version": entry[1].version}
+        return found
+
+    def _check_package_sources(self, saved: Path, sources: dict[str, dict[str, str]]) -> None:
+        """On resume, refuse a package strategy, optimizer or parent picker that now
+        comes from another package or another version than the run recorded: the
+        epochs already run were searched by the recorded one. A run recorded before
+        sources were kept is not checked."""
+        try:
+            recorded = json.loads(saved.read_text()).get("package_sources")
+        except (OSError, ValueError, AttributeError):
+            return
+        if not isinstance(recorded, dict) or recorded == sources:
+            return
+        for key in sorted(set(recorded) | set(sources)):
+            was, now = recorded.get(key), sources.get(key)
+            if was != now:
+                def shown(entry: Any) -> str:
+                    return (f"{entry['name']} from package {entry['package']} "
+                            f"{entry['version']}" if isinstance(entry, dict)
+                            else "the library's own")
+                raise LoopError(
+                    f"this run's {key} was {shown(was)} and is now {shown(now)}; resume it "
+                    "with the same package version, or start a new run")
 
     #: The settings that shape how a run selects, which a resumed run keeps as it
     #: recorded them (``_keep_recorded_run_shape``): the epochs already run selected so.
@@ -6241,8 +6289,14 @@ class Loop(OuterLoop):
     def _val_item_scores(self) -> dict[str, dict[str, float]]:
         """Each judged candidate's per-item val scores (`part_item_scores`, keyed by
         `opaque_item_key`) under ``val_gate``, for a parent policy that compares
-        candidates item by item; empty otherwise, and never a test score."""
+        candidates item by item (``ParentSelector.uses_item_scores``: the optimizer
+        itself, or its parent picker); empty otherwise, and never a test score. Worked
+        out only for such a policy, so no other run pays for it, and a proposer paired
+        with the picker never sees them (``PickedParent.propose``)."""
         if not self.config.val_gate or self._custom_strategy is not None:
+            return {}
+        policy = getattr(self.optimizer, "picker", self.optimizer)
+        if not getattr(policy, "uses_item_scores", False):
             return {}
         found: dict[str, dict[str, float]] = {}
         for cid in self._gate().cache:
@@ -8676,7 +8730,8 @@ def main(argv: list[str] | None = None, *, _client_factory: Any = None) -> int:
                 raise profiles.ProfileError("the resume directory belongs to another mode")
             previous_settings = {k: v for k, v in previous.items() if k in profiles.defaults()}
             # The recorded ``RESUME_KEEPS`` settings stay: no flag of this command sets one.
-            return profiles.refresh(project, args.mode, profiles.normalize({**previous_settings, **overrides}),
+            return profiles.refresh(project, args.mode,
+                                    profiles.normalize({**previous_settings, **overrides}, project),
                                     previous.get("resolved_profile") or {}, overrides=overrides)
         return profiles.resolve(project, args.mode, name=args.profile,
                                 version=args.profile_version, overrides=overrides)

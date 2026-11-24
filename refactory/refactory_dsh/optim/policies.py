@@ -81,6 +81,10 @@ class ParentSelector(Optimizer):
     #: islands, niches). Under the validation gate's ``pool`` selection it is handed
     #: every judged candidate, not the top ``pool_size``, and applies its own rule.
     population: bool = True
+    #: Whether the policy compares candidates item by item: only then does the loop
+    #: work out each judged candidate's per-item val scores and hand them over
+    #: (``ProposalContext.val_item_scores``). A proposer never gets them.
+    uses_item_scores: bool = False
 
     def __init__(self, *, k: int = 3, seed: int = 0) -> None:
         super().__init__(k=k)

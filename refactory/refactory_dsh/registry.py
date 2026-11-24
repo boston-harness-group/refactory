@@ -279,24 +279,44 @@ def discover(project: Path | None = None) -> dict[str, Package]:
     return found
 
 
-def contributed(attribute: str, base: type, project: Path | None = None) -> dict[str, type]:
-    """The classes the discoverable packages list under ``attribute`` (a
-    ``Package`` field: ``strategies``, ``optimizers``), by their class-level ``name``.
+def contributions(attribute: str, base: type, project: Path | None = None, *,
+                  reserved: Any = ()) -> dict[str, tuple[type, Package]]:
+    """The classes the usable packages list under ``attribute`` (a ``Package`` field:
+    ``strategies``, ``optimizers``), by their class-level ``name``, each with the
+    package that provides it.
 
     The one route by which a package contributes a selectable piece: what it lists is
     selectable by name, without a registration call and without joining the
-    library's own table. A listed class that is not a ``base`` is a defect of the
-    package and is refused.
+    library's own table. The packages are the ones a mode may come from
+    (:func:`usable_packages`: a package switched off for the project contributes
+    nothing). Refused, never resolved silently: a listed class that is not a ``base``,
+    a name the library already has (``reserved``), and a name two packages both use.
     """
-    found: dict[str, type] = {}
-    for package in discover(project).values():
+    found: dict[str, tuple[type, Package]] = {}
+    for package in usable_packages(project).values():
         for cls in getattr(package, attribute):
             if not (isinstance(cls, type) and issubclass(cls, base)):
                 raise TypeError(
                     f"package {package.name!r} lists {cls!r}, which is not a {base.__name__}"
                 )
-            found[cls.name] = cls  # type: ignore[attr-defined]
+            name = cls.name  # type: ignore[attr-defined]
+            if name in reserved:
+                raise PackageError(
+                    f"package {package.name!r} lists {name!r}, a name the library already "
+                    "has; rename it")
+            if name in found:
+                raise PackageError(
+                    f"packages {found[name][1].name!r} and {package.name!r} both list "
+                    f"{name!r}; one must be renamed")
+            found[name] = (cls, package)
     return found
+
+
+def contributed(attribute: str, base: type, project: Path | None = None, *,
+                reserved: Any = ()) -> dict[str, type]:
+    """:func:`contributions` without the providing packages."""
+    return {name: cls for name, (cls, _package)
+            in contributions(attribute, base, project, reserved=reserved).items()}
 
 
 def _state(project: Path) -> dict[str, Any]:
@@ -331,6 +351,13 @@ def set_enabled(project: Path, name: str, enabled: bool) -> None:
 def installed_names(project: Path | None = None) -> list[str]:
     """Package directories on disk, enabled or not."""
     return discover_names(project)
+
+
+def usable_packages(project: Path | None = None) -> dict[str, Package]:
+    """The packages a run may take a mode, strategy or optimizer from: the enabled ones
+    of ``project`` (:func:`resolve` refuses a disabled package's mode the same way);
+    without a project, the installed ones, which no project has switched off."""
+    return enabled_packages(Path(project)) if project is not None else discover(None)
 
 
 def enabled_packages(project: Path) -> dict[str, Package]:

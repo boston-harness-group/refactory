@@ -627,7 +627,8 @@ Discover, list and resolve packages of modes.
 | class | `PackageClash` | `` |
 | function | `add` | `(project: 'Path', source: 'Path', *, as_name: 'str' = '', trust: 'str' = 'generated') -> 'str'` |
 | function | `catalogue` | `(project: 'Path') -> 'dict[str, list[dict[str, Any]]]'` |
-| function | `contributed` | `(attribute: 'str', base: 'type', project: 'Path \| None' = None) -> 'dict[str, type]'` |
+| function | `contributed` | `(attribute: 'str', base: 'type', project: 'Path \| None' = None, *, reserved: 'Any' = ()) -> 'dict[str, type]'` |
+| function | `contributions` | `(attribute: 'str', base: 'type', project: 'Path \| None' = None, *, reserved: 'Any' = ()) -> 'dict[str, tuple[type, Package]]'` |
 | function | `describe_mode` | `(project: 'Path', identifier: 'str') -> 'dict[str, Any]'` |
 | function | `discover` | `(project: 'Path \| None' = None) -> 'dict[str, Package]'` |
 | function | `discover_names` | `(project: 'Path \| None' = None) -> 'list[str]'` |
@@ -651,6 +652,7 @@ Discover, list and resolve packages of modes.
 | function | `smoke_state` | `(name: 'str', project: 'Path \| None' = None) -> 'str'` |
 | function | `tool_report` | `(project: 'Path \| None' = None, name: 'str \| None' = None) -> 'dict[str, list[dict[str, Any]]]'` |
 | function | `tools` | `(name: 'str', project: 'Path \| None' = None)` |
+| function | `usable_packages` | `(project: 'Path \| None' = None) -> 'dict[str, Package]'` |
 | function | `verify` | `(project: 'Path', name: 'str \| None' = None) -> 'dict[str, list[str]]'` |
 | function | `where` | `(name: 'str', project: 'Path \| None' = None) -> 'Path \| None'` |
 | function | `workspace_root` | `(project: 'Path') -> 'Path'` |
@@ -658,7 +660,8 @@ Discover, list and resolve packages of modes.
 - **`PackageClash`** — A package name exists in both the install and the workspace.
 - **`add`** — Copy a package into the workspace, refusing a clash.
 - **`catalogue`** — Modes grouped by package: the only way they are ever listed.
-- **`contributed`** — The classes the discoverable packages list under ``attribute`` (a
+- **`contributed`** — :func:`contributions` without the providing packages.
+- **`contributions`** — The classes the usable packages list under ``attribute`` (a ``Package`` field:
 - **`describe_mode`** — One mode's surface, for a person about to optimize it or read a report.
 - **`discover`** — Every package that loads. A package that fails to import is reported.
 - **`discover_names`** — Every package directory, installed or in the workspace.
@@ -679,6 +682,7 @@ Discover, list and resolve packages of modes.
 - **`smoke_state`** — What was recorded about a package's smoke (`SMOKE`): by the create or edit run that
 - **`tool_report`** — Every declared tool of every package, with its status on this machine.
 - **`tools`** — The tools a package declares, read without importing it.
+- **`usable_packages`** — The packages a run may take a mode, strategy or optimizer from: the enabled ones
 - **`verify`** — Import every mode of a package and say what is wrong with it.
 - **`where`** — Which root a package lives in, or ``None`` if it is not there.
 - **`workspace_root`** — The writable package root for a project.
@@ -954,7 +958,7 @@ Driving a run from a GUI: the catalogue, a live run, and what it produced.
 | function | `gates` | `(run_root: 'Path') -> 'list[dict[str, Any]]'` |
 | function | `holdout` | `(run_root: 'Path') -> 'dict[str, Any] \| None'` |
 | function | `leaderboard` | `(run_root: 'Path', *, limit: 'int' = 20) -> 'list[dict[str, Any]]'` |
-| function | `level_two` | `() -> 'dict[str, Any]'` |
+| function | `level_two` | `(project: 'Path \| None' = None) -> 'dict[str, Any]'` |
 | function | `list_projects` | `() -> 'list[dict[str, Any]]'` |
 | function | `main` | `(argv: 'list[str] \| None' = None) -> 'int'` |
 | function | `model_route` | `(project: 'Path', *, provider: 'str' = '', model: 'str' = '') -> 'dict[str, Any]'` |
@@ -1104,7 +1108,7 @@ Versioned search recipes and immutable, resolved run snapshots.
 | function | `digest` | `(value: 'Any') -> 'str'` |
 | function | `list_profiles` | `(project: 'Path') -> 'list[dict[str, Any]]'` |
 | function | `load` | `(project: 'Path', name: 'str', version: 'int \| None' = None) -> 'dict[str, Any]'` |
-| function | `normalize` | `(settings: 'dict[str, Any]') -> 'dict[str, Any]'` |
+| function | `normalize` | `(settings: 'dict[str, Any]', project: 'Path \| None' = None) -> 'dict[str, Any]'` |
 | function | `refresh` | `(project: 'Path', mode_id: 'str', settings: 'dict[str, Any]', previous: 'dict[str, Any]', *, model_client: 'Any' = None, overrides: 'dict[str, Any] \| None' = None) -> 'dict[str, Any]'` |
 | function | `removed_flag_message` | `(flag: 'str', key: 'str', value: 'Any') -> 'str'` |
 | function | `resolve` | `(project: 'Path', mode_id: 'str', *, name: 'str' = '', version: 'int \| None' = None, overrides: 'dict[str, Any] \| None' = None, validate_settings: 'bool' = True, recipe: 'dict[str, Any] \| None' = None, model_client: 'Any' = None) -> 'dict[str, Any]'` |
@@ -1115,6 +1119,7 @@ Versioned search recipes and immutable, resolved run snapshots.
 - **`add_arguments`** — Every setting as a flag, for the console's ``start`` and ``profile-resolve``: the
 - **`add_cli_arguments`** — The short command line of ``refactory optimize`` and ``python -m
 - **`cli_overrides`** — The settings a command line gave explicitly, to override a profile's.
+- **`normalize`** — Validate and complete ``settings``. Strategy, optimizer and parent picker names
 - **`refresh`** — Recheck source/input identity without relying on a still-existing recipe.
 - **`removed_flag_message`** — What a command line that gives a setting only a profile takes is told: the
 - **`runtime_identity`** — Read nonsecret effective configuration; this is not authentication evidence.

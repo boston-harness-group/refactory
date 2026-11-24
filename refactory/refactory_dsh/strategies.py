@@ -874,7 +874,8 @@ def package_strategies(project: Path | None = None) -> dict[str, type[OuterLoop]
     """
     from refactory_dsh import registry
 
-    return registry.contributed("strategies", OuterLoop, project)  # type: ignore[return-value]
+    return registry.contributed("strategies", OuterLoop, project,  # type: ignore[return-value]
+                                reserved=STRATEGIES)
 
 
 def available(project: Path | None = None) -> list[str]:

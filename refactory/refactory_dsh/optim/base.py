@@ -1170,7 +1170,9 @@ class ProposalContext:
     #: request shows gate decisions, not val scores.
     val_scores: dict[str, float] = field(default_factory=dict)
     #: Each judged candidate's per-item validation scores, by candidate id, under the
-    #: default loop's ``val_gate``; empty otherwise. Each inner map is
+    #: default loop's ``val_gate`` and for a parent policy that asks for them
+    #: (``ParentSelector.uses_item_scores``); empty otherwise, and always empty in the
+    #: context a proposer is handed. Each inner map is
     #: ``Loop.part_item_scores(id, "val")``: item keys are a per-run HMAC of the item id
     #: (`loop.opaque_item_key`), the same keys ``Run.part_item_scores`` gives a
     #: strategy, so a parent policy can line candidates up item by item (a per-item

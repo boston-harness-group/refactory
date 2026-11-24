@@ -30,10 +30,10 @@ evaluation and trace, and any helper it duplicated has been moved to core.
 
 | block | where | what it gives a method |
 |---|---|---|
-| parent pickers: `archive`, `evolutionary`, `islands`, `hill_climb`, `map_elites` | `refactory_dsh/optim/policies.py` (`ParentSelector`) | which candidate to edit next. Write `select` only. Each picker gets `ProposalContext.val_scores` (one val mean per candidate) and `ProposalContext.val_item_scores` (each candidate's per-item val scores, keyed by the run's HMAC of the item id, never test). It draws from `ParentSelector.rng`, so a resumed run picks again what it picked before |
+| parent pickers: `archive`, `evolutionary`, `islands`, `hill_climb`, `map_elites` | `refactory_dsh/optim/policies.py` (`ParentSelector`) | which candidate to edit next. Write `select` only. Each picker gets `ProposalContext.val_scores` (one val mean per candidate); one that sets `uses_item_scores = True` also gets `ProposalContext.val_item_scores` (each judged candidate's per-item val scores, keyed by the run's HMAC of the item id, never test; a proposer never sees them). It draws from `ParentSelector.rng`, so a resumed run picks again what it picked before |
 | proposers: `autoresearch` (the model proposer), `random` | `refactory_dsh/optim/random_optimizer.py` (`Optimizer`) | the edits. Write `propose`. The base class validates every proposal before it costs an evaluation. A proposer that calls a model gets the run's model through `bind_model` |
 | picker + proposer pairing | `refactory_dsh/optim/compose.py` (`PickedParent`) | a picker chooses the parent and any proposer writes the edits (`parent_picker` setting) |
-| registration | `optim.register` (core's own entries), `Package.optimizers`, `Package.strategies` (`refactory_dsh/nn/package.py`), both found by `registry.contributed` | selectable by name. `optim.resolve` / `strategies.resolve` look in core first, then in packages. Profiles validate both |
+| registration | two routes: `optim.register` / `strategies.register` for the library's own table, and `Package.optimizers` / `Package.strategies` (`refactory_dsh/nn/package.py`) for a package, found by `registry.contributed` | selectable by name. `optim.resolve` / `strategies.resolve` look in the library's table, then in the usable packages. A package name that clashes with the library's or another package's is refused. Profiles validate both, against the project's packages |
 | the strategy API | `refactory_dsh/outerloop.py` (`OuterLoop`, `Run`) | `Run.attempt` (apply and validate a proposal), `Run.evaluate` / `Run.evaluate_many` (`EvalRequest`: a candidate, a part, chosen items, a seed), `Run.part_item_scores` (per-item val scores, HMAC-keyed, val only), `Run.shared_scores`, budgets (`Run.budget_left`, `Run.rollouts_left`, `BudgetStopped`), `Run.keep`, `Run.stop`, `Run.save_strategy_state` |
 | validation gate | `outerloop.ValidationGate` | accept a candidate only on a strictly higher val score; the incumbent; shared-item scoring when an incident left an item out |
 | final evaluation | `outerloop.FinalEvaluation` | score the winner and the seed on test once, at the end |
@@ -83,10 +83,24 @@ class SetTone(Optimizer):
 PACKAGE = Package(name="my_methods", optimizers=(Freshest, SetTone))
 ```
 
+Where the package lives decides who can select it:
+
+- **A project's packages** (`<project>/.factory/packages/<name>/`, put there by
+  `python -m refactory_dsh.registry add <dir> --project <project>` or by create
+  mode): selectable in runs and profiles of that project (`--project <project>` on
+  the command line). `python -m refactory_dsh.registry disable <name>`
+  switches a package off for the project, and its strategies and optimizers go with
+  its modes.
+- **Installed packages** (`refactory/refactory_packages/<name>/`, shipped with
+  refactory): selectable everywhere.
+
 Then a run selects them by name: `--optimizer set_tone`, or `parent_picker: freshest`
-in a profile, paired with any proposer. A picker keeps `population = True` (the
-default) to get every judged candidate under `selection: pool`, and set it to `False`
-for a single-line picker, as `hill_climb` does, which keeps `selection: checkpoint`
-as its default. `tests/test_package_optimizers.py` runs exactly this route end to end.
+in a profile, paired with any proposer. A run records which package and version
+provided each package strategy, optimizer and picker, and a resume refuses a
+different one. A picker keeps `population = True` (the default) to get every judged
+candidate under `selection: pool`, and set it to `False` for a single-line picker, as
+`hill_climb` does, which keeps `selection: checkpoint` as its default.
+`tests/test_package_optimizers.py` runs this route end to end through the command
+line.
 
 More guides (benchmark packages, edit operations, node kinds and judges) will follow.

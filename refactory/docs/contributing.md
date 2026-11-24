@@ -210,7 +210,7 @@ Each of these happened, and the shape of the code is the response.
 | a new validator rule | `nn/validate.py` `RULES` + the check, then the anti-drift test |
 | a new edit operation | `nn/edits.py`: a primitive, or a macro that expands to primitives |
 | a new parent picker | subclass `optim.ParentSelector`, write `select`, list it in a package's `Package.optimizers` ([Adding an optimization method](methods.md)) |
-| a new proposer | subclass `optim.Optimizer`, write `propose`, list it in a package's `Package.optimizers` ([Adding an optimization method](methods.md)); `optim.register` is the same route for core's own |
+| a new proposer | subclass `optim.Optimizer`, write `propose`, list it in a package's `Package.optimizers` ([Adding an optimization method](methods.md)); a proposer in the library itself goes in `optim.REGISTRY` through `optim.register` |
 | a new outer loop | subclass `outerloop.OuterLoop`, override the steps, list it in a package's `Package.strategies` |
 | a new optimization method | a package that composes the core blocks (pickers, proposers, `ValidationGate`, `FinalEvaluation`, the strategy trace), not a new block of code in `strategies.py`: see [Adding an optimization method](methods.md) |
 | a new artifact | declare a `Port` on the mode **and** write it from a node |

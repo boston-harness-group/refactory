@@ -32,9 +32,10 @@ from .policies import (
 )
 from .compose import PickedParent
 
-#: The library's own optimizers, by name: filled by :func:`register` below, the one
-#: registration path. A package contributes more through ``Package.optimizers``
-#: (:func:`package_optimizers`), selectable by name without joining this table.
+#: The library's own optimizers, by name: filled only by :func:`register` (below, for
+#: the library's own). A package contributes more through ``Package.optimizers``
+#: (:func:`package_optimizers`, the other route), selectable by name without joining
+#: this table; a package name that clashes with one here is refused.
 REGISTRY: dict[str, type[Optimizer]] = {}
 
 
@@ -66,7 +67,8 @@ def package_optimizers(project: Path | None = None) -> dict[str, type[Optimizer]
     name, found as package strategies are (``registry.contributed``)."""
     from refactory_dsh import registry
 
-    return registry.contributed("optimizers", Optimizer, project)  # type: ignore[return-value]
+    return registry.contributed("optimizers", Optimizer, project,  # type: ignore[return-value]
+                                reserved=REGISTRY)
 
 
 def names() -> list[str]:
