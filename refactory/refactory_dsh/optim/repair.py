@@ -35,6 +35,13 @@ schemas, a fraction of a full request. The answer is the fixed proposal only; it
 rationale and prediction stay the original's. At most `REPAIR_CALLS_PER_PROPOSAL` calls
 per refused proposal and `REPAIR_CALLS_PER_EPOCH` per epoch; when they do not produce a
 candidate the loop asks again with a full request, as it did before.
+
+**The wiring review.** A proposal that applies but whose edit adds wiring warnings
+(`nn.validate.wiring_warnings`: a step whose output nothing reads, a reloop whose review
+reaches no prompt) is shown them in one slim call of the same shape (`wiring_request`),
+before its candidate is judged, smoked or evaluated (``Loop._wiring_check``). The answer
+changes the wiring or keeps the change as it is, with a reason: a warning is information,
+never a refusal.
 """
 
 from __future__ import annotations
@@ -291,6 +298,60 @@ def repair_request(proposal: Any, reasons: Sequence[str], parent_state: Mapping[
     what fixing its mechanics needs -- the pipeline it applies to (nodes, edges, what each
     node has), the current text of each knob it edits, the rules, the operations and the
     node schemas. No trajectories, no history."""
+    return _slim_request(
+        proposal, parent_state,
+        title="# Repair a refused proposal",
+        intro=("The proposal below was refused before anything ran, for how it is written, "
+               "not for what it tries. Fix only what the reasons name. Keep every change it "
+               "makes and what each one is for: the same steps, prompts, code and settings, "
+               "changed only as far as the reasons require. Do not add, drop or redesign "
+               "changes. Keep every text it wrote and fix only the refused field: move its "
+               "text to a field the operation takes; if none can hold it, keep the edit "
+               "without it (the proposer is told what was left out). If it cannot be fixed "
+               "without changing what it means, answer with an empty `edits` list and say "
+               "why."),
+        heading="## The refused proposal", reasons_heading="## Why it was refused",
+        reasons=reasons,
+        answer=('{"edits": [<the fixed edits, in order>], "why": "<what you changed to fix '
+                'it>"}'),
+        catalogue=catalogue, code_nodes=code_nodes, person_gates=person_gates,
+        protected=protected, max_edits=max_edits)
+
+
+def wiring_request(proposal: Any, warnings: Sequence[str], parent_state: Mapping[str, Any], *,
+                   catalogue: Sequence[Mapping[str, Any]], code_nodes: bool = False,
+                   person_gates: bool = False, protected: Sequence[str] = (),
+                   max_edits: int = 1) -> str:
+    """The slim wiring review (``Loop._wiring_check``): a proposal that applies and is
+    valid, the wiring warnings its edit adds (`nn.validate.wiring_warnings`), and what
+    changing its wiring needs -- the same tables as `repair_request`. The proposer fixes
+    the wiring, or keeps the change as it is and says why: a warning is not a refusal."""
+    return _slim_request(
+        proposal, parent_state,
+        title="# Check the wiring of your proposal",
+        intro=("The proposal below applies and is valid, and it will run as it is unless you "
+               "change it. Its edit adds the wiring warnings listed under it: the graph runs, "
+               "but likely not as you meant (a step whose output nothing reads still runs on "
+               "every item, and its work is lost). If a warning names something you did not "
+               "mean, change only the wiring it names -- wire the output into the step that "
+               "should read it, or remove the step that is no longer needed -- and keep every "
+               "other change and text of the proposal as it is. If the wiring is what you "
+               "meant (a step that opens a file it does not declare, say), answer with an "
+               "empty `edits` list and say why."),
+        heading="## Your proposal", reasons_heading="## The wiring warnings its edit adds",
+        reasons=warnings,
+        answer=('{"edits": [<the proposal\'s edits with the wiring changed, in order, or none '
+                'to keep it as it is>], "why": "<what you changed, or why the wiring is '
+                'meant>"}'),
+        catalogue=catalogue, code_nodes=code_nodes, person_gates=person_gates,
+        protected=protected, max_edits=max_edits)
+
+
+def _slim_request(proposal: Any, parent_state: Mapping[str, Any], *, title: str, intro: str,
+                  heading: str, reasons_heading: str, reasons: Sequence[str], answer: str,
+                  catalogue: Sequence[Mapping[str, Any]], code_nodes: bool,
+                  person_gates: bool, protected: Sequence[str], max_edits: int) -> str:
+    """A slim request about one proposal (`repair_request`, `wiring_request`)."""
     from refactory_dsh.nn.graph import Graph
 
     from .base import (_available_section, _clip_middle, _edit_fields, _node_specs, _rules_text,
@@ -309,25 +370,18 @@ def repair_request(proposal: Any, reasons: Sequence[str], parent_state: Mapping[
     steps = list(getattr(proposal, "steps", []) or [])
     touched = _touched_knobs(steps, knobs)
     lines = [
-        "# Repair a refused proposal",
+        title,
         "",
-        "The proposal below was refused before anything ran, for how it is written, not for "
-        "what it tries. Fix only what the reasons name. Keep every change it makes and what "
-        "each one is for: the same steps, prompts, code and settings, changed only as far as "
-        "the reasons require. Do not add, drop or redesign changes. Keep every text it "
-        "wrote and fix only the refused field: move its text to a field the operation "
-        "takes; if none can hold it, keep the edit without it (the proposer is told what "
-        "was left out). If it cannot be fixed "
-        "without changing what it means, answer with an empty `edits` list and say why.",
+        intro,
         "",
-        "## The refused proposal",
+        heading,
         f"Rationale: {getattr(proposal, 'rationale', '') or '(none)'}",
         f"Prediction: {getattr(proposal, 'prediction', '') or '(none)'}",
         "```json",
         json.dumps({"edits": steps}, indent=1, default=str),
         "```",
         "",
-        "## Why it was refused",
+        reasons_heading,
         *[f"- {reason}" for reason in reasons],
         "",
         "## The pipeline it applies to",
@@ -359,8 +413,7 @@ def repair_request(proposal: Any, reasons: Sequence[str], parent_state: Mapping[
                 for c in catalogue]),
         "",
         "## Answer",
-        "One JSON object and nothing else: "
-        '{"edits": [<the fixed edits, in order>], "why": "<what you changed to fix it>"}'
+        "One JSON object and nothing else: " + answer
         + (f". At most {max_edits} changes." if max_edits > 1 else "."),
     ]
     return "\n".join(lines)
