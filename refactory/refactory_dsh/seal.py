@@ -418,8 +418,8 @@ def tool_path(python: str, bin_dir: Path, *, workspace: Path, runs=(), hidden=()
                     tmp=str(tmp) if tmp is not None else "")
 
 
-def tool_path_from_environment(environment: Any, bin_dir: Path, *,
-                               workspace: Path, runs: Sequence = (),
+def tool_path_from_environment(environment, bin_dir: Path, *,
+                               workspace: Path, runs=(),
                                tmp_dir: Path | None = None,
                                workdir: Path | None = None) -> ToolPath:
     """Unpack a `task.ToolEnvironment` and call `tool_path`: the shared path for sealed
