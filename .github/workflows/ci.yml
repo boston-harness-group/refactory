@@ -68,6 +68,10 @@ jobs:
           uv run python -m pytest -q -rfEs -x --timeout=300
           refactory/tests/test_boundary.py refactory/tests/test_registry.py
           "refactory/tests/test_cli.py::test_the_command_reference_matches_the_command_line"
+      # Five collections, about a minute: the four shards below together collect exactly
+      # the whole suite, no test missed and none in two shards.
+      - name: Shards cover the suite exactly once
+        run: uv run python scripts/check-shards.py 4
 
   # The TypeScript side and the harness pin, once, beside the Python shards.
   typescript:
@@ -135,12 +139,13 @@ jobs:
         run: uv run python -m refactory_dsh.harness_check
 
   # The Python suite (issue #272), in four parallel jobs. Every test runs on every
-  # push: `--shard I/4` packs the test files by their CI durations
+  # push: `--shard I/4` packs the suite by its CI durations
   # (`refactory/tests/ci_durations.json`, refreshed by `scripts/ci-durations.py` from
-  # these jobs' reports), each job runs its share on four workers, and the four
-  # shards together are the whole suite. A file always stays on one worker
-  # (`loadscope`), so no file may take much longer than a shard's share: the
-  # delivery and design-worktree tests are split by theme for that reason.
+  # these jobs' reports; the nightly builds a fresh one as an artifact), each job runs
+  # its share on four workers, and the four shards together are the whole suite
+  # (fast-checks proves it). The pieces are whole files, except a file longer than
+  # four minutes, whose tests are packed one by one. Within a job a file stays on one
+  # worker (`loadscope`), and the longest go out first.
   #
   # Tests that need an external tool or a model credential are marked and skipped
   # with a reason; the toolchain summary at the end of each shard names every one

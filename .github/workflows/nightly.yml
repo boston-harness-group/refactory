@@ -48,6 +48,41 @@ jobs:
           path: structure-fuzz.json
           if-no-files-found: ignore
 
+  # Fresh shard durations from the last five green CI runs on main, as an artifact. It
+  # never commits: a person downloads `ci_durations.json` (or runs the same command)
+  # and opens a pull request with it when the shards have drifted apart.
+  ci-durations:
+    name: Shard durations (artifact)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: pnpm/setup@v3
+        with:
+          runtime: node@24
+          install: false
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          python-version: "3.12"
+      - name: Install (fresh-checkout path)
+        run: ./install.sh
+      - name: Rebuild the durations
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          uv run python scripts/ci-durations.py --latest 5
+          git diff --stat -- refactory/tests/ci_durations.json
+      - name: Keep them
+        uses: actions/upload-artifact@v4
+        with:
+          name: ci-durations
+          path: refactory/tests/ci_durations.json
+
   # A failed night opens (or comments on) one tracking issue, so the team sees it rather
   # than only whoever last edited the schedule. Its own job, holding the only token that
   # may write issues, so the test job and the code it runs never see one.
