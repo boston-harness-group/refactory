@@ -904,18 +904,24 @@ class _NamesParentInPropose(Loop):
 
 
 def test_a_failed_round_names_the_parent_in_the_strategy_decision(tmp_path):
+    # The model answers two rounds (the seed-only round and the first round
+    # with other parents), then fails. Without the sweep (model proposer),
+    # the first round with other parents is epoch 2.
+    answered = [0]
+
     def script(model: ComboModel, request: Request) -> list[dict[str, Any]]:
-        if request.index == 0:
+        if answered[0] < 2:
+            answered[0] += 1
             return fixer(model, request)
         raise RuntimeError("model down")
 
     with _combo_mode():
-        loop = _NamesParentInPropose("fake/combo", _config(tmp_path, epochs=3),
+        loop = _NamesParentInPropose("fake/combo", _config(tmp_path, epochs=4),
                                      project=Path("."), model=ComboModel(script))
         loop.named = []
         loop.run()
     events = _failed_events(loop)
-    failing = loop.named[1:]  # the first named round's request was answered
+    failing = loop.named[1:]
     assert events and len(events) == len(failing)
     for event, (named, own) in zip(events, failing):
         assert named != own and event["parent"] == named

@@ -630,9 +630,9 @@ class Run:
         ]
 
     def has_part(self, part: str) -> bool:
-        """Whether the parts manifest declares ``part``. Its ids stay withheld."""
+        """Whether the parts manifest declares ``part`` with at least one item."""
         manifest = getattr(self._loop, '_parts_manifest', None)  # noqa: SLF001
-        return manifest is not None and part in manifest
+        return manifest is not None and bool(manifest.get(part))
 
     def keep(self, candidate: Candidate) -> Candidate:
         """Add a candidate to the search. A strategy that evaluates must also keep.
