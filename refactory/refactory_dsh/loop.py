@@ -3637,17 +3637,24 @@ class Loop(OuterLoop):
         # An optimizer that picks its own parent (a parent picker paired with a
         # proposer) picks it here, before the request is built, so the request
         # describes the candidate its proposals are applied to.
+        # When the round will be split into per-slot calls, skip the pick here:
+        # _propose_per_slot picks per slot, and an extra pick here would waste
+        # a picker call and advance the picker's RNG/explore state.
+        n = self.batch_size(run)
+        will_split = self._split_proposal_calls(n)
         choose = getattr(self.optimizer, "choose_parent", None)
-        picked = None if explicit or not callable(choose) else choose(
+        picked = (None if explicit or will_split or not callable(choose)
+                  else choose(
             ProposalContext(epoch=self.epoch, generation=self.generation,
                             mode_name=self.mode_id, elite=int(self.config.elite),
                             val_scores=self._val_scores(),
-                            val_item_scores=self._val_item_scores()), parents)
+                            val_item_scores=self._val_item_scores()), parents))
         if explicit:
             self._editing_parent = str(explicit)
         elif picked is not None:
             self._editing_parent = picked.id
         else:
+            # A default for the round; _propose_per_slot overrides it per slot.
             selected = self.select_parents(1)
             self._editing_parent = selected[0].id if selected else None
         self._refresh_edited_records()
@@ -3660,7 +3667,7 @@ class Loop(OuterLoop):
         before = len(self.rejections)
         self._levels_wanted, self._levels_done = self._round_levels(), []
         self._proposal_attempt = 0
-        proposals = self.propose(run, parents, self.batch_size(run))
+        proposals = self.propose(run, parents, n)
         candidates = self.install(run, proposals, parents)
         rejections = self.rejections[before:]
         self._round_refusals.setdefault(self.epoch, []).extend(rejections)
@@ -4310,6 +4317,7 @@ class Loop(OuterLoop):
         all_proposals: list[Proposal] = []
         shared_analysis: dict[str, Any] | None = None
         original_parent = self._editing_parent
+        slot_levels: list[str] = []
 
         for slot in range(n):
             # --- pick the parent for this slot ---
@@ -4321,6 +4329,7 @@ class Loop(OuterLoop):
                                    val_item_scores=self._val_item_scores()), parents)
                 if picked is not None:
                     self._editing_parent = picked.id
+            self._refresh_edited_records()
 
             self.optimizer.proposal_rounds += 1
             self._proposal_attempt += 1
@@ -4343,9 +4352,13 @@ class Loop(OuterLoop):
                          "parent": p.parent or ""}
                         for p in all_proposals])
                 # Under portfolio, narrow the edit levels to what this slot should propose.
+                # Use slot_levels (assigned this round) alongside _levels_done (installed
+                # in prior rounds) so each slot gets a different level.
                 if self._levels_wanted:
-                    missing = [l for l in self._levels_wanted if l not in self._levels_done]
+                    assigned = set(self._levels_done) | set(slot_levels)
+                    missing = [l for l in self._levels_wanted if l not in assigned]
                     if missing:
+                        slot_levels.append(missing[0])
                         context = dataclasses.replace(context, edit_levels=[missing[0]])
                 try:
                     proposals = self.optimizer.propose(context, 1, parents)
