@@ -11,7 +11,7 @@ Run from the repository root.
 
 ```bash
 uv run python -m pytest refactory/tests/ -q                    # the suite
-uv run python -m pytest refactory/tests/ -q -n 4               # ... on four workers (22.4 min to 5.7 min)
+uv run python -m pytest refactory/tests/ -q -n 8               # ... on eight workers
 uv run python -m pytest refactory/tests/ -q --run-integration  # ... plus the real-DSH runs
 uv run python -m pytest refactory/tests/ -q -n 4 --shard 2/4   # ... one of CI's four shards
 
@@ -21,6 +21,24 @@ check runs a single test under a time cap.
 uv run python -m refactory_dsh.tools.gen_api_reference --check # docs match the code
 uv sync --group reference                                      # add the test-time oracle
 ```
+
+### Run the tests your change touches
+
+CI is the binding check: a pull request's four shards run every test once. While you
+iterate, run only what the diff can reach, on eight workers:
+
+```bash
+pnpm test:changed             # select for your diff and run it
+pnpm test:changed --list      # ... print the selection, run nothing
+pnpm test:changed -- -x -k x  # ... pass pytest its own options
+```
+
+`scripts/test-changed` selects with design mode's own self-check selection
+(`refactory_dsh/test_selection.py`): the test files the diff touched, the test files that
+import a module it changed, and the engine and structural tests when it changes a hub. A
+change to a file every test reads (`conftest.py`, `pytest.ini`, `pyproject.toml`, a pytest
+plugin, `uv.lock`) selects the whole suite, because no import graph says what it reaches.
+Run the whole suite at most once before pushing, and never on a single worker.
 
 `tests/test_ir_parity.py` compares `refactory_dsh/ir.py` with the reference graph
 language over every shipped mode. That reference is a **test-time oracle** and not

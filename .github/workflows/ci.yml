@@ -62,7 +62,7 @@ jobs:
       - name: Install (docs:check and typecheck run here)
         run: ./install.sh
       - name: Ruff (syntax errors and undefined names)
-        run: uvx ruff@0.15.0 check --isolated --select E9,F63,F7,F82 refactory scripts
+        run: uvx ruff@0.15.0 check --isolated --select E9,F63,F7,F82 refactory scripts scripts/test-changed
       - name: Boundary, registry and command reference
         run: >-
           uv run python -m pytest -q -rfEs -x --timeout=300

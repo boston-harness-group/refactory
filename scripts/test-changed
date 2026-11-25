@@ -1,0 +1,172 @@
+#!/usr/bin/env python3
+"""The Python tests a local change touches, run the way CI runs them.
+
+    pnpm test:changed                  # select for the working tree's diff and run it
+    pnpm test:changed --list           # ... print the selection, run nothing
+    pnpm test:changed -- -x -k spawn   # ... pass pytest its own options after `--`
+
+The selection is design mode's own (`refactory_dsh.test_selection.select`, the function
+`design_ops.self_check_selection` calls), so a person iterating outside a run runs what the
+self-check would run for the same diff: the test files the diff touched, the test files
+that import a module it changed, the engine tests when a hub changed, and the structural
+tests when a source changed. A change to a file every test reads (`conftest.py`,
+`pytest.ini`, `pyproject.toml`, a pytest plugin, `uv.lock`) selects the whole suite, because
+nothing in the import graph can say what it reaches.
+
+The full suite is CI's job: it is the binding check, and a pull request's four shards run
+every test once. Run it here at most once before pushing. Everything here runs on eight
+workers unless `--jobs` says otherwise: a single worker takes tens of minutes.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import subprocess
+import sys
+from pathlib import Path
+
+#: The checkout this script ships in, for a directory that is not a checkout.
+SHIPPED = Path(__file__).resolve().parent.parent
+
+#: The suite CI runs; the selection is scoped to it.
+SUITE = "refactory/tests"
+
+#: Files every test reads. A change to one selects the whole suite: no import says what it
+#: reaches. Plugins named by `conftest.py`'s `pytest_plugins` belong here too, and
+#: `refactory/tests/test_test_changed.py` fails when one is missing.
+SUITE_WIDE = frozenset({
+    "conftest.py", "pytest.ini", "pyproject.toml", "setup.py", "setup.cfg", "tox.ini",
+    "uv.lock", "refactory/tests/model_credential.py", "refactory/tests/repo_guard.py",
+})
+
+DEFAULT_JOBS = 8
+
+
+def _git(root: Path, *args: str) -> str:
+    done = subprocess.run(["git", "-C", str(root), *args], capture_output=True, text=True,
+                          check=False)
+    return done.stdout.strip() if done.returncode == 0 else ""
+
+
+def _root() -> Path:
+    """The checkout the diff is read from: the current directory's repository, so the
+    command works from a worktree or a subdirectory, else the one this script ships in."""
+    return Path(_git(Path.cwd(), "rev-parse", "--show-toplevel") or SHIPPED)
+
+
+def _base(root: Path, requested: str) -> str:
+    """The commit the diff is taken from: ``requested``, else the merge base with
+    ``origin/main`` (so a branch's own commits count, not what main has since moved), else
+    ``HEAD`` (a checkout without an ``origin/main``; uncommitted work still counts)."""
+    if requested:
+        commit = _git(root, "rev-parse", "--verify", f"{requested}^{{commit}}")
+        if not commit:
+            raise SystemExit(f"test-changed: --base {requested!r} is not a commit")
+        return commit
+    if _git(root, "rev-parse", "--verify", "--quiet", "origin/main"):
+        return _git(root, "merge-base", "origin/main", "HEAD") or "origin/main"
+    return _git(root, "rev-parse", "HEAD") or "HEAD"
+
+
+def _touched(root: Path, base: str) -> list[str]:
+    """Every path the working tree, the index or the branch's commits change, plus the
+    untracked files. Renames list both paths, so a moved test still selects its importers."""
+    names: list[str] = []
+    for args in (("diff", "--name-only", "--no-renames", base), ("ls-files", "--others",
+                                                                "--exclude-standard")):
+        names += [line for line in _git(root, *args).splitlines() if line.strip()]
+    return sorted(dict.fromkeys(names))
+
+
+def _suite_wide(names: list[str]) -> list[str]:
+    return [name for name in names
+            if Path(name).name in SUITE_WIDE or name in SUITE_WIDE]
+
+
+def _python(root: Path) -> str:
+    """The interpreter that runs pytest: the checkout's venv when there is one, else the
+    one running this script."""
+    venv = root / ".venv" / "bin" / "python"
+    return str(venv) if venv.exists() else sys.executable
+
+
+def _command(python: str, jobs: int, tests: list[str], extra: list[str]) -> list[str]:
+    line = [python, "-m", "pytest", "-q", "-p", "no:cacheprovider"]
+    if jobs > 1:
+        line += ["-n", str(jobs)]
+    return [*line, *tests, *extra]
+
+
+def _selection(touched: list[str], root: Path):
+    """The self-check's selection for ``touched``, or ``None`` for the whole suite."""
+    if _suite_wide(touched):
+        return None
+    from refactory_dsh import test_selection
+
+    check = f"{_python(root)} -m pytest {SUITE}"
+    files = test_selection.repository_files(root)
+    return test_selection.select(touched, root, check_command=check, files=files)
+
+
+def _in_venv(root: Path) -> None:
+    """Re-exec in the checkout's venv, so `refactory_dsh` and pytest import: a system
+    `python3` running this file has neither."""
+    venv = root / ".venv" / "bin" / "python"
+    if (not venv.exists() or Path(sys.executable).resolve() == venv.resolve()
+            or os.environ.get("TEST_CHANGED_IN_VENV")):
+        return
+    os.execve(str(venv), [str(venv), *sys.argv], {**os.environ, "TEST_CHANGED_IN_VENV": "1"})
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
+    parser.add_argument("--base", default="", help="the commit to diff against (default: the "
+                                                  "merge base with origin/main)")
+    parser.add_argument("--jobs", type=int, default=DEFAULT_JOBS,
+                        help=f"pytest -n workers (default {DEFAULT_JOBS}; 1 runs in-process)")
+    parser.add_argument("--list", action="store_true", help="print the selection, run nothing")
+    parser.add_argument("--json", action="store_true", help="print the selection as JSON too")
+    parser.add_argument("--full", action="store_true", help="run the whole suite, not the selection")
+    parser.add_argument("pytest_args", nargs=argparse.REMAINDER,
+                        help="pytest options, after `--`")
+    args = parser.parse_args(argv)
+    extra = [word for word in args.pytest_args if word != "--"]
+
+    root = _root()
+    if not (root / SUITE).is_dir():
+        raise SystemExit(f"test-changed: {root} has no {SUITE}")
+    _in_venv(root)
+
+    base = _base(root, args.base)
+    touched = _touched(root, base)
+    selected = None if args.full else _selection(touched, root)
+    if args.full or selected is None:
+        tests, why = [SUITE], "the whole suite: the change touches a file every test reads"
+    else:
+        tests, why = selected.tests, f"{len(selected.tests)} test file(s)"
+    command = _command(_python(root), max(1, args.jobs), tests, extra)
+
+    if args.list or args.json:
+        record = {"base": base, "touched": touched, "selection": tests,
+                  "suite_wide": args.full or selected is None,
+                  "not_selected": sorted(set(touched) - set(tests))}
+        if args.json:
+            record["command"] = " ".join(command)
+            print(json.dumps(record, indent=1))
+        elif tests:
+            print("\n".join(tests))
+        return 0
+
+    if not tests:
+        print(f"test-changed: nothing selected: {len(touched)} changed file(s) reach no test "
+              f"in {SUITE}. A change under packages/ is covered by `pnpm test`.")
+        return 0
+    print(f"test-changed: {len(touched)} changed file(s) select {why} from {base[:12]}")
+    print("running: " + " ".join(command), flush=True)
+    return subprocess.run(command, cwd=str(root), check=False).returncode
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv[1:]))

@@ -240,6 +240,10 @@ surface reads.
 
 ## What a contributor runs before pushing
 
+Iterate with `pnpm test:changed` (contributing.md, "Run the tests your change touches"):
+the tests your diff reaches, on eight workers. The suite below is what you run once before
+pushing; CI's four shards are the binding check.
+
 Change the glue or a document: `uv run python -m pytest refactory/tests -q`, then the two
 generator `--check` commands and `check_recipes` when a document, a CLI verb, or the API
 reference changed.

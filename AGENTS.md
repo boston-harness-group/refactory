@@ -6,6 +6,9 @@ working in this repository.
 
 - Read [refactory/docs/contributing.md](refactory/docs/contributing.md) first: the
   commands, the invariants, where each kind of change goes, and the review checklist.
+- Run only the tests your change touches while you iterate (`pnpm test:changed`), and the
+  whole Python suite at most once before pushing: CI is the binding check. Never run the
+  suite repeatedly, and never on a single worker.
 - A new outer-loop method (a parent picker, a proposer, an outer loop, a port of a
   published optimizer) follows
   [Adding an optimization method](refactory/docs/methods.md): a package that composes

@@ -394,6 +394,12 @@ def select(touched: list[str], root: Path, prev_record: dict[str, Any] | None = 
         if is_test_file(name):
             if (root / name).is_file() and (not name.endswith(".py") or _in_scope(name, scope)):
                 touched_tests.append(name)
+            elif name.endswith(".py") and (root / name).is_file():
+                # A Python file named like a test but outside the check's pytest scope is
+                # not a test the check runs: the product may name a module ``test_*.py``,
+                # as ``refactory_dsh/test_selection.py`` is, and the tests that import it
+                # are what the change reaches. A deleted test file still selects nothing.
+                sources.append(name)
         else:
             sources.append(name)
     selection = Selection(touched_tests=sorted(touched_tests), last_failures=last_failures,
