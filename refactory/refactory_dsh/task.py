@@ -89,6 +89,11 @@ class ToolEnvironment:
     #: commands (a folder beside its workspace), as LibreOffice needs: it puts its pipe in
     #: ``/tmp`` or ``/var/tmp`` only. Linux only (`seal.tool_path`). Default: a read-only one.
     private_tmp: bool = False
+    #: The packages a sealed code step may import, by name and version: what the
+    #: interpreter has installed that the optimizer may use in a code step's ``import``.
+    #: The request names each one so the proposer knows exactly what is importable.
+    #: Default: none declared (the request falls back to ``summary``).
+    packages: tuple[tuple[str, str], ...] = ()
 
 
 @dataclass(frozen=True)
