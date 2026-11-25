@@ -239,7 +239,7 @@ def _check_new_node_texts(node_state: Mapping[str, Any]) -> None:
 
 
 def _own_bindings(node: Node, graph: Graph, state: Mapping[str, Any], *,
-                  exact: bool = False) -> tuple[Node, dict[str, Any]]:
+                  exact: bool = False, respec: bool = False) -> tuple[Node, dict[str, Any]]:
     """The new node with knobs of its own, and the knobs to declare for it.
 
     A new node may not bind a knob another node binds: it would silently run that
@@ -254,19 +254,20 @@ def _own_bindings(node: Node, graph: Graph, state: Mapping[str, Any], *,
     keeps its binding. With ``exact`` (an exact copy of a step, `core_ops._clone_agent`)
     no knob is added: the copy has the knobs of the step it copies, each its own.
     """
-    owners = {knob: owner.id for owner in graph.nodes.values()
-              for _field, knob in owner.field_bindings}
-    readers = graph.knob_consumers()
-    for _field, knob in node.field_bindings:
-        if knob in owners or knob in readers:
-            other = owners.get(knob) or readers[knob][0]
-            how = "owns" if knob in owners else "reads"
-            raise EditError(
-                f"new node {node.id!r} binds knob {knob!r}, which node {other!r} {how}; "
-                f"drop field_bindings (and the knob from its knobs) -- a new agent node gets "
-                f"its own {node.id}__system_prompt and {node.id}__task knobs from its "
-                "system_prompt_template and prompt_template",
-                code="E-binding")
+    if not respec:
+        owners = {knob: owner.id for owner in graph.nodes.values()
+                  for _field, knob in owner.field_bindings}
+        readers = graph.knob_consumers()
+        for _field, knob in node.field_bindings:
+            if knob in owners or knob in readers:
+                other = owners.get(knob) or readers[knob][0]
+                how = "owns" if knob in owners else "reads"
+                raise EditError(
+                    f"new node {node.id!r} binds knob {knob!r}, which node {other!r} {how}; "
+                    f"drop field_bindings (and the knob from its knobs) -- a new agent node gets "
+                    f"its own {node.id}__system_prompt and {node.id}__task knobs from its "
+                    "system_prompt_template and prompt_template",
+                    code="E-binding")
     from refactory_dsh.snippet import is_code_node
 
     if exact:
@@ -316,7 +317,8 @@ def _add_node(state: State, edit: dict) -> State:
     graph = _graph(state)
     if node.id in graph.nodes:
         raise EditError(f"node {node.id!r} already exists")
-    node, own_knobs = _own_bindings(node, graph, state, exact=edit.get("_exact") is True)
+    node, own_knobs = _own_bindings(node, graph, state, exact=edit.get("_exact") is True,
+                                    respec=edit.get("_respec") is True)
 
     if kind == "start":
         previous = graph.start
