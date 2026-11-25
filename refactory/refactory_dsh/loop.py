@@ -1716,9 +1716,17 @@ class Loop(OuterLoop):
         is not, so the first epoch produces a gradient with *contrast* in it. A
         purely structural starting population gives the optimizer plenty of
         candidates and no evidence about which value of anything is worth having.
+
+        When the optimizer uses a model (autoresearch, or a parent picker wrapping
+        one), the sweep is skipped: round 1 scores the seed alone, and from then
+        on the model proposer writes all candidates. Swept neighbours would stay
+        in the population unjudged by the integrity judge and dilute the model's
+        proposals.
         """
         wanted = max(0, int(self.config.batch_size) - 1)
         if not wanted:
+            return
+        if getattr(self.optimizer, "uses_model", False):
             return
         sampler = RandomOptimizer(seed=self.config.seed)
         sampler.allow_code_nodes = bool(self.config.allow_code_nodes)
@@ -4179,6 +4187,8 @@ class Loop(OuterLoop):
             best=summary.best,
             mean=summary.mean,
             improved=summary.improved,
+            proposed=proposed,
+            accepted=accepted,
             bound=self.bound,
             another=not self.bound,
             **gate_fields,
@@ -5165,7 +5175,7 @@ class Loop(OuterLoop):
             # scheduler writes: without this state.json shows them "not gated".
             self._write_state()
         if not run.has_part(task_module.TEST):
-            final.skip(run, "the parts manifest has no 'test' part", save)
+            final.skip(run, run.empty_part_reason(task_module.TEST), save)
             return
         self._reuse_final_selection(final, save)
         final.run(run, self._gate(), seed=self.config.seed, save=save)

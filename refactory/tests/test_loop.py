@@ -881,3 +881,64 @@ def test_user_pause_stops_only_the_owned_resource_clock(tmp_path, monkeypatch, o
     else:
         with pytest.raises(BudgetExhausted):
             loop.budget.checkpoint()
+
+
+# ── Fix 1: model proposer skips the starting sweep ───────────────────────
+
+
+class ModelOptimizer(Optimizer):
+    """A minimal model-proposer stub: ``uses_model`` is True."""
+
+    name = "model_stub"
+    uses_model = True
+
+    def __init__(self) -> None:
+        super().__init__(k=3)
+        self.propose_calls: list[int] = []
+
+    def propose(self, ctx, n, parents):  # type: ignore[no-untyped-def]
+        self.propose_calls.append(n)
+        return [
+            Proposal(edit={"op": "set_knob", "name": "prompt", "value": f"v{i}"},
+                     parent=parents[0].id, rationale="model stub")
+            for i in range(n)
+        ]
+
+
+def test_model_proposer_skips_seed_population_sweep(tmp_path):
+    """With uses_model=True the starting population is the seed alone."""
+    opt = ModelOptimizer()
+    loop = Loop(MODE, _config(tmp_path, batch_size=5, epochs=1), project=Path("."),
+                optimizer=opt)
+    loop.init()
+    assert len(loop.population) == 1, (
+        f"model proposer should start with seed only, got {len(loop.population)}")
+
+
+def test_random_proposer_still_sweeps(tmp_path):
+    """Without uses_model the sweep fills the starting batch as before."""
+    loop = Loop(MODE, _config(tmp_path, batch_size=5, epochs=1, optimizer="random"),
+                project=Path("."))
+    loop.init()
+    assert len(loop.population) >= 2, (
+        f"random proposer should sweep; population is {len(loop.population)}")
+
+
+def test_model_proposer_gets_full_batch_in_first_round(tmp_path, monkeypatch):
+    """With batch_size=5, the model proposer is asked for 5 proposals on round 1."""
+    opt = ModelOptimizer()
+    loop = Loop(MODE, _config(tmp_path, batch_size=5, epochs=1), project=Path("."),
+                optimizer=opt)
+    # Stub out evaluation so we don't need a real runtime.
+    monkeypatch.setattr(loop, "forward", lambda **kw: 0)
+    monkeypatch.setattr(loop, "loss_step", lambda: {})
+    loop.init()
+    assert len(loop.population) == 1
+    # Run the optimizer step: backward + propose + install.
+    loop.open_epoch()
+    loop.backward()
+    from refactory_dsh.outerloop import Run
+    _candidates, _rejections = loop.optimizer_step(Run(_loop=loop))
+    assert opt.propose_calls, "model optimizer was never called"
+    assert opt.propose_calls[0] == 5, (
+        f"expected model to be asked for 5 proposals, got {opt.propose_calls[0]}")

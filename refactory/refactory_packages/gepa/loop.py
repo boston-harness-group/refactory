@@ -243,8 +243,10 @@ class GepaLoop(OuterLoop):
             raise ValueError("gepa: the minibatches need the parts manifest's train ids "
                              "(run.part_ids('train') returned none)")
         if self.pareto_set == "val" and not run.has_part("val"):
-            raise ValueError("gepa: pareto_set=val needs a parts manifest with a 'val' part; "
-                             "give the run one, or set pareto_set=train")
+            reason = ("an empty val part" if run.part_declared("val")
+                      else "no 'val' part in the parts manifest")
+            raise ValueError(f"gepa: pareto_set=val needs val items, but the run has {reason}; "
+                             "add val items, or set pareto_set=train")
         self.feedback_ids = self._split(train_ids)
         try:
             if not self.finished:
@@ -680,7 +682,7 @@ class GepaLoop(OuterLoop):
         if not self.eval_test:
             return "the eval_test strategy option is false"
         if not run.has_part("test"):
-            return "the parts manifest has no 'test' part"
+            return run.empty_part_reason("test")
         if self._run_error:
             return f"the search did not finish: {self._run_error}"
         if not self.best_id:

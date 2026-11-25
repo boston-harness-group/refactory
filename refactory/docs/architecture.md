@@ -1064,9 +1064,11 @@ the response to them. These are the findings that survived the rewrite:
   all scored the same. A validator can only reject what is invalid; it cannot make
   a batch worth learning from. The response is that `init` **sweeps** instead of
   sampling: one candidate per movable knob, each at a value the default is not, so
-  the first epoch produces a gradient with contrast in it. The same distinction is
-  why `knob_attribution` carries `untried` — a value that failed and a value
-  nobody tried are different facts.
+  the first epoch produces a gradient with contrast in it. When the optimizer
+  uses a model (`uses_model`), the sweep is skipped: the seed is scored alone in
+  round 1, and from then on the model proposer writes all candidates. The same
+  distinction is why `knob_attribution` carries `untried` — a value that failed
+  and a value nobody tried are different facts.
 - **The gradient was severed and everything downstream was blind.** The optimizer
   was not given what the run had learned. The response is that `backward()`
   produces a gradient that is an explicit part of the API, `knob_attribution`
