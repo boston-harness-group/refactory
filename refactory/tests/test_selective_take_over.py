@@ -21,6 +21,7 @@ reading them from the original step.
 from __future__ import annotations
 
 from refactory_dsh.nn import edits as nn_edits
+from refactory_dsh.optim.base import _example_refusal, _with_outputs_said
 
 import structure_fuzz_graphs as fg
 from refactory_packages.spreadsheetbench_v2.steps_mode import (
@@ -305,3 +306,54 @@ def test_selective_take_over_in_linear_pipeline():
     assert "brief.txt" in nodes["redact"]["writes"]
     assert "brief.txt" not in nodes["intake"]["writes"]
     assert "brief" in nodes["intake"]["produces"]
+
+
+# ── enrichment with the list form ────────────────────────────────────────
+
+
+def test_with_outputs_said_names_only_selected_files():
+    """_with_outputs_said with [step, output, ...] enriches the prompt to name
+    only the selected files, not every file the target writes."""
+    state = _steps_state()
+    impl_writes = state["graph"]["nodes"]["implement"]["writes"]
+    assert len(impl_writes) > 1
+
+    edit = {"op": "insert", "after": "implement", "kind": "agent",
+            "text": "Revert output.", "tools": ["Bash"],
+            "takes_over": ["implement", "output.xlsx"]}
+    enriched = _with_outputs_said([edit], state)
+    text = enriched[0]["text"]
+
+    assert "output.xlsx" in text
+    for w in impl_writes:
+        if w != "output.xlsx":
+            assert w not in text, f"{w} should not appear: only selected files"
+
+
+def test_with_outputs_said_full_takeover_names_all_files():
+    """_with_outputs_said with the string form names every file the target writes."""
+    state = _steps_state()
+    edit = {"op": "insert", "after": "implement", "kind": "agent",
+            "text": "Rewrite.", "takes_over": "implement"}
+    enriched = _with_outputs_said([edit], state)
+    text = enriched[0]["text"]
+
+    for w in step_writes("implement"):
+        assert w in text, f"{w} should appear in full-takeover enrichment"
+
+
+def test_example_refusal_selective_checks_only_selected():
+    """_example_refusal with [step, output, ...] checks writability of only the
+    selected files, not all of the target's files."""
+    state = _steps_state()
+    edit_ok = {"op": "insert", "after": "implement", "kind": "agent",
+               "text": "Fix output.", "tools": ["Bash"],
+               "takes_over": ["implement", "output.xlsx"]}
+    assert _example_refusal(state, [edit_ok]) is None
+
+    edit_no_tools = {"op": "insert", "after": "implement", "kind": "agent",
+                     "text": "Fix output.",
+                     "takes_over": ["implement", "output.xlsx"]}
+    reason = _example_refusal(state, [edit_no_tools])
+    assert reason is not None
+    assert "agent" in reason.lower()

@@ -2250,10 +2250,13 @@ def _example_state(node_states: Sequence[dict[str, Any]], edges: Sequence[dict[s
 
 
 def _takes_over_parts(takes: Any) -> tuple[str, frozenset[str] | None]:
-    """The step and the specific outputs a ``takes_over`` names, or ``None`` for all."""
-    if isinstance(takes, list) and len(takes) >= 2:
-        return str(takes[0]), frozenset(str(x) for x in takes[1:])
-    return str(takes), None
+    """Best-effort parse: on refusal (malformed value) returns ``("", None)``."""
+    from refactory_dsh.nn.core_ops import _parse_takes_over
+
+    try:
+        return _parse_takes_over(takes)
+    except Exception:  # noqa: BLE001 — enrichment, never a refusal
+        return "", None
 
 
 def _can_write(spec: Mapping[str, Any], file: str, files: Sequence[str]) -> bool:
