@@ -2249,6 +2249,13 @@ def _example_state(node_states: Sequence[dict[str, Any]], edges: Sequence[dict[s
                       for k, v in (knob_values or {}).items()}}
 
 
+def _takes_over_parts(takes: Any) -> tuple[str, frozenset[str] | None]:
+    """The step and the specific outputs a ``takes_over`` names, or ``None`` for all."""
+    if isinstance(takes, list) and len(takes) >= 2:
+        return str(takes[0]), frozenset(str(x) for x in takes[1:])
+    return str(takes), None
+
+
 def _can_write(spec: Mapping[str, Any], file: str, files: Sequence[str]) -> bool:
     """Whether a new step of ``spec`` can produce ``file`` among the ``files`` it takes over:
     an agent with tools writes any file, one without only its reply (so one file); the code
@@ -2266,10 +2273,17 @@ def _with_outputs_said(bundle: list[dict[str, Any]], state: Mapping[str, Any]
     out = []
     for edit in bundle:
         taken = edit.get("takes_over")
-        files = list((nodes.get(str(taken)) or {}).get("writes") or ()) if taken else []
+        if taken:
+            target_id, selected = _takes_over_parts(taken)
+            all_files = list((nodes.get(target_id) or {}).get("writes") or ())
+            files = ([f for f in all_files if f in selected] if selected is not None
+                     else all_files)
+        else:
+            target_id = None
+            files = []
         if files and isinstance(edit.get("text"), str) and edit.get("kind", "agent") == "agent":
             edit = {**edit, "text": f"{edit['text']} It writes {_or_list(files, 'and')}, the outputs "
-                                    f"of `{taken}` it takes over."}
+                                    f"of `{target_id}` it takes over."}
         out.append(edit)
     return out
 
@@ -2286,11 +2300,13 @@ def _example_refusal(state: Mapping[str, Any], bundle: Sequence[dict[str, Any]],
     for edit in bundle:
         if not edit.get("takes_over"):
             continue
-        files = list((nodes.get(str(edit["takes_over"])) or {}).get("writes") or ())
+        target_id, selected = _takes_over_parts(edit["takes_over"])
+        all_files = list((nodes.get(target_id) or {}).get("writes") or ())
+        files = ([f for f in all_files if f in selected] if selected is not None else all_files)
         unable = [f for f in files if not _can_write(edit, f, files)]
         if unable:
             return (f"its new step reaches a reader only by taking over the outputs of "
-                    f"`{edit['takes_over']}` ({_or_list(files, 'and')}), which this new "
+                    f"`{target_id}` ({_or_list(files, 'and')}), which this new "
                     f"{edit.get('kind', 'agent')} step does not write")
     # Each knob as a spec `set_knob` reads back: its value its default, its kind its
     # value's, frozen as declared.
