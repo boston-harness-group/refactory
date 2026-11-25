@@ -63,12 +63,18 @@ class Scripted(Optimizer):
         self.handed: list[list[int]] = []
         self.prompts: list[str] = []
         self.uses_model = model
+        self._pending: list[tuple[int, int]] = []
 
     def propose(self, ctx, n, parents):  # type: ignore[no-untyped-def]
         self.handed.append([_level(p) for p in parents])
         if self.uses_model:
             self.prompts.append(ctx.render())
-        moves = self.plan.pop(0) if self.plan else []
+        # With per-slot split, propose() is called n times with n=1 each.
+        # Consume one round's moves into _pending, then yield n at a time.
+        if not self._pending and self.plan:
+            self._pending = list(self.plan.pop(0))
+        moves = self._pending[:n]
+        self._pending = self._pending[n:]
         return [Proposal(edit={"op": "set_knob", "name": "level", "value": child},
                          parent=next(p for p in parents if _level(p) == parent).id)
                 for parent, child in moves]
@@ -886,7 +892,10 @@ def test_the_requests_rows_do_not_follow_the_val_ranking(tmp_path, monkeypatch):
             {0: 0.5, 1: 0.6, 2: 0.8, 3: 0.7, 4: 0.1})
     loop, proposer, _ = _run(tmp_path, monkeypatch, [[(0, 1), (0, 2), (0, 3)], [(2, 4)]],
                              model=True, epochs=2, batch_size=3, selection="pool")
-    rows = _levels(loop, _recent_rows(proposer.prompts[1]))
+    # With per-slot split, the second round's first prompt is after the first
+    # round's N slots.  Find it by looking for epoch 2.
+    round2_prompt = next(p for p in proposer.prompts if "epoch 2" in p)
+    rows = _levels(loop, _recent_rows(round2_prompt))
     assert rows == [2, 0, 1, 3], rows
     val_order = sorted(rows, key=lambda level: -{0: 0.5, 1: 0.6, 2: 0.8, 3: 0.7}[level])
     assert rows != val_order
@@ -900,7 +909,8 @@ def test_the_requests_rows_follow_train_score_after_the_current_candidate(
             {0: 0.5, 1: 0.6, 2: 0.8, 3: 0.7, 4: 0.1})
     loop, proposer, _ = _run(tmp_path, monkeypatch, [[(0, 1), (0, 2), (0, 3)], [(2, 4)]],
                              model=True, epochs=2, batch_size=3, selection="pool")
-    assert _levels(loop, _recent_rows(proposer.prompts[1])) == [2, 1, 0, 3]
+    round2_prompt = next(p for p in proposer.prompts if "epoch 2" in p)
+    assert _levels(loop, _recent_rows(round2_prompt)) == [2, 1, 0, 3]
 
 
 def test_pool_labels_say_in_pool_left_pool_and_rejected(tmp_path, monkeypatch):
@@ -927,7 +937,8 @@ def test_the_proposer_never_sees_a_pool_label(tmp_path, monkeypatch):
     loop, proposer, _ = _run(tmp_path, monkeypatch, POOL_PLAN + [[(5, 6)]], model=True,
                              epochs=4, batch_size=3, selection="pool", pool_size=2)
     assert loop._gate_decision(loop.population[0].id, detail=True) == "left pool", "setup"
-    assert len(proposer.prompts) == 4
+    # With per-slot split, batch_size=3 → 3 prompts per round × 4 rounds = 12.
+    assert len(proposer.prompts) == 4 * 3
     for prompt in proposer.prompts:
         for label in ("in pool", "left pool", "below pool", "pushed out"):
             assert label not in prompt, label
@@ -1059,7 +1070,8 @@ def test_the_tried_line_gives_the_current_candidates_train_score(tmp_path, monke
     loop, proposer, _ = _run(tmp_path, monkeypatch, POOL_PLAN, model=True, epochs=3,
                              batch_size=3, selection="pool", pool_size=2)
     score = {_level(c): c.score for c in loop.population}
-    tried = proposer.prompts[2].split("## What this run has already tried", 1)[1]
+    round3_prompt = next(p for p in proposer.prompts if "epoch 3" in p)
+    tried = round3_prompt.split("## What this run has already tried", 1)[1]
     first = tried.strip().splitlines()[0]
     assert f"train score of the validation gate's current candidate {score[2]:.6g}" in first, first
     assert f"{score[4]:.6g}" not in first and "best kept" not in first

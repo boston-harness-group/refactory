@@ -966,6 +966,31 @@ call (that call's next attempt included) fails at once until some call gets thro
 the worst case of one optimizer call in an outage that never ends is about 2 hours plus
 the attempts' own waits (1 + 2 + 4 s), not 3 x 2 hours.
 
+### One call per candidate slot (`batch_size` above 1 with a model proposer)
+
+A round with `--batch-size` *N* > 1 and a model proposer (not the random sampler)
+makes *N* sequential proposal calls, each asking for exactly 1 update.  With a parent
+picker, each call gets its own picker-chosen parent and per-parent context (pipeline
+view, knobs, trajectories), so within one round the search explores *N* different niches.
+Without a picker, every call edits the same parent.
+
+Each call after the first receives a "Proposals already made in this round" section
+listing the earlier proposals of the round (each: its parent, edits, and rationale),
+so the model does not duplicate them.
+
+Expensive per-round work runs once and is shared across the *N* calls:
+- The analysts (when `analysts` is on): run on the first slot's parent and shared.
+- The memory pass: run once before the round.
+- The run ledger: computed once.
+
+If a call yields no accepted candidate after its repair, the slot stays empty; the
+round continues to the next slot.
+
+The strategies that deliberately ask one call for *N* proposals keep the single call:
+`best_of_n` and `autoscientists` (through `_sample_from_optimizer`, which signals this
+via `strategy_decision["samples"]`).  The `portfolio` round's one-per-edit-level
+behaviour is preserved: each slot is told which level to propose.
+
 ### Item traces as files (`traces/`, written, not read)
 
 After every evaluation (a candidate's train evaluation, a re-score, a memory rollout, a

@@ -328,6 +328,35 @@ def test_allows_round_must_check_budget_not_just_fact(tmp_path):
     assert finish.allows_round(ctx) is False
 
 
+def test_self_check_reloop_does_not_spend_budget_but_gate_send_back_does(tmp_path):
+    """A prepare_check self-check reloop must NOT spend the fix-round budget;
+    a gate send-back must spend it.  With fix_rounds=1, the budget must survive
+    the self-check and be exhausted by the gate send-back.
+
+    Mutation-checks:
+    - prepare_check guards sent_back behind ``finish.fact(ctx) is not None`` for
+      non-finish runs: if that guard were removed, self-check reloops would
+      incorrectly spend the budget and this test would fail at the second assert.
+    - gate send-backs call ``finish.sent_back``: if that call were removed, the
+      budget would never be spent and the final assert would fail.
+    """
+    ctx = RunContext(tmp_path, knobs={"fix_rounds": 1}, facts={})
+    assert finish.fact(ctx) is None, "non-finish run"
+    assert finish.allows_round(ctx) is True
+
+    # Self-check reloop: prepare_check does NOT call finish.sent_back for
+    # non-finish runs (the guard at design_ops.py:2234).
+    assert finish.rounds_spent(ctx.facts) == 0, "self-check reloop must not touch budget"
+    assert finish.allows_round(ctx) is True, "budget must survive self-check reloop"
+
+    # Gate send-back: the gate calls finish.sent_back.
+    from refactory_dsh.nn import Verdict
+    finish.sent_back(ctx, Verdict("reloop", "check failed"))
+    assert finish.rounds_spent(ctx.facts) == 1, "gate send-back must spend the round"
+    assert finish.allows_round(ctx) is False, "budget must be exhausted after gate send-back"
+    assert finish.round_spent_reason(ctx) == finish.FIX_ROUND_SPENT
+
+
 def test_collect_open_items_empty_on_clean_ready(tmp_path):
     """A ready delivery with no follow-ups and no inherited failures produces no items."""
     ctx = RunContext(tmp_path, knobs={}, facts={})

@@ -343,8 +343,11 @@ def test_a_proposal_entry_with_no_edit_is_a_counted_refusal_shown_back(tmp_path,
              if r.get("step") == "optimizer"]
     assert (tally[0]["accepted"], tally[0]["refused"]) == (1, 2), tally[0]
     assert tally[0]["epoch_refusal_codes"] == {"E-proposal-shape": 2}
-    assert len(client.prompts) >= 2 and "E-proposal-shape" in client.prompts[1]
-    assert "Why your last proposals were refused" in client.prompts[1]
+    # With per-slot split (batch_size=2, model proposer), the retry prompt with
+    # refusal feedback is after the per-slot calls, not at index 1.
+    retry_prompts = [p for p in client.prompts[1:] if "E-proposal-shape" in p]
+    assert retry_prompts, f"expected a retry prompt with E-proposal-shape, got {len(client.prompts)} prompts"
+    assert "Why your last proposals were refused" in retry_prompts[0]
 
 
 # ── a structure + knob bundle on LiveMath's skill graph ────────────────────

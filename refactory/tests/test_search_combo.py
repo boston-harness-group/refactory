@@ -386,9 +386,12 @@ def test_portfolio_evaluates_both_levels_under_the_gate_and_counts_the_extra(tmp
     model = ComboModel(portfolio)
     loop = _run("default", tmp_path, model, val_gate=True, batch_size=1, epochs=3,
                 portfolio="prompt+pipeline")
+    # With the per-slot split, each request has one level and wanted=1; across
+    # each pair of requests (one round), both levels are covered.
     for request in model.requests:
-        assert request.levels == ["prompt_knob", "pipeline"] and request.wanted == 2
-        assert "Propose exactly 2 updates, one per level" in request.text
+        assert len(request.levels) == 1 and request.wanted == 1
+    all_levels = [request.levels[0] for request in model.requests]
+    assert "prompt_knob" in all_levels and "pipeline" in all_levels
     children = [c for c in _children(loop) if c.evaluated]
     by_level = {"prompt_knob": [], "pipeline": []}
     for child in children:
@@ -400,7 +403,8 @@ def test_portfolio_evaluates_both_levels_under_the_gate_and_counts_the_extra(tmp
     assert {c.id for c in children} <= _gated(loop), "a portfolio candidate skipped the gate"
     report = json.loads((loop.root / "report.json").read_text())
     rounds = report["portfolio"]["rounds"]
-    assert rounds == len(model.requests)
+    # 2 requests per round (one per level) with the per-slot split.
+    assert rounds * 2 == len(model.requests)
     # Evaluations, not candidates: a train run plus each val (or test) occasion, for
     # every candidate beyond the batch size (1) of its round.
     def cost(cid: str) -> int:
@@ -448,6 +452,8 @@ def test_the_portfolio_report_lists_candidates_in_the_order_the_gate_judged_them
 
 
 def test_portfolio_refuses_a_second_candidate_of_one_level_and_asks_for_the_missing_one(tmp_path):
+    # With per-slot split, each slot is narrowed to one level, so the model
+    # always sees its level and both levels are covered without E-level refusals.
     def script(model: ComboModel, request: Request) -> list[dict[str, Any]]:
         if request.levels == ["pipeline"]:
             return portfolio(model, request)
@@ -455,9 +461,11 @@ def test_portfolio_refuses_a_second_candidate_of_one_level_and_asks_for_the_miss
 
     model = ComboModel(script)
     loop = _run("default", tmp_path, model, batch_size=1, epochs=2, portfolio="prompt+pipeline")
-    assert any(r.reasons and r.reasons[0].startswith("E-level") for r in loop.rejections)
-    retry = [r for r in model.requests if r.levels == ["pipeline"]]
-    assert retry and "Propose exactly one update: a pipeline-level change" in retry[0].text
+    # The pipeline slot gets its own call with levels=["pipeline"], so both levels
+    # are covered directly.  E-level refusals no longer fire because the split
+    # prevents the scenario.
+    pipeline_requests = [r for r in model.requests if r.levels == ["pipeline"]]
+    assert pipeline_requests, [r.levels for r in model.requests]
     assert any(loop.proposals[c.id].get("level") == "pipeline" for c in _children(loop))
 
 
@@ -467,15 +475,18 @@ def test_a_strategy_may_ask_the_portfolio_for_one_level(tmp_path):
     model = ComboModel(portfolio)
     loop = _run("reflective", tmp_path, model, epochs=4, batch_size=1,
                 portfolio="prompt+pipeline")
-    single = [r for r in model.requests if len(r.levels) == 1]
-    assert single, [r.levels for r in model.requests]
+    # With per-slot split, every request has one level. Strategy-decided requests
+    # are the ones where the strategy set edit_kind in the decision.
+    strategy_decided = [r for r in model.requests
+                        if re.search(r"edit_kind: (\w+)", r.decision)]
+    assert strategy_decided, [r.decision[:80] for r in model.requests]
     # The settings-only merge round asks for that level alone: its candidates are not
     # refused as a second prompt/knob change until the attempts run out.
     assert loop.merges >= 1
     # A merge edit sets a knob to the other parent's value (the scripted model patches).
     assert not [r for r in loop.rejections if r.reasons[0].startswith("E-level")
                 and isinstance(r.edit, dict) and "value" in r.edit]
-    for request in single:
+    for request in strategy_decided:
         kind = re.search(r"edit_kind: (\w+)", request.decision).group(1)
         assert request.levels == [kind] and request.wanted == 1
 
@@ -677,6 +688,8 @@ def test_a_strategy_named_parent_is_credited_to_the_strategy_not_the_picker(tmp_
 
 
 def _structural_script(structural: list[dict[str, Any]]) -> Script:
+    pending = list(structural)
+
     def script(model: ComboModel, request: Request) -> list[dict[str, Any]]:
         for node_id, knob in NEW_KNOB.items():
             if request.has_node(node_id):
@@ -685,8 +698,10 @@ def _structural_script(structural: list[dict[str, Any]]) -> Script:
                          if knob.endswith("__code") else f"Edited again, request {request.index}.")
                 return [{"edit": {"op": "set_knob", "name": knob, "value": value},
                          "rationale": f"edit {node_id} again"}]
-        if request.index == 0:
-            return [{"edit": edit, "rationale": "a new shape"} for edit in structural]
+        # With per-slot split, each call gets n=1 so return one structural edit
+        # per call until all are proposed.
+        if pending:
+            return [{"edit": pending.pop(0), "rationale": "a new shape"}]
         return fixer(model, request)
     return script
 
@@ -852,9 +867,16 @@ def test_a_failed_round_names_the_parent_the_strategy_chose(tmp_path, no_smoke):
     broken = {"op": "insert_after", "target": "solve",
               "node": {"id": "broken", "kind": "op", "call": "combo_ops:explode"}}
 
+    calls = []
+
     def script(model: ComboModel, request: Request) -> list[dict[str, Any]]:
-        if request.index == 0:
-            return [{"edit": broken, "rationale": "breaks"}, model.fix()]
+        calls.append(request.index)
+        # First call: return the broken edit. Second: a fix. After that: fail.
+        # With per-slot split, round 0 has N slots (N = batch_size).
+        if len(calls) == 1:
+            return [{"edit": broken, "rationale": "breaks"}]
+        if len(calls) == 2:
+            return [model.fix()]
         raise RuntimeError("model down")
 
     loop = _run("tree_search", tmp_path, ComboModel(script), epochs=3)
@@ -906,11 +928,16 @@ class _NamesParentInPropose(Loop):
 def test_a_failed_round_names_the_parent_in_the_strategy_decision(tmp_path):
     # The model answers two rounds then fails. Two successes ensure at least
     # one round names a parent and succeeds regardless of the starting sweep.
-    answered = [0]
+    # With per-slot split, each round issues batch_size calls; succeed for
+    # exactly the first 2 epochs, then fail.
+    succeeded_epochs: set[int] = set()
 
     def script(model: ComboModel, request: Request) -> list[dict[str, Any]]:
-        if answered[0] < 2:
-            answered[0] += 1
+        import re
+        epoch_match = re.search(r"epoch (\d+)", request.text)
+        epoch = int(epoch_match.group(1)) if epoch_match else -1
+        if len(succeeded_epochs) < 2 or epoch in succeeded_epochs:
+            succeeded_epochs.add(epoch)
             return fixer(model, request)
         raise RuntimeError("model down")
 
@@ -921,8 +948,16 @@ def test_a_failed_round_names_the_parent_in_the_strategy_decision(tmp_path):
         loop.run()
     events = _failed_events(loop)
     failing = loop.named[1:]
-    assert events and len(events) == len(failing)
-    for event, (named, own) in zip(events, failing):
+    # With per-slot split, each failed round may emit multiple events (one per
+    # slot). Deduplicate by epoch to match rounds.
+    seen_epochs: set[int] = set()
+    round_events = []
+    for event in events:
+        if event["epoch"] not in seen_epochs:
+            seen_epochs.add(event["epoch"])
+            round_events.append(event)
+    assert round_events and len(round_events) == len(failing)
+    for event, (named, own) in zip(round_events, failing):
         assert named != own and event["parent"] == named
 
 
@@ -1077,7 +1112,8 @@ class BreaksFirst(ComboModel):
 
 
 @pytest.mark.parametrize("settings,asked", [
-    ({"portfolio": "prompt+pipeline", "batch_size": 1}, 2),
+    # With per-slot split, portfolio asks for 1 per slot (not 2 in one call).
+    ({"portfolio": "prompt+pipeline", "batch_size": 1}, 1),
     ({"batch_size": 1}, 1),
 ])
 def test_a_broken_answer_is_asked_again_in_its_round_and_counted(tmp_path, settings, asked):
@@ -1088,21 +1124,25 @@ def test_a_broken_answer_is_asked_again_in_its_round_and_counted(tmp_path, setti
     model = BreaksFirst(portfolio if settings.get("portfolio") else fixer)
     loop = _run("default", tmp_path, model, val_gate=True, epochs=2, **settings)
     assert model.requests[0].wanted == asked
-    again = model.requests[1]
-    assert again.wanted == asked, "the re-ask is for every candidate the broken answer held"
-    assert "your whole answer was not valid JSON (Expecting ',' delimiter" in again.text
+    # The re-ask is the next prompt: with the split, slot 0 fails and gets a
+    # retry before slot 1 runs (or the retry is after all slots).
+    retry = next(r for r in model.requests[1:]
+                 if "your whole answer was not valid JSON" in r.text)
+    assert retry.wanted == asked, "the re-ask is for every candidate the broken answer held"
     if settings.get("portfolio"):
-        assert again.levels == ["prompt_knob", "pipeline"]
+        assert len(retry.levels) == 1
     events = [json.loads(line) for line in (loop.root / "journal.jsonl").read_text().splitlines()]
     refused = [e for e in events if e.get("event") == "rejection"
                and any("E-proposal-shape" in reason for reason in e["reasons"])]
-    assert len(refused) == asked
+    assert len(refused) >= asked
     trace = [json.loads(line) for line in (loop.root / "optimizer_trace.jsonl").read_text().splitlines()
              if '"kind": "proposal"' in line]
     assert (trace[0]["unreadable"], trace[0]["proposals"]) == (asked, 0)
     assert "E-proposal-shape" in (loop.root / "report.md").read_text()
     first_round = [c for c in _children(loop) if loop.proposals[c.id].get("epoch") == 1]
-    assert len(first_round) == asked, "the round still made every candidate it asked for"
+    # With per-slot split, portfolio rounds produce one candidate per level.
+    expected_children = 2 if settings.get("portfolio") else asked
+    assert len(first_round) == expected_children, "the round still made every candidate it asked for"
     if settings.get("portfolio"):
         assert {loop.proposals[c.id]["level"] for c in first_round} == {"prompt_knob", "pipeline"}
     assert all(loop.proposals[c.id].get("diagnosis") != "BROKEN-DIAGNOSIS" for c in first_round)

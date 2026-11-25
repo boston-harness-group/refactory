@@ -122,7 +122,9 @@ class SpreadsheetBenchTask(Task):
     #: the same way (`interpreter.interpreter`), as ``python3`` and ``python``.
     tool_environment = ToolEnvironment(summary=interpreter.SUMMARY,
                                        python=interpreter.interpreter,
-                                       hidden=_tool_hidden)
+                                       hidden=_tool_hidden,
+                                       packages=tuple((name, interpreter.PINS[name])
+                                                      for name in interpreter.NAMED))
     grader_fields = ("gold_path", "input_path", "exclude")
     item_metadata = ("task_type",)
 
