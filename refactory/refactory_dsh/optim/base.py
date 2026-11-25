@@ -2688,7 +2688,7 @@ def tool_environment_lines(node_states: Sequence[Mapping[str, Any]], *,
             if code_nodes:
                 kinds.append("a sealed code step (`\"sealed\": true`)")
             line = (f"- in the per-item part `{node.get('id')}`, "
-                    f"{' or '.join(kinds)} runs with {environment.summary}")
+                    f"{' or '.join(kinds)} runs its commands with {environment.summary}")
             if line not in lines:
                 lines.append(line)
     return lines
