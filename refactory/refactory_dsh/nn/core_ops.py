@@ -728,7 +728,7 @@ def _respec(state: Mapping[str, Any], node_id: str, new_state: dict[str, Any],
             if value != (entry.get("spec") or {}).get("default"):
                 restore.append({"op": "set_knob", "name": knob, "value": value})
     position = {"start": True} if graph.start == node_id else {"detached": True}
-    steps.append({"op": "add_node", "node": new_state, "position": position})
+    steps.append({"op": "add_node", "node": new_state, "position": position, "_respec": True})
     for edge in graph.edges:
         if node_id in (edge.source, edge.target):
             steps.append({"op": "add_edge", "source": edge.source, "target": edge.target,
@@ -1216,8 +1216,14 @@ def _pre_insert(edit: dict, state: dict) -> str | None:
     if spec.get("id") is not None and spec["id"] in graph.nodes:
         raise _Refused(f"node {spec['id']!r} already exists")
     if edit.get("takes_over") is not None:
-        target = _take_over_plan(graph, state, edit["takes_over"], side, anchor)[0]
-        if spec["kind"] == "agent" and not spec.get("tools") and len(target.writes) > 1:
+        target_id, only = _parse_takes_over(edit["takes_over"])
+        target = _take_over_plan(graph, state, target_id, side, anchor, only=only)[0]
+        if only is not None:
+            if spec["kind"] == "agent" and not spec.get("tools"):
+                raise _Refused("a selective 'takes_over' ([step, output, ...]) adds files the new "
+                               "step must write besides its own reply; an agent step without tools "
+                               f"writes only its reply: use a code step{TOOLS_HINTS[0]}")
+        elif spec["kind"] == "agent" and not spec.get("tools") and len(target.writes) > 1:
             raise _Refused(f"{target.id!r} writes {len(target.writes)} files, and a new agent "
                            "step without tools writes only its reply; take it over with a "
                            f"code step{TOOLS_HINTS[0]}")
@@ -1365,8 +1371,20 @@ def _names_itself(node: Node, code: str | None, name: str) -> bool:
     return not _by_declaration(node)
 
 
+def _parse_takes_over(takes: Any) -> tuple[str, frozenset[str] | None]:
+    """The step and the specific outputs a ``takes_over`` names, or ``None`` for all.
+
+    A string takes all outputs; a list ``[step, output, ...]`` takes only those outputs."""
+    if isinstance(takes, str):
+        return takes, None
+    if isinstance(takes, list) and len(takes) >= 2 and all(isinstance(x, str) for x in takes):
+        return takes[0], frozenset(takes[1:])
+    raise _Refused("'takes_over' names a step (all its outputs), or [step, output, ...] "
+                   "for specific outputs")
+
+
 def _take_over_plan(graph: Graph, state: Mapping[str, Any], target_id: Any, side: str,
-                    anchor: Node
+                    anchor: Node, *, only: frozenset[str] | None = None
                     ) -> tuple[Node, dict[tuple[str, str], str], set[str], dict[str, str],
                                dict[str, dict[str, str | None]] | None]:
     """What ``insert``'s 'takes_over' does: the step it takes over, the new name of each of
@@ -1381,12 +1399,22 @@ def _take_over_plan(graph: Graph, state: Mapping[str, Any], target_id: Any, side
     them itself, or a reader's reading cannot be renamed: a frozen knob, a knob a step
     after the new one reads too (it must keep the old name), a fact named in a step's
     code or feedback keys, or a file an op or gate opens by name. No renaming reaches
-    those."""
+    those.
+
+    ``only``: when not None, only those outputs are taken over and the rest pass through
+    unchanged (the target keeps them under their original names)."""
     if not isinstance(target_id, str) or target_id not in graph.nodes:
         raise _Refused(f"'takes_over' names an existing step, not {target_id!r}")
     target = graph.nodes[target_id]
     if target.kind not in ("agent", "op") or not (target.writes or target.produces):
         raise _Refused(f"{target_id!r} is a {target.kind} with no outputs to take over")
+    if only is not None:
+        available = {*target.writes, *target.produces}
+        missing = only - available
+        if missing:
+            raise _Refused(f"'takes_over' names outputs of {target_id!r}: "
+                           f"{', '.join(sorted(missing))} not among its outputs "
+                           f"({', '.join(sorted(available))})")
     if target.kind == "op" and _code_text(target, state) is None and not _by_declaration(target):
         raise _Refused(f"{target_id!r} runs {target.call!r}, which sets its outputs under names "
                        "of its own; 'takes_over' cannot rename them: take over a model or code "
@@ -1416,6 +1444,8 @@ def _take_over_plan(graph: Graph, state: Mapping[str, Any], target_id: Any, side
     for kind, outputs, own in (("file", target.writes, f"{target_id}.txt"),
                                ("fact", target.produces, target_id)):
         for index, name in enumerate(outputs):
+            if only is not None and name not in only:
+                continue
             new = own if index == 0 and (kind, own) not in made else f"{target_id}_own_{name}"
             names[(kind, name)] = new
             made.add((kind, new))
@@ -1471,7 +1501,7 @@ def _take_over_plan(graph: Graph, state: Mapping[str, Any], target_id: Any, side
             raise _Refused(f"{node_id!r} reads {target_id!r}'s output {', '.join(map(repr, named))} "
                            "in its code or feedback keys, which 'takes_over' cannot rename; take "
                            "over a step no such step reads, or change that step first")
-    unscored = _unscored_take_over(graph, state, target, after)
+    unscored = _unscored_take_over(graph, state, target, after, only=only)
     if unscored:
         raise _Refused(f"nothing after the new step reads {target_id!r}'s outputs ({unscored}), "
                        "so taking it over changes nothing; take over a step whose output a "
@@ -1480,8 +1510,8 @@ def _take_over_plan(graph: Graph, state: Mapping[str, Any], target_id: Any, side
     if _code_text(target, state) is not None:
         # Code returns its outputs under the names it was written for: the run records
         # them under the new ones (`graph.Node.renames`), its code as written.
-        renames = _output_renames(target, [names[("fact", n)] for n in target.produces],
-                                  [names[("file", n)] for n in target.writes])
+        renames = _output_renames(target, [names.get(("fact", n), n) for n in target.produces],
+                                  [names.get(("file", n), n) for n in target.writes])
     return target, names, readers, texts, renames, group
 
 
@@ -1507,13 +1537,16 @@ def _writer_group(graph: Graph, state: Mapping[str, Any], target: Node,
 
 
 def _unscored_take_over(graph: Graph, state: Mapping[str, Any], target: Node,
-                        after: set[str]) -> str:
+                        after: set[str], *, only: frozenset[str] | None = None) -> str:
     """Why outputs of ``target`` that a new step writes again reach nothing, or ``""``: a
     step in ``after`` (those after the new step) reads one, the Task scores one
-    (`task.graded_files`), or the Task declares no scored files (it may score any name)."""
+    (`task.graded_files`), or the Task declares no scored files (it may score any name).
+
+    ``only``: when not None, only those outputs are checked."""
     from refactory_dsh.task import graded_files
 
-    taken = _outputs(target)
+    all_taken = _outputs(target)
+    taken = ({(k, n) for k, n in all_taken if n in only} if only is not None else all_taken)
     read_by = {n for n, node in graph.nodes.items()
                if n != target.id and _consumed(node, state) & taken}
     if read_by & after:
@@ -1521,7 +1554,8 @@ def _unscored_take_over(graph: Graph, state: Mapping[str, Any], target: Node,
     graded = graded_files(state)
     if graded is None:
         return ""  # a Task that declares no scored files may score any name: taken
-    if set(target.writes) & set(graded):
+    writes = ([w for w in target.writes if w in only] if only is not None else target.writes)
+    if set(writes) & set(graded):
         return ""
     return (f"its readers {', '.join(sorted(read_by))} run before it" if read_by else
             f"the Task scores only {', '.join(graded)}")
@@ -1593,20 +1627,34 @@ def _expand_insert(edit: dict, state: dict) -> list[dict]:
     if spec["kind"] == "op" and spec["call"] == SELECT_CALL and not spec.get("reads"):
         spec["reads"] = _select_reads(graph, anchor) if side == "after" else []
     takes = edit.get("takes_over")
-    plan = _take_over_plan(graph, state, takes, side, anchor) if takes is not None else None
+    if takes is not None:
+        target_id_parsed, only = _parse_takes_over(takes)
+        plan = _take_over_plan(graph, state, target_id_parsed, side, anchor, only=only)
+    else:
+        only = None
+        plan = None
+    if plan is not None and only is None:
+        step_kw = {"writes": list(plan[0].writes), "produces": list(plan[0].produces)}
+    else:
+        step_kw: dict[str, Any] = {}
     nodes = _step_nodes(graph, state, spec, node_id,
                         _seen(graph, state, there, view, spec.get("sees")),
                         settings_from=anchor if anchor.kind == "agent" else None,
-                        **({"writes": list(plan[0].writes), "produces": list(plan[0].produces)}
-                           if plan is not None else {}))
+                        **step_kw)
+    if plan is not None and only is not None:
+        taken_writes = [old for (kind, old) in plan[1] if kind == "file"]
+        taken_produces = [old for (kind, old) in plan[1] if kind == "fact"]
+        step = nodes[-1]
+        step["writes"] = list(step.get("writes", [])) + taken_writes
+        step["produces"] = list(step.get("produces", [])) + taken_produces
     if plan is not None:
         target, names, readers, texts, renames, group = plan
-        # The step taken over writes under new names, and every step before the new one
-        # (the new one too) reads them there; the steps after it read the new step's.
+        # The step taken over writes under new names (selective: only the taken ones;
+        # the rest keep their original names).
         build.add(_respec(build.state, target.id, {
             **target.to_state(),
-            "writes": [names[("file", n)] for n in target.writes],
-            "produces": [names[("fact", n)] for n in target.produces],
+            "writes": [names.get(("file", n), n) for n in target.writes],
+            "produces": [names.get(("fact", n), n) for n in target.produces],
             **({"renames": renames} if renames else {})}))
         files = {old: new for (kind, old), new in names.items() if kind == "file"}
         for reader in sorted(readers):
@@ -3642,7 +3690,10 @@ OPERATORS: dict[str, dict[str, Any]] = {
                 + SEALED_CODE
                 + "; 'takes_over' an earlier step: the new step writes that step's outputs, "
                 "so what read them reads the new step's (a choice among attempts reaching "
-                "what is scored), and that step's own go under new names",
+                "what is scored), and that step's own go under new names; "
+                "'takes_over' as [step, output, ...] takes only those outputs "
+                "(the new step writes them and its own; the rest pass through unchanged, "
+                "so downstream steps keep reading them from the original step)",
         "example": {"op": "insert", "after": "<step>", "kind": "agent",
                     "text": "<what the new step does>"},
     },
