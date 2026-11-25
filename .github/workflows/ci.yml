@@ -68,6 +68,8 @@ jobs:
           uv run python -m pytest -q -rfEs -x --timeout=300
           refactory/tests/test_boundary.py refactory/tests/test_registry.py
           "refactory/tests/test_cli.py::test_the_command_reference_matches_the_command_line"
+      - name: V1 release tag versions
+        run: uv run --project v1 python -m pytest -q v1/tests/test_build_version.py
       # The shards' environment (code-node sandbox allowed), so the collection checked
       # here is the one the shards run.
       - name: Allow the code-node sandbox
