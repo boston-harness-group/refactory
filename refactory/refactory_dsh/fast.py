@@ -147,7 +147,7 @@ def _qa_nodes(graph: Graph, *, artifact: bool, design: bool = False) -> None:
            if design else ())
     )
     gate_qa_produces = ("repair_feedback", "repairs_used", "check_repairs_used",
-                        "review_repairs_used", "qa_passed")
+                        "review_repairs_used", "qa_passed", "finish_rounds")
     gate_qa_writes = (
         ("fast-report.json", "repair.txt",
          "site-revert-results.json", "correction-audit.json",
@@ -158,7 +158,8 @@ def _qa_nodes(graph: Graph, *, artifact: bool, design: bool = False) -> None:
     graph.add(Node(
         "gate_qa", "gate", evaluator=f"{OPS}:gate_qa",
         resource_role="final_validation",
-        knobs=("repair_attempts", "check_attempt_cap"), reads=gate_qa_reads,
+        knobs=("repair_attempts", "check_attempt_cap") + (("fix_rounds",) if design else ()),
+        reads=gate_qa_reads,
         writes=gate_qa_writes,
         produces=gate_qa_produces + ("check_failures_history", "check_blocker_history",
                                      "convergence_extras_used", "convergence_granted"),
@@ -194,8 +195,8 @@ def _qa_nodes(graph: Graph, *, artifact: bool, design: bool = False) -> None:
             reads=("focused-check.json", "check.txt", "check-record.json"),
             writes=("fast-report.json", "repair.txt"),
             produces=("repair_feedback", "repairs_used", "check_repairs_used",
-                      "convergence_extras_used", "convergence_granted"),
-            knobs=("repair_attempts", "check_attempt_cap"),
+                      "convergence_extras_used", "convergence_granted", "finish_rounds"),
+            knobs=("repair_attempts", "check_attempt_cap", "fix_rounds"),
             max_iterations=12,
             notes="route check failures and guardedness blocks; verifier handled in gate_qa",
         ))

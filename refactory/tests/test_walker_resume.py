@@ -222,7 +222,8 @@ def test_the_walkers_run_config_is_the_spines_record(tmp_path, monkeypatch):
                            "knobs", "model_context", "resource_limits", "configuration_fingerprints", "driver"}
     assert config["runtime"] == "walker"
     assert config["resume_command"] == f"python -m refactory_dsh.design --resume {run}"
-    assert config["knobs"] == ["brief=a tool", "name=probe_tool", "check=python tool.py", "worktree=0"]
+    assert config["knobs"] == ["brief=a tool", "name=probe_tool", "check=python tool.py",
+                               "fix_rounds=1", "worktree=0"]
     assert config["configuration_fingerprints"] and config["driver"]["checkout"]
 
 

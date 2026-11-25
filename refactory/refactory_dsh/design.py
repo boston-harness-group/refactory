@@ -538,6 +538,13 @@ class DesignMode(Mode):
                 description="hard cap on total check attempts including convergence grants; "
                             "0 or a value at or below check_attempts disables the extension",
             ),
+            "fix_rounds": Knob(
+                10, "int", lo=0, hi=10,
+                description="how many fix rounds the builder gets after the first build; "
+                            "every gate's send-back counts against this shared budget, and "
+                            "the run delivers a draft when it is spent; "
+                            "production default is 1 (set by the CLI)",
+            ),
             "design_review_attempts": Knob(
                 1, "int", lo=0, hi=3,
                 description="how many times a design whose ## Changes section is missing "
@@ -1152,7 +1159,7 @@ class DesignMode(Mode):
             writes=(*check_writes, *repo_change.CHECK_WRITES, CHECK_PREP, SELF_CHECK_RECORD),
             produces=self_check_produces,
             knobs=(*check_knobs, "self_check_fixups",
-                   "self_check_timeout_s"),
+                   "self_check_timeout_s", "fix_rounds"),
             # From the knobs, so the build loop's stop always comes first: 45 with the
             # defaults (`prepare_check_iterations`; `DesignMode.graph` follows the knobs).
             max_iterations=prepare_check_iterations(defaults),
@@ -1191,7 +1198,7 @@ class DesignMode(Mode):
             produces=(*check_produces, *repo_change.CHECK_PRODUCES, "draft_delivery",
                       "combined_sendback_count", "early_asks_sendback_count",
                       "qa_coverage_rerun_done", "finish_rounds"),
-            knobs=check_knobs, max_iterations=8,
+            knobs=(*check_knobs, "fix_rounds"), max_iterations=8,
             notes="compose one send-back from check failures and review findings without "
                   "spending an attempt; the combined send-back names every failing test "
                   "and every review finding of the round; a failing check skips the QA "
@@ -1412,7 +1419,7 @@ class DesignMode(Mode):
             produces=("qa_gate", "qa_judge_rereads", "qa_judge_reread", "qa_draft",
                       "qa_unresolved", "qa_coverage_rerun_done",
                       "qa_coverage_rerun_ids", "finish_rounds"),
-            knobs=("judge_rereads",),
+            knobs=("judge_rereads", "fix_rounds"),
             max_iterations=6,
             notes="route on the QA judge's verdict: a redo for what holds the change back goes "
                   "to the builder, or, at the review limit, on as a draft; an unreadable "
@@ -1449,7 +1456,7 @@ class DesignMode(Mode):
             writes=("reviews/overwatch-gate.txt", "reviews/follow-ups.json", "reviews/follow-ups.md"),
             produces=("overwatch_review", "overwatch_rereads", "overwatch_reread", "draft_delivery",
                       "overwatch_unresolved", "finish_rounds"),
-            knobs=("judge_rereads",),
+            knobs=("judge_rereads", "fix_rounds"),
             max_iterations=4,
             notes="route on the overwatch's verdict: an unmet correction or a redo for what "
                   "holds the change back goes to the builder, or, at the review limit, to the "
@@ -1512,7 +1519,7 @@ class DesignMode(Mode):
             "delivery_gate", "gate",
             evaluator="refactory_dsh.delivery:evaluate_delivery_conflicts",
             max_iterations=8,
-            knobs=("check_attempts",),
+            knobs=("check_attempts", "fix_rounds"),
             produces=("validation", "delivery_conflict_reloops", "finish_rounds"),
             notes="on authored-file conflict reloop to the builder; otherwise proceed to done",
         ))

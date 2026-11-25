@@ -41,18 +41,22 @@ from refactory_dsh.open_items import OpenItem
 #: The fix rounds a finish run gets.
 ROUNDS = 1
 
+#: The default fix-round budget for every design run (the ``fix_rounds`` knob).
+FIX_ROUNDS_DEFAULT = 1
+
 #: The round knobs a finish run sets (`run_flags`), and the most `prepare` accepts:
 #: ``check_attempts=2`` lets gate_check send back once (`design_ops._combined_sendback_bound`),
 #: ``check_attempt_cap=0`` turns off the convergence extension past it, and
 #: ``self_check_fixups=0`` makes a failing self-check a send-back that counts as the round
 #: (`design_ops.prepare_check`), not a fix-up that spends nothing.
-ROUND_KNOBS = {"check_attempts": 2, "check_attempt_cap": 0, "self_check_fixups": 0}
+ROUND_KNOBS = {"check_attempts": 2, "check_attempt_cap": 0, "self_check_fixups": 0, "fix_rounds": 1}
 
-#: The fact counting a finish run's send-backs to the builder, every gate together.
+#: The fact counting send-backs to the builder, every gate together.
 ROUNDS_FACT = "finish_rounds"
 
 #: The reason a gate goes to a draft instead of sending the change back.
 ROUND_SPENT = "finish run: its one fix round is spent"
+FIX_ROUND_SPENT = "fix round budget spent"
 
 _TEST_ID = re.compile(r"[\w./-]+\.py::[\w\[\]./:-]+|[\w./-]+\.(?:test|spec)\.[jt]sx?")
 
@@ -68,22 +72,48 @@ def fact(ctx: Any) -> dict[str, Any] | None:
 
 
 def rounds_spent(facts: dict[str, Any]) -> int:
-    """Send-backs to the builder a finish run has made."""
+    """Send-backs to the builder any design run has made."""
     try:
         return int(facts.get(ROUNDS_FACT) or 0)
     except (TypeError, ValueError):
         return 0
 
 
+_NO_LIMIT = type("_NoLimit", (), {"__repr__": lambda s: "_NO_LIMIT"})()
+
+
+def _has_fix_round_budget(ctx: Any) -> bool:
+    """Whether this run tracks fix rounds: finish runs always, others when ``fix_rounds`` is set."""
+    return fact(ctx) is not None or ctx.knob("fix_rounds", _NO_LIMIT) is not _NO_LIMIT
+
+
+def fix_rounds_budget(ctx: Any) -> int:
+    """The fix-round budget: `ROUNDS` on a finish run, the ``fix_rounds`` knob otherwise."""
+    if fact(ctx) is not None:
+        return ROUNDS
+    val = ctx.knob("fix_rounds", _NO_LIMIT)
+    if val is _NO_LIMIT:
+        return 2**31
+    return int(val)
+
+
 def allows_round(ctx: Any) -> bool:
-    """Whether a gate may send the change back to the builder: always, except on a finish
-    run that has spent its round. A gate that may not goes on as a draft instead."""
-    return fact(ctx) is None or rounds_spent(ctx.facts) < ROUNDS
+    """Whether a gate may send the change back to the builder: once the run's
+    fix-round budget is spent, the next send-back is a draft instead.
+
+    Finish runs get `ROUNDS` (1). Design runs with the ``fix_rounds`` knob get
+    that value (default `FIX_ROUNDS_DEFAULT`, 1). Runs without the knob are unlimited."""
+    return rounds_spent(ctx.facts) < fix_rounds_budget(ctx)
+
+
+def round_spent_reason(ctx: Any) -> str:
+    """The reason a gate gives when the fix-round budget is spent."""
+    return ROUND_SPENT if fact(ctx) is not None else FIX_ROUND_SPENT
 
 
 def sent_back(ctx: Any, verdict: Any) -> Any:
-    """``verdict``, counted as a finish run's round when it sends the change back."""
-    if fact(ctx) is not None and str(verdict) == "reloop":
+    """``verdict``, counted as the run's fix round when it sends the change back."""
+    if str(verdict) == "reloop" and _has_fix_round_budget(ctx):
         ctx.set_fact(ROUNDS_FACT, rounds_spent(ctx.facts) + 1)
     return verdict
 

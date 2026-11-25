@@ -30,12 +30,14 @@ from _delivery_support import (  # noqa: F401  (_stage, _opened_golden and opene
     _child,
     _child_patches,
     _describe,
+    _limited,
     _mode,
     _opened_golden,
     _pulls,
     _record,
     _remote_head,
     _stage,
+    github,
     opened_pull,
 )
 from tests_support import DESIGN_DOC_ANSWER, FakeModel, git, qa_judgment, render
@@ -197,6 +199,113 @@ def test_select_defaults_to_open_items_that_are_not_judgment_calls():
         open_items.select(items, "ask-1")
 
 
+# ── open items on every delivery ─────────────────────────────────────────────
+def test_collect_open_items_from_draft_delivery(tmp_path):
+    """A draft delivery with check failures and unresolved findings produces
+    change_failure, qa_finding and unfinished_ask items."""
+    ctx = RunContext(tmp_path, knobs={}, facts={})
+    ctx.write_json("check-record.json", {"status": "fail"})
+    draft = {
+        "reason": "check attempts exhausted",
+        "check_failing": True,
+        "check_failure": "tests/test_tool.py::test_prints_two failed",
+        "unresolved": [
+            {"text": "tool.py:42 still prints one", "source": "QA judge", "rounds": [1]},
+            {"text": "the --two flag not built", "source": "QA gate", "rounds": [1]},
+        ],
+    }
+    items = delivery._collect_open_items(ctx, draft)
+    kinds = [item.kind for item in items]
+    assert "change_failure" in kinds
+    assert "qa_finding" in kinds
+    assert "unfinished_ask" in kinds
+    cf = [i for i in items if i.kind == "change_failure"]
+    assert any("test_prints_two" in i.summary for i in cf)
+    assert cf[0].evidence
+
+
+def test_collect_open_items_environment_from_check_timeout(tmp_path):
+    """A check that timed out produces an environment item."""
+    ctx = RunContext(tmp_path, knobs={}, facts={})
+    ctx.write_json("check-record.json",
+                   {"status": "check_timeout", "validation": "Check did not finish"})
+    items = delivery._collect_open_items(ctx, None)
+    env = [i for i in items if i.kind == "environment"]
+    assert len(env) == 1
+    assert "did not finish" in env[0].summary.lower()
+    assert env[0].evidence
+
+
+def test_collect_open_items_inherited_failures_become_judgment_calls(tmp_path):
+    """Inherited (excused) failures become judgment_call items."""
+    ctx = RunContext(tmp_path, knobs={}, facts={"inherited_failures": ["tests/test_old.py::test_old"]})
+    ctx.write_json("check-record.json", {"status": "pass"})
+    items = delivery._collect_open_items(ctx, None)
+    jc = [i for i in items if i.kind == "judgment_call"]
+    assert len(jc) == 1
+    assert "tests/test_old.py::test_old" in jc[0].evidence
+
+
+def test_collect_open_items_on_ready_pr_no_follow_ups(tmp_path):
+    """A ready PR with follow-ups but no other sources produces no open items:
+    follow-ups are already in the Follow-ups section, not duplicated as open items."""
+    from refactory_dsh.create_ops import FOLLOW_UPS
+    ctx = RunContext(tmp_path, knobs={}, facts={})
+    ctx.write_json("check-record.json", {"status": "pass"})
+    ctx.write_json(FOLLOW_UPS, {"qa": ["tool.py:10 prints one (qa)"]})
+    items = delivery._collect_open_items(ctx, None)
+    assert items == []
+
+
+def test_open_items_round_trip_through_delivery_and_finish(tmp_path):
+    """Items delivery writes are read back by open_items.parse and finish.select."""
+    ctx = RunContext(tmp_path, knobs={}, facts={})
+    ctx.write_json("check-record.json", {"status": "fail"})
+    draft = {
+        "reason": "check attempts exhausted",
+        "check_failing": True,
+        "check_failure": "tests/test_tool.py::test_prints_two failed",
+        "unresolved": [
+            {"text": "tool.py:42 still prints one", "source": "QA judge", "rounds": [1]},
+        ],
+    }
+    items = delivery._collect_open_items(ctx, draft)
+    body = (f"{delivery.BODY_START}\n## Summary\n\nFix it.\n{delivery.BODY_END}\n\n"
+            + open_items.render(items))
+    parsed = open_items.parse(body)
+    assert len(parsed) == len(items)
+    for original, parsed_item in zip(items, parsed):
+        assert original.id == parsed_item.id
+        assert original.kind == parsed_item.kind
+    selected = open_items.select(parsed)
+    assert all(i.status == "open" for i in selected)
+    assert all(i.effective_kind != "judgment_call" for i in selected)
+
+
+# ── mutation tests: each guard is load-bearing ───────────────────────────────
+def test_sent_back_must_count_for_non_finish_runs(tmp_path):
+    """Mutation: if sent_back didn't increment for non-finish runs, allows_round
+    would never return False and the fix-round budget would be ignored."""
+    ctx = RunContext(tmp_path, knobs={"fix_rounds": 1}, facts={})
+    assert finish.allows_round(ctx) is True
+    finish.sent_back(ctx, "reloop")
+    assert ctx.facts["finish_rounds"] == 1
+    assert finish.allows_round(ctx) is False
+
+
+def test_allows_round_must_check_budget_not_just_fact(tmp_path):
+    """Mutation: if allows_round only checked fact(ctx) is None → True, non-finish
+    runs would never be limited."""
+    ctx = RunContext(tmp_path, knobs={"fix_rounds": 0}, facts={})
+    assert finish.allows_round(ctx) is False
+
+
+def test_collect_open_items_empty_on_clean_ready(tmp_path):
+    """A ready delivery with no follow-ups and no inherited failures produces no items."""
+    ctx = RunContext(tmp_path, knobs={}, facts={})
+    assert delivery._collect_open_items(ctx, None) == []
+
+
 # ── the gate ──────────────────────────────────────────────────────────────────
 def _fact(*items: OpenItem) -> dict:
     return {"pull_request": "https://github.com/acme/app/pull/1", "selected": [i.to_dict() for i in items],
@@ -257,12 +366,37 @@ def test_a_design_that_changed_after_the_answer_is_not_answered(tmp_path):
 @pytest.mark.parametrize("spent, allowed", [({}, True), ({"finish_rounds": 1}, False)])
 def test_a_finish_allows_one_round_across_every_gate(tmp_path, spent, allowed):
     on = RunContext(tmp_path, knobs={}, facts={"finish": _fact(QA), **spent})
-    off = RunContext(tmp_path, knobs={}, facts={**spent})
+    off = RunContext(tmp_path, knobs={"fix_rounds": 1}, facts={**spent})
     assert finish.allows_round(on) is allowed
-    assert finish.allows_round(off) is True
+    assert finish.allows_round(off) is allowed
     assert str(finish.sent_back(on, "reloop")) == "reloop" and on.facts["finish_rounds"] == len(spent) + 1
-    assert finish.sent_back(off, "reloop") == "reloop" and off.facts.get("finish_rounds") == spent.get(
-        "finish_rounds")
+    assert str(finish.sent_back(off, "reloop")) == "reloop" and off.facts["finish_rounds"] == len(spent) + 1
+
+
+@pytest.mark.parametrize("knob_val, budget", [(0, 0), (1, 1), (2, 2)])
+def test_fix_rounds_knob_controls_budget_for_non_finish_runs(tmp_path, knob_val, budget):
+    fresh = RunContext(tmp_path / "a", knobs={"fix_rounds": knob_val}, facts={})
+    assert finish.allows_round(fresh) is (budget > 0)
+    assert finish.fix_rounds_budget(fresh) == budget
+    if budget > 0:
+        finish.sent_back(fresh, "reloop")
+        assert fresh.facts["finish_rounds"] == 1
+        assert finish.allows_round(fresh) is (budget > 1)
+
+
+def test_fix_rounds_knob_does_not_affect_finish_runs(tmp_path):
+    ctx = RunContext(tmp_path, knobs={"fix_rounds": 5}, facts={"finish": _fact(QA)})
+    assert finish.fix_rounds_budget(ctx) == finish.ROUNDS
+    assert finish.allows_round(ctx) is True
+    finish.sent_back(ctx, "reloop")
+    assert finish.allows_round(ctx) is False
+
+
+def test_round_spent_reason_differs_by_run_type(tmp_path):
+    on = RunContext(tmp_path / "a", knobs={}, facts={"finish": _fact(QA)})
+    off = RunContext(tmp_path / "b", knobs={}, facts={})
+    assert finish.round_spent_reason(on) == finish.ROUND_SPENT
+    assert finish.round_spent_reason(off) == finish.FIX_ROUND_SPENT
 
 
 def test_gate_check_sends_back_once_on_a_finish(tmp_path):
@@ -276,8 +410,16 @@ def test_gate_check_sends_back_once_on_a_finish(tmp_path):
                        facts={"finish": _fact(QA), "finish_rounds": 1})
     with pytest.raises(BuildLoopStop, match=finish.ROUND_SPENT):
         design_ops._gate_check_combined_sendback(after, "the check failed")
-    plain = RunContext(tmp_path / "c", knobs={"check_attempts": 2}, facts={"review_attempts_used": 1})
+    plain = RunContext(tmp_path / "c", knobs={"check_attempts": 2, "fix_rounds": 1}, facts={"review_attempts_used": 1})
     assert str(design_ops._gate_check_combined_sendback(plain, "the check failed")) == "reloop"
+    assert plain.facts["finish_rounds"] == 1
+
+
+def test_gate_check_blocks_second_round_on_a_plain_design_run(tmp_path):
+    """A non-finish design run also gets one fix round by default."""
+    spent = RunContext(tmp_path, knobs={"check_attempts": 2, "fix_rounds": 1}, facts={"finish_rounds": 1})
+    with pytest.raises(BuildLoopStop, match=finish.FIX_ROUND_SPENT):
+        design_ops._gate_check_combined_sendback(spent, "the check failed")
 
 
 def test_the_early_asks_send_back_once_on_a_finish(tmp_path):
@@ -294,7 +436,16 @@ def test_the_early_asks_send_back_once_on_a_finish(tmp_path):
     assert str(design_ops._gate_check_early_asks(first)) == "reloop" and first.facts["finish_rounds"] == 1
     with pytest.raises(BuildLoopStop, match=finish.ROUND_SPENT):
         design_ops._gate_check_early_asks(ctx("b", {"finish": _fact(QA), "finish_rounds": 1}))
-    assert str(design_ops._gate_check_early_asks(ctx("c", {"finish_rounds": 1}))) == "reloop"
+
+
+def test_early_asks_block_second_round_on_a_plain_design_run(tmp_path):
+    """A non-finish design run with its fix round spent cannot send back via early asks."""
+    not_built = json.dumps({"items": [{"id": "ask-1", "kind": "ask", "text": "the brief", "built": False,
+                                       "missing": "the --two flag"}]})
+    made = RunContext(tmp_path, knobs={"check_attempts": 2, "fix_rounds": 1}, facts={"finish_rounds": 1})
+    made.write_text(design_ops.EARLY_ASKS_VERDICT, not_built)
+    with pytest.raises(BuildLoopStop, match=finish.FIX_ROUND_SPENT):
+        design_ops._gate_check_early_asks(made)
 
 
 def test_the_review_gates_send_back_once_on_a_finish(tmp_path):
@@ -305,19 +456,29 @@ def test_the_review_gates_send_back_once_on_a_finish(tmp_path):
                        facts={"finish": _fact(QA), "finish_rounds": 1})
     with pytest.raises(BuildLoopStop, match=finish.ROUND_SPENT):
         design_ops._send_back(after, "reviews/qa-gate.txt", "qa_gate", "reloop: fix it")
-    plain = RunContext(tmp_path / "c", knobs={"check_attempts": 2}, facts={"combined_sendback_count": 1})
+    plain = RunContext(tmp_path / "c", knobs={"check_attempts": 2, "fix_rounds": 1}, facts={"combined_sendback_count": 1})
     assert str(design_ops._send_back(plain, "reviews/qa-gate.txt", "qa_gate", "reloop: fix it")) == "reloop"
+    assert plain.facts["finish_rounds"] == 1
+
+
+def test_review_gates_block_second_round_on_a_plain_design_run(tmp_path):
+    """A non-finish design run with its fix round spent cannot send back via review gates."""
+    spent = RunContext(tmp_path, knobs={"check_attempts": 2, "fix_rounds": 1}, facts={"finish_rounds": 1})
+    with pytest.raises(BuildLoopStop, match=finish.FIX_ROUND_SPENT):
+        design_ops._send_back(spent, "reviews/qa-gate.txt", "qa_gate", "reloop: fix it")
 
 
 def test_a_conflict_goes_back_to_the_builder_only_while_the_round_is_unspent(tmp_path):
     fresh = RunContext(tmp_path, knobs={"check_attempts": 2}, facts={"finish": _fact(QA)})
     spent = RunContext(tmp_path, knobs={"check_attempts": 2}, facts={"finish": _fact(QA), "finish_rounds": 1})
-    plain = RunContext(tmp_path, knobs={"check_attempts": 2}, facts={"finish_rounds": 1})
-    assert [delivery._conflict_reloops_allowed(ctx) for ctx in (fresh, spent, plain)] == [1, 0, 2]
+    plain_spent = RunContext(tmp_path, knobs={"check_attempts": 2, "fix_rounds": 1}, facts={"finish_rounds": 1})
+    plain_fresh = RunContext(tmp_path, knobs={"check_attempts": 2, "fix_rounds": 1}, facts={})
+    assert [delivery._conflict_reloops_allowed(ctx) for ctx in (fresh, spent, plain_spent, plain_fresh)] == [1, 0, 0, 1]
     refused = delivery.NotDelivered("conflict", merge=delivery.MergeResult(conflicts=["tool.py"]))
     assert delivery._conflict_budget_spent(fresh, refused, None) is None
     assert delivery._conflict_budget_spent(spent, refused, None) is not None
-    assert delivery._conflict_budget_spent(plain, refused, None) is None
+    assert delivery._conflict_budget_spent(plain_spent, refused, None) is not None
+    assert delivery._conflict_budget_spent(plain_fresh, refused, None) is None
 
 
 # ── prepare ───────────────────────────────────────────────────────────────────
@@ -432,7 +593,8 @@ def test_a_draft_resolves_no_item_the_builder_got(tmp_path):
 # ── whole runs, on the walker ─────────────────────────────────────────────────
 def _with_items(opened, *items: OpenItem) -> str:
     """Give the opened pull request an Open items block after delivery's own text."""
-    body = _pulls(opened.github, "acme/app")[0]["body"] + "\n" + open_items.render(list(items))
+    body = open_items.without(_pulls(opened.github, "acme/app")[0]["body"]).rstrip()
+    body = body + "\n" + open_items.render(list(items))
     _describe(opened.github, "acme/app", body)
     return body
 
@@ -653,7 +815,7 @@ def test_a_finish_is_the_finish_knobs_with_its_round_bounds():
     knobs = run_flags.knobs(_args("--refine", "acme/app#1", "--finish", "--items", "qa-1,qa-2"),
                             "default_pack/design")
     assert {"refine=acme/app#1", "finish=1", "finish_items=qa-1,qa-2", "check_attempts=2",
-            "check_attempt_cap=0", "self_check_fixups=0"} <= set(knobs)
+            "check_attempt_cap=0", "self_check_fixups=0", "fix_rounds=1"} <= set(knobs)
 
 
 def test_the_console_design_verb_forwards_a_finish(monkeypatch):
@@ -674,3 +836,122 @@ def test_the_console_create_verb_still_forwards_its_attempts(monkeypatch):
     monkeypatch.setattr(console, "_forward", lambda module, argv: seen.append(argv) or {})
     console.main(["create", "--name", "t", "--brief", "b", "--attempts", "2"])
     assert seen and seen[-1][seen[-1].index("--attempts") + 1] == "2"
+
+
+# ── a non-finish design run with fix_rounds=1 delivers a draft with Open items ─
+
+
+def test_a_design_run_stops_after_one_fix_round_and_delivers_a_draft_with_open_items(github, tmp_path):
+    """A plain design run (not a finish) with fix_rounds=1: the builder emits code that
+    breaks the check twice, and the run delivers a draft after one fix round. The PR body
+    has an Open items block that round-trips through open_items.parse."""
+    failing = render({"tool.py": "raise SystemExit(3)\n"})
+    run = tmp_path / "design_run"
+    result, model = _limited(run, _attempt(failing), _attempt(failing),
+                             check_attempts=2, fix_rounds=1)
+    assert result.exit_ok, (result.error, result.gate_stop)
+    assert result.facts.get("draft_delivery"), "the run should deliver a draft"
+    assert result.facts["finish_rounds"] >= 1
+    body_path = run / delivery.BODY
+    assert body_path.exists(), "pull-request.md should be written"
+    body = body_path.read_text()
+    items = open_items.parse(body)
+    assert items, "the draft PR body should have Open items"
+    assert any(i.kind == "change_failure" for i in items), "should have a change_failure item"
+    selected = open_items.select(items)
+    assert all(i.status == "open" for i in selected)
+
+
+# ── mutation checks: removing a guard or source makes a test fail ─────────────
+#
+# Each test below documents the guard it is about and shows that removing it would
+# break the assertion. They are not themselves mutation-tested; they are the proof
+# that the guard is load-bearing.
+
+
+def test_mutation_allows_round_budget_guard(tmp_path):
+    """Removing the fix_rounds_budget check in allows_round would let unlimited rounds."""
+    ctx = RunContext(tmp_path, knobs={"fix_rounds": 1}, facts={"finish_rounds": 1})
+    assert finish.allows_round(ctx) is False
+    ctx2 = RunContext(tmp_path / "b", knobs={"fix_rounds": 0}, facts={})
+    assert finish.allows_round(ctx2) is False
+
+
+def test_mutation_sent_back_counts_round(tmp_path):
+    """Removing the increment in sent_back would leave finish_rounds at 0 forever."""
+    ctx = RunContext(tmp_path, knobs={"fix_rounds": 2}, facts={})
+    finish.sent_back(ctx, "reloop")
+    assert ctx.facts["finish_rounds"] == 1
+    finish.sent_back(ctx, "reloop")
+    assert ctx.facts["finish_rounds"] == 2
+
+
+def test_mutation_sent_back_ignores_non_reloop(tmp_path):
+    """Removing the str(verdict)=='reloop' guard would count non-reloops as rounds."""
+    ctx = RunContext(tmp_path, knobs={"fix_rounds": 1}, facts={})
+    finish.sent_back(ctx, "proceed")
+    assert ctx.facts.get("finish_rounds") is None
+
+
+def test_mutation_collect_open_items_check_failure_source(tmp_path):
+    """Removing the check_failing branch would drop change_failure items on drafts."""
+    draft = {"check_failing": True,
+             "check_failure": "tests/test_tool.py::test_bar failed",
+             "unresolved": []}
+    ctx = RunContext(tmp_path, knobs={}, facts={})
+    items = delivery._collect_open_items(ctx, draft)
+    assert any(i.kind == "change_failure" for i in items)
+
+
+def test_mutation_collect_open_items_unresolved_source(tmp_path):
+    """Removing the unresolved loop would drop qa_finding items on drafts."""
+    draft = {"check_failing": False,
+             "unresolved": [{"text": "tool.py:5: missing", "source": "QA judge", "rounds": [1]}]}
+    ctx = RunContext(tmp_path, knobs={}, facts={})
+    items = delivery._collect_open_items(ctx, draft)
+    assert any(i.kind == "qa_finding" for i in items)
+
+
+def test_mutation_collect_open_items_inherited_source(tmp_path):
+    """Removing the inherited_failures loop would drop judgment_call items."""
+    ctx = RunContext(tmp_path, knobs={}, facts={"inherited_failures": ["tests/test_old.py::test_old"]})
+    items = delivery._collect_open_items(ctx, None)
+    assert any(i.kind == "judgment_call" for i in items)
+
+
+def test_mutation_collect_open_items_inherited_only_on_ready(tmp_path):
+    """Ready PRs get judgment_call items from inherited failures but not follow-up duplicates."""
+    ctx = RunContext(tmp_path, knobs={}, facts={
+        "inherited_failures": ["tests/test_tool.py::test_slow"]})
+    items = delivery._collect_open_items(ctx, None)
+    assert any(i.kind == "judgment_call" for i in items)
+    assert not any(i.kind == "qa_finding" for i in items)
+
+
+def test_mutation_matches_inherited_short_name(tmp_path):
+    """Removing _matches_inherited would let short-name inherited tests be called stuck."""
+    from refactory_dsh.failfast import detect_stuck
+
+    prev = {
+        "status": "fail", "validation": "check failed", "digest": "## Failing tests",
+        "attempt": 0, "command": "python -m pytest tests", "raw_tail": "",
+        "check_mode": "full", "targeted_command": None, "commit": "aaa",
+        "runners": [{"name": "pytest", "passed": False,
+                     "failures": [{"test_id": "test_bar", "assertion": "> assert 1 == 2",
+                                   "traceback": ""}]}],
+        "inherited": ["tests/test_foo.py::test_bar"],
+    }
+    curr_runners = [{"name": "pytest", "passed": False,
+                     "failures": [{"test_id": "test_bar", "assertion": "> assert 1 == 2",
+                                   "traceback": ""}]}]
+    result = detect_stuck(prev, curr_runners, "", None, "aaa", "bbb")
+    assert result is None
+
+
+def test_mutation_collect_open_items_environment_source(tmp_path):
+    """Removing the check_timeout branch would drop environment items."""
+    ctx = RunContext(tmp_path, knobs={}, facts={})
+    ctx.write_json("check-record.json",
+                   {"status": "check_timeout", "validation": "Check did not finish"})
+    items = delivery._collect_open_items(ctx, None)
+    assert any(i.kind == "environment" for i in items)

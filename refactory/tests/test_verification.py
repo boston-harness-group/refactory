@@ -345,6 +345,51 @@ def test_joint_fix_round(tmp_path, monkeypatch):
     assert "missing feature" in second_emit and "noise" in second_emit
 
 
+def test_fix_round_budget_delivers_draft_with_open_items(tmp_path, monkeypatch):
+    """A non-finish design run with fix_rounds=1: the QA judge sends back once (the round),
+    then its next blocking finding becomes a draft with Open items."""
+    monkeypatch.setenv("REFACTORY_PROJECT", str(tmp_path))
+    from refactory_dsh import finish, open_items
+    from tests_support import (DESIGN_DOC_ANSWER,
+                               PITFALLS_ANSWER, RESEARCH_ANSWER,
+                               FakeModel, overwatch_judgment, qa_judgment, render)
+    QA_REVIEW_FAIL = "BLOCKING: tool.py:5: missing feature\n\nVERDICT: FAIL"
+    QA_REDO = qa_judgment("redo", must_fix=[
+        {"source": "qa_director", "where": "tool.py:5", "what": "missing feature", "why": "ask 1"}])
+    answers = [
+        RESEARCH_ANSWER, PITFALLS_ANSWER, "perspectives", "one plan",
+        DESIGN_DOC_ANSWER,
+        # First build: check passes, QA review fails, judge says redo (fix round spent)
+        render({"tool.py": "print('v1')\n"}),
+        "health: passed", "code: passed", QA_REVIEW_FAIL,
+        "No blocking findings.\n\nVERDICT: PASS",
+        QA_REDO,
+        # Reloop → second build: same QA failure
+        render({"tool.py": "print('v2')\n"}),
+        "health: passed", "code: passed", QA_REVIEW_FAIL,
+        "No blocking findings.\n\nVERDICT: PASS",
+        QA_REDO,
+        # Fix round budget spent → draft, then overwatch judges the draft
+        overwatch_judgment("pass"),
+    ]
+    model = FakeModel(answers)
+    mode = DesignMode()
+    mode._knobs["fix_rounds"]["value"] = 1
+    result = mode.run(
+        tmp_path / "run", model=model,
+        verdicts={"gate_strategy": "proceed"},
+        task={"name": "fix_budget", "brief": "a tool", "check": "python tool.py"},
+    )
+    assert result.exit_ok, result.error
+    facts = result.facts
+    assert facts["finish_rounds"] == 1
+    assert isinstance(facts.get("draft_delivery") or facts.get("qa_draft"), dict)
+    body = (tmp_path / "run" / "pull-request.md").read_text()
+    items = open_items.parse(body)
+    assert len(items) > 0
+    assert any(item.kind == "qa_finding" for item in items)
+
+
 def test_verifier_branch_failure(tmp_path, monkeypatch):
     """A verifier that returns empty is treated as missing in the synthesis."""
     monkeypatch.setenv("REFACTORY_PROJECT", str(tmp_path))
