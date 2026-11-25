@@ -36,15 +36,10 @@ NODE = shutil.which("node")
 PYTHON = str(REPO_ROOT / ".venv/bin/python")
 REFACTORY = str(REPO_ROOT / ".venv/bin/refactory")
 
-pytestmark = [
-    pytest.mark.skipif(
-        NODE is None or not (REPO_ROOT / "packages/workflow/workflow-spine/node_modules/@deepseek-ai/cordis").exists()
-        or not Path(REFACTORY).exists(),
-        reason="the spine owner needs Node, the installed workspace (pnpm install) and the venv (uv sync)"),
-    pytest.mark.skipif(
-        "PYTEST_XDIST_WORKER" in os.environ,
-        reason="full graph runs race with test_recipes over .factory/packages/check_tuned; run with -n 0"),
-]
+pytestmark = pytest.mark.skipif(
+    NODE is None or not (REPO_ROOT / "packages/workflow/workflow-spine/node_modules/@deepseek-ai/cordis").exists()
+    or not Path(REFACTORY).exists(),
+    reason="the spine owner needs Node, the installed workspace (pnpm install) and the venv (uv sync)")
 
 NAME = "fixround_tool"
 LOGIN = "octo"
@@ -131,6 +126,8 @@ class World:
                     if key not in ("GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN",
                                    "DSH_CLI", "REFACTORY_WORKDIR", "REFACTORY_PROJECT",
                                    "REFACTORY_WORKER_CONTEXT")}
+        project = base / "project"
+        project.mkdir()
         self.env.update({
             "PATH": os.pathsep.join([str(base / "bin"), str(gh_shim), os.environ.get("PATH", "")]),
             "FAKE_GH_ROOT": str(github), "GH_CONFIG_DIR": str(base / "gh"),
@@ -138,6 +135,7 @@ class World:
             "GIT_CONFIG_VALUE_0": "https://github.com/",
             "DSH_HOME": str(home), "REFACTORY_MODEL_DSH_HOME": str(home),
             "REFACTORY_HOME": str(base / "refactory-home"), "REFACTORY_PROJECTS_DIR": str(base / "projects"),
+            "REFACTORY_PROJECT": str(project),
             "DSH_CLI": str(launcher), "PYTHONDONTWRITEBYTECODE": "1",
         })
         repo = git_repo(self.app)

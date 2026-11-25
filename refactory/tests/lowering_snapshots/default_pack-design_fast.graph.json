@@ -341,7 +341,7 @@
   "knob_values": {
     "check_timeout_s": 180.0,
     "check_attempt_cap": 8.0,
-    "fix_rounds": 10.0,
+    "fix_rounds": 1.0,
     "name": "",
     "brief": "",
     "check": "",
@@ -383,14 +383,14 @@
       "required": false
     },
     "fix_rounds": {
-      "default": 10,
+      "default": 1,
       "kind": "int",
       "lo": 0,
       "hi": 10,
       "enum": [],
       "values": [],
       "frozen": false,
-      "description": "how many fix rounds the builder gets after the first build; every gate's send-back counts against this shared budget, and the run delivers a draft when it is spent; production default is 1 (set by the CLI)",
+      "description": "how many fix rounds the builder gets after the first build; every gate's send-back counts against this shared budget, and the run delivers a draft when it is spent",
       "required": false
     },
     "name": {

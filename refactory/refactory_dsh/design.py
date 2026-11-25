@@ -539,11 +539,10 @@ class DesignMode(Mode):
                             "0 or a value at or below check_attempts disables the extension",
             ),
             "fix_rounds": Knob(
-                10, "int", lo=0, hi=10,
+                1, "int", lo=0, hi=10,
                 description="how many fix rounds the builder gets after the first build; "
                             "every gate's send-back counts against this shared budget, and "
-                            "the run delivers a draft when it is spent; "
-                            "production default is 1 (set by the CLI)",
+                            "the run delivers a draft when it is spent",
             ),
             "design_review_attempts": Knob(
                 1, "int", lo=0, hi=3,

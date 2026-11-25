@@ -308,9 +308,6 @@ def knobs(args: argparse.Namespace, mode_id: str | None, *, brief: str | None = 
         found.append("single_shot=1")
     if args.check:
         found.append(f"check={args.check}")
-    if mode_id in DESIGN_MODES or (mode_id is None and named in DESIGN_MODES):
-        from refactory_dsh.finish import FIX_ROUNDS_DEFAULT
-        found.append(f"fix_rounds={FIX_ROUNDS_DEFAULT}")
     if args.repair_attempts is not None:
         found.append(f"repair_attempts={args.repair_attempts}")
     if args.attempts is not None and mode_id in ATTEMPTS:

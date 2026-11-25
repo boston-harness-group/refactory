@@ -10072,15 +10072,15 @@ Build a software artifact from a brief, name and acceptance command, as commits 
       "values": []
     },
     "fix_rounds": {
-      "default": 10,
-      "description": "how many fix rounds the builder gets after the first build; every gate's send-back counts against this shared budget, and the run delivers a draft when it is spent; production default is 1 (set by the CLI)",
+      "default": 1,
+      "description": "how many fix rounds the builder gets after the first build; every gate's send-back counts against this shared budget, and the run delivers a draft when it is spent",
       "frozen": false,
       "kind": "int",
       "range": [
         0,
         10
       ],
-      "value": 10,
+      "value": 1,
       "values": []
     },
     "generate": {
@@ -10463,7 +10463,7 @@ Build a software artifact from a brief, name and acceptance command, as commits 
       "panel": "Mode picker; Run once executes enabled modes including authoring; Optimize requires a scored mode. Use chat for stepwise gates."
     },
     "purpose": "Build a software artifact from a brief, name and acceptance command, as commits on the run's own branch in a git worktree: of the repository `target` names, or of a new project when it names none. Research, strategy and the design go straight to the approval gate, with no design reviewer: the design is written once to a light template (Summary, Changes, Tests), a claims check lists what it cannot confirm, and only a design with no ## Changes goes back for a rewrite (`design_review_attempts`, default 1); everything else is shown on the approval card. Before research, a bounded change sizer (`size_change`, 600 s, read only) reads the code the change touches, and the research footprint rule turns its verdict into the research scope, full unless the code proves it small; a lean research whose footprint reaches further is widened once at full scope, and both scales are on the approval card. A scoped change (a refine, or one whose research footprint is small) skips the perspectives step, and a refine skips the sizer, research and pitfalls too: its design starts from the pull request's description and diff. The builder works in a prepared clone of the last attempt (installs, setup and generate done), where it changes the code and runs the tests its change touches and the brief's own example (the full check runs beside the reviews in fork_qa); the clone's diff becomes the attempt. Every attempt \u2014 first or fix-up \u2014 runs only the tests the change touches in the self-check. The full check runs beside the three reviews, the verifier and the early asks judge in fork_qa. gate_check composes one send-back from check failures and early-asks findings without spending an attempt (`self_check_fixups` times an attempt; past that, failures stop the attempt and not-built items alone go on to the reviews, listed for the QA judge and Overwatch), a fix-up's self-check runs the last failures and what the fix-up changed within `self_check_timeout_s`, and a failure the base shares is inherited unless the brief or a correction names it. The command runs in that worktree beside the separate QA reviews (on the commit both see, running the full check beside them) and stays binding; a QA judge then reads the reviews and decides whether the build goes on or back, and Overwatch judges acceptance with an audit of the person's gate corrections as evidence (a correction given after the approval is applied to the design before the builder's next round, because every send-back to the builder goes through the corrections step, and Overwatch does not pass the change while one is unapplied); final current validation evidence is required. Only an ask, a correction, a failed health check or a critical or high defect sends the build back, and a correction Overwatch finds unmet always does; other findings are listed on the pull request as follow-ups. A judge whose verdict cannot be read is asked again once (`judge_rereads`), with no builder round. Once they pass, the branch is delivered as a pull request (into the branch its base came from, or the default branch), which the approval gate's question names first (`pr=0` keeps it local, with its pull request text in pull-request.md and finishing commands in delivery.json; `refine` updates an open one, rewriting only the sections delivery wrote in its description). When a limit stops the build (the check's, the reviews', all attempts', or refused emissions') at an applied commit with current check evidence, that commit is delivered as a draft pull request listing what is unresolved, marked [check failing] when its check fails. Before sizing, a code knowledge graph of the worktree is built in the background (on by default; `code_graph=0`, --no-graph, REFACTORY_CODE_GRAPH=0 or the \"code_graph\" object in refactory.workers.json turn it off) (graphify, outside the checkout; `code_graph_timeout_s` and `code_graph_max_files` bound the build), and before sizing a code explorer (`explore_code`, 600 s, read only) waits up to `code_graph_wait_s` for it, maps the code the brief names with `refactory graph query|explain|path` (or, without a graph, from the files) into graph-context.md, headed by which it was made from; the sizer (told to confirm it in the code), research, strategy, design and the builder read it, and may query the graph for more; design.json counts the queries per node.",
-    "reviewed_schema": "7e96358fa439e514c7af628e87e93a2a02db82ac82ffa10994c3920ea66e3a39"
+    "reviewed_schema": "b7226e8b91621259fead22f9de8e8210a870f36b0f60884920d8ede77ff50f43"
   }
 }
 ```
@@ -10781,15 +10781,15 @@ Build a small artifact with one sequential strategist, coder and QA agent, as co
       "values": []
     },
     "fix_rounds": {
-      "default": 10,
-      "description": "how many fix rounds the builder gets after the first build; every gate's send-back counts against this shared budget, and the run delivers a draft when it is spent; production default is 1 (set by the CLI)",
+      "default": 1,
+      "description": "how many fix rounds the builder gets after the first build; every gate's send-back counts against this shared budget, and the run delivers a draft when it is spent",
       "frozen": false,
       "kind": "int",
       "range": [
         0,
         10
       ],
-      "value": 10,
+      "value": 1,
       "values": []
     },
     "focused_qa__system_prompt": {
@@ -10966,7 +10966,7 @@ Build a small artifact with one sequential strategist, coder and QA agent, as co
       "panel": "Mode picker; Run once executes enabled modes including authoring; Optimize requires a scored mode. Use chat for stepwise gates."
     },
     "purpose": "Build a small artifact with one sequential strategist, coder and QA agent, as commits on the run's own branch in a git worktree: of the repository `target` names, or of a new project when it names none (`worktree=0` writes .factory/artifacts instead; `source_project` copies a directory there). The check runs in that worktree before focused QA. It has no approval gate, so it opens no pull request: the branch is left for you to push. The coder works in a prepared clone of the last attempt, whose diff becomes the attempt.",
-    "reviewed_schema": "c0d3ccc28f8bdb8383b1b941704405928389c5f54a74cfe9eaa264609bcd365a"
+    "reviewed_schema": "7c89ef421899f6b237cc92c71ccaf945d0c7e3d240e62dc0aad1cd146ce6b0c9"
   }
 }
 ```

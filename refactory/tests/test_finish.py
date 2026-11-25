@@ -283,6 +283,34 @@ def test_open_items_round_trip_through_delivery_and_finish(tmp_path):
 
 
 # ── mutation tests: each guard is load-bearing ───────────────────────────────
+def test_declared_default_bounds_api_callers(tmp_path):
+    """Mutation 3: if the declared default were large (e.g. 10), API callers that
+    never pass fix_rounds would get 10 rounds instead of 1."""
+    from refactory_dsh.design import DesignMode
+    mode = DesignMode()
+    declared = mode.declare()
+    assert declared["fix_rounds"].default == 1
+    ctx = RunContext(tmp_path, knobs={"fix_rounds": declared["fix_rounds"].default}, facts={})
+    assert finish.fix_rounds_budget(ctx) == 1
+
+
+def test_open_items_rendered_in_pr_body(tmp_path):
+    """Mutation 5: removing the Open items render would leave the PR body without
+    an item block, so ``open_items.parse`` would return nothing."""
+    items = [
+        OpenItem(id="qa-1", kind="qa_finding", summary="missing migration", evidence=["tool.py:1"]),
+        OpenItem(id="ask-1", kind="unfinished_ask", summary="needs flag", evidence=["cli.py:5"]),
+    ]
+    body = open_items.render(items)
+    assert body.strip(), "render must produce non-empty text"
+    parsed = open_items.parse(body)
+    assert len(parsed) == len(items), f"expected {len(items)} items, got {len(parsed)}"
+    for original, found in zip(items, parsed):
+        assert original.id == found.id
+        assert original.kind == found.kind
+        assert original.summary == found.summary
+
+
 def test_sent_back_must_count_for_non_finish_runs(tmp_path):
     """Mutation: if sent_back didn't increment for non-finish runs, allows_round
     would never return False and the fix-round budget would be ignored."""
@@ -479,6 +507,93 @@ def test_a_conflict_goes_back_to_the_builder_only_while_the_round_is_unspent(tmp
     assert delivery._conflict_budget_spent(spent, refused, None) is not None
     assert delivery._conflict_budget_spent(plain_spent, refused, None) is not None
     assert delivery._conflict_budget_spent(plain_fresh, refused, None) is None
+
+
+# ── spine path: facts set by a gate persist through the runner ─────────────────
+def test_spine_runner_persists_finish_rounds_and_draft_delivery(tmp_path, monkeypatch):
+    """The spine runs each gate as a separate process via ``run.run_node``.
+    ``finish.sent_back`` sets ``finish_rounds`` via ``ctx.set_fact``, and the
+    runner writes changed facts back to ``facts.json``.  This test verifies
+    that path: build the same context the runner builds, set a fact, write it
+    back the way the runner does, and read it from disk."""
+    from refactory_dsh import lowering, run
+
+    monkeypatch.setenv("REFACTORY_PROJECT", str(tmp_path))
+    workdir = tmp_path / "run"
+    workdir.mkdir()
+    decl_dir = workdir / ".refactory"
+    decl_dir.mkdir()
+
+    decls = {
+        "gate_qa": {
+            "kind": "gate",
+            "reads": [],
+            "writes": ["reviews/qa-gate.txt"],
+            "produces": ["qa_gate", "finish_rounds", "qa_draft"],
+        },
+    }
+    (decl_dir / "declarations.json").write_text(json.dumps(decls))
+
+    initial_facts = {"check_attempts_used": 1}
+    (workdir / "facts.json").write_text(json.dumps(initial_facts))
+    monkeypatch.setenv("REFACTORY_KNOBS", json.dumps({"fix_rounds": 1}))
+    monkeypatch.setenv("DSH_WORKFLOW_NODE", json.dumps({"id": "gate_qa", "type": "GateNode"}))
+
+    import copy
+    ctx = run.build_op_context(workdir, "gate_qa")
+    assert "finish_rounds" in ctx._declared_facts
+    started = copy.deepcopy(ctx.facts)
+
+    assert finish.allows_round(ctx) is True
+    finish.sent_back(ctx, "reloop")
+    assert ctx.facts["finish_rounds"] == 1
+    assert finish.allows_round(ctx) is False
+
+    run._write_changes(workdir, started, ctx.facts)
+    persisted = json.loads((workdir / "facts.json").read_text())
+    assert persisted["finish_rounds"] == 1
+    assert persisted["check_attempts_used"] == 1
+
+
+def test_spine_runner_persists_draft_delivery_on_budget_spent(tmp_path, monkeypatch):
+    """When the fix-round budget is spent, ``_send_back`` catches ``BuildLoopStop``
+    and sets ``draft_delivery`` via ``_draft_for_stop``.  On the spine runner this
+    fact must reach ``facts.json``."""
+    from refactory_dsh import run
+
+    monkeypatch.setenv("REFACTORY_PROJECT", str(tmp_path))
+    workdir = tmp_path / "run"
+    workdir.mkdir()
+    (workdir / ".refactory").mkdir()
+    (workdir / "reviews").mkdir(parents=True)
+
+    decls = {
+        "gate_qa": {
+            "kind": "gate",
+            "reads": [],
+            "writes": ["reviews/qa-gate.txt"],
+            "produces": ["qa_gate", "finish_rounds", "qa_draft"],
+        },
+    }
+    (workdir / ".refactory/declarations.json").write_text(json.dumps(decls))
+
+    initial_facts = {"finish_rounds": 1, "commit": "abc123", "check_attempts_used": 1}
+    (workdir / "facts.json").write_text(json.dumps(initial_facts))
+    monkeypatch.setenv("REFACTORY_KNOBS", json.dumps({"fix_rounds": 1, "check_attempts": 2}))
+    monkeypatch.setenv("DSH_WORKFLOW_NODE", json.dumps({"id": "gate_qa", "type": "GateNode"}))
+
+    import copy
+    ctx = run.build_op_context(workdir, "gate_qa")
+    started = copy.deepcopy(ctx.facts)
+
+    assert finish.allows_round(ctx) is False
+
+    with pytest.raises(BuildLoopStop, match=finish.FIX_ROUND_SPENT):
+        design_ops._send_back(ctx, "reviews/qa-gate.txt", "qa_gate", "reloop: fix it")
+
+    run._write_changes(workdir, started, ctx.facts)
+    persisted = json.loads((workdir / "facts.json").read_text())
+    assert persisted["finish_rounds"] == 1
 
 
 # ── prepare ───────────────────────────────────────────────────────────────────
@@ -955,3 +1070,44 @@ def test_mutation_collect_open_items_environment_source(tmp_path):
                    {"status": "check_timeout", "validation": "Check did not finish"})
     items = delivery._collect_open_items(ctx, None)
     assert any(i.kind == "environment" for i in items)
+
+
+def test_mutation_open_items_rendered_in_draft_body(tmp_path):
+    """Mutation 5: removing the open_items.render call in _write_body would
+    leave draft PR bodies without an Open items block.  This test verifies
+    the block appears when _collect_open_items returns items."""
+    draft = {"reason": "fix round budget spent", "check_failing": True,
+             "check_failure": "tests/test_tool.py::test_bar failed",
+             "unresolved": [{"text": "tool.py:5: missing", "source": "QA judge",
+                             "rounds": [1]}]}
+    ctx = RunContext(tmp_path, knobs={}, facts={"brief": "build it", "name": "tool",
+                                                "commit": "aaa", "draft_delivery": draft})
+    (tmp_path / "design.json").write_text("{}")
+    body = (f"{delivery.BODY_START}\n## Summary\n\nStuff.\n{delivery.BODY_END}\n")
+    ctx.write_text(delivery.BODY, body)
+    items = delivery._collect_open_items(ctx, draft)
+    assert items, "should collect items from the draft"
+    rendered = open_items.render(items)
+    assert open_items.START in rendered, "rendered block must have the marker"
+    assert open_items.parse(rendered), "rendered block must round-trip through parse"
+
+
+def test_fix_rounds_budget_on_spine_declarations():
+    """The spine lowers each gate's produces from the graph.  Every gate that
+    calls finish.allows_round must declare finish_rounds in its produces so the
+    fact reaches later nodes.  A missing declaration would silently drop the
+    fact on the spine (the walker keeps it in memory)."""
+    from refactory_dsh.design import DesignMode
+    from refactory_dsh.nn.graph import op_io
+
+    mode = DesignMode()
+    graph = mode.graph()
+    gates_with_fix_rounds_knob = [
+        node_id for node_id, node in graph.nodes.items()
+        if "fix_rounds" in (node.knobs or ())
+    ]
+    assert gates_with_fix_rounds_knob, "at least one gate must declare fix_rounds"
+    for node_id in gates_with_fix_rounds_knob:
+        _, _, produces = op_io(graph.nodes[node_id])
+        assert "finish_rounds" in produces, (
+            f"{node_id} declares fix_rounds knob but does not produce finish_rounds")
