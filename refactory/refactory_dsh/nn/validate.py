@@ -89,7 +89,9 @@ RULES: dict[str, str] = {
            f"only these modules: {ALLOWED_IMPORTS_TEXT}; and uses no open, exec, eval, compile, __import__, getattr/setattr/delattr, "
            "globals/locals/vars or dunder name or attribute; no other node carries code; a "
            "verdict gate (evaluator refactory_dsh.snippet:verdict) reads its verdict from its "
-           "first required_reads file or, with none, its first inputs fact",
+           "first required_reads file or, with none, its first inputs fact; a sealed script "
+           "node (sealed_script) is exempt from the import allowlist but its code must still "
+           "parse and define main(inp)",
     "V19": "a no-tools agent or a code op that sets no fact has a reader for what it writes: "
            "a step whose every file is written again by a no-tools agent, on every path from "
            "it, before any node reads it or may read it (a Python op or gate, an agent with "
@@ -1350,7 +1352,9 @@ def overwritten_write_issues(graph: Graph) -> list[Issue]:
 def code_issues(graph: Graph, knob_values: Mapping[str, Any]) -> list[Issue]:
     """V18: a code node's code passes the static check (`snippet.static_issues`, which
     never runs it), read as both runtimes run it -- its bound knob's value; a node that
-    runs no code carries none; a verdict gate has a source to read its verdict from."""
+    runs no code carries none; a verdict gate has a source to read its verdict from.
+    A sealed script node (``sealed_script``) is exempt from the static check: it runs
+    inside the seal's sandbox with the Task's interpreter, not the snippet's sandbox."""
     from refactory_dsh import snippet
 
     issues: list[Issue] = []
@@ -1358,13 +1362,36 @@ def code_issues(graph: Graph, knob_values: Mapping[str, Any]) -> list[Issue]:
         node = graph.nodes[node_id]
         bound = node.bound_knob("code")
         if snippet.is_code_node(node):
-            try:
-                code = node.bound("code", knob_values)
-            except Exception:  # a bad binding is V14's to report
-                code = node.code
-            for problem in snippet.static_issues(code):
-                issues.append(Issue("V18", f"code node: {problem}", node=node_id,
-                                    knob=bound or None))
+            if not node.sealed_script:
+                try:
+                    code = node.bound("code", knob_values)
+                except Exception:  # a bad binding is V14's to report
+                    code = node.code
+                for problem in snippet.static_issues(code):
+                    issues.append(Issue("V18", f"code node: {problem}", node=node_id,
+                                        knob=bound or None))
+            else:
+                try:
+                    code = node.bound("code", knob_values)
+                except Exception:
+                    code = node.code
+                if not isinstance(code, str) or not code.strip():
+                    issues.append(Issue("V18", "sealed script: has no code", node=node_id,
+                                        knob=bound or None))
+                else:
+                    import ast as _ast
+                    try:
+                        tree = _ast.parse(code)
+                    except SyntaxError as exc:
+                        issues.append(Issue("V18", f"sealed script: code does not parse: "
+                                            f"line {exc.lineno}: {exc.msg}",
+                                            node=node_id, knob=bound or None))
+                    else:
+                        if not any(isinstance(nd, _ast.FunctionDef) and nd.name == "main"
+                                   for nd in tree.body):
+                            issues.append(Issue("V18", "sealed script: code defines no "
+                                                "module-level main(inp)", node=node_id,
+                                                knob=bound or None))
         elif node.code or bound:
             issues.append(Issue(
                 "V18", "carries code but runs no code: only call "

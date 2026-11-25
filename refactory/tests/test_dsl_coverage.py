@@ -346,6 +346,30 @@ def test_every_operation_the_map_names_for_tools_makes_a_sealed_tool_step(op):
     assert new and all(is_sealed(n) for n in new), (op, new)
 
 
+@pytest.mark.parametrize("op", [op for op in _created("sealed_script") if op != "add_node"])
+def test_every_operation_the_map_names_for_sealed_script_makes_one(op):
+    """The map says each of these makes a sealed script step: each one does (``insert`` with
+    kind 'code' and 'sealed' true; ``loop`` and ``route`` with judge 'code' and 'sealed')."""
+    _POLISH_CODE = {"op": "insert", "after": "solve", "id": "polish", "kind": "code",
+                    "takes_over": "solve"}
+    if op == "insert":
+        edits = [{"op": "insert", "after": "solve", "kind": "code", "sealed": True,
+                  "takes_over": "solve"}]
+    elif op == "loop":
+        edits = [{"op": "loop", "step": "solve", "judge": "code", "sealed": True}]
+    elif op == "route":
+        edits = [_POLISH_CODE, {"op": "route", "after": "solve", "judge": "code",
+                                "sealed": True}]
+    else:
+        pytest.skip(f"{op} not wired for sealed_script test")
+    parent, out = _field_attempt("agent_pass", edits)
+    assert isinstance(out, Candidate), (op, out)
+    new = [n for k, n in out.state["graph"]["nodes"].items()
+           if k not in parent.state["graph"]["nodes"] and n.get("sealed_script")]
+    assert new, (op, [n for k, n in out.state["graph"]["nodes"].items()
+                      if k not in parent.state["graph"]["nodes"]])
+
+
 @pytest.mark.parametrize("op", _created("route"))
 def test_every_operation_the_map_names_for_route_gives_a_new_step_its_own_route(op):
     """The map says each of these may give a new agent step its own route: each one does

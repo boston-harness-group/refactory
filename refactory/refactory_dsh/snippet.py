@@ -751,6 +751,133 @@ def execute(code: str, inp: Any, *, timeout_s: float = WALL_S,
                                  f"{exc}") from exc
 
 
+#: The driver a sealed script step runs: reads its payload from a known file in the
+#: working directory (the seal runs with cwd = workspace), calls ``main(inp)``, writes
+#: JSON to stdout.
+_SEALED_DRIVER = """\
+import sys, json
+out = sys.stdout
+sys.stdout = sys.stderr
+data = None
+try:
+    with open(".refactory-sealed-payload.json") as f:
+        data = json.loads(f.read())
+    space = {"__name__": "snippet"}
+    exec(compile(data["code"], "<snippet>", "exec"), space)
+    text = json.dumps({"ok": True, "result": space["main"](data["inp"])})
+except BaseException as exc:
+    where = ""
+    tb = exc.__traceback__
+    while tb is not None:
+        if tb.tb_frame.f_code.co_filename == "<snippet>":
+            lines = data["code"].splitlines() if isinstance(data, dict) else []
+            no = tb.tb_lineno
+            where = " (at line %d: %s)" % (no, lines[no - 1].strip()[:200] if 0 < no <= len(lines) else "")
+        tb = tb.tb_next
+    text = json.dumps({"ok": False, "error": (type(exc).__name__ + ": " + str(exc))[:2000] + where})
+out.write(text)
+out.flush()
+"""
+
+#: The file inside the workspace that holds the sealed script's payload (code + input).
+SEALED_PAYLOAD = ".refactory-sealed-payload.json"
+#: The wall clock of one sealed script step, in seconds (same as sealed tool steps).
+SEALED_WALL_S = 300
+#: Its memory cap, in megabytes.
+SEALED_MEMORY_MB = 2048
+
+
+def sealed_execute(code: str, inp: Any, *, workdir: Path, node_id: str,
+                   reads: Sequence[str] = (),
+                   timeout_s: float = SEALED_WALL_S) -> Any:
+    """``main(inp)`` of ``code``, run in the Task's sealed environment: the Task's Python
+    interpreter, its extra commands, the node's declared ``reads`` visible read-only, no
+    network, no grader data. No import allowlist (the seal is the boundary).
+
+    ``workdir`` is the item's run directory. A temporary workspace is created under it,
+    populated with the declared reads, and the Task's tool environment (`task.
+    pass_tool_environment`) provides the interpreter and commands."""
+    import tempfile
+
+    from refactory_dsh import seal
+    from refactory_dsh.items import run_roots
+    from refactory_dsh.task import TaskError, pass_tool_environment
+
+    ok, why = seal.available()
+    if not ok:
+        raise NoSandbox(f"sealed script steps cannot run here: {why}")
+    if not isinstance(code, str) or not code.strip():
+        raise SnippetError("has no code: a code node's code defines main(inp)")
+    try:
+        tree = ast.parse(code)
+    except SyntaxError as exc:
+        raise SnippetError(f"code does not parse: line {exc.lineno}: {exc.msg}") from exc
+    if not any(isinstance(nd, ast.FunctionDef) and nd.name == "main" for nd in tree.body):
+        raise SnippetError("code defines no module-level main(inp)")
+    try:
+        payload = json.dumps({"code": code, "inp": inp})
+    except (TypeError, ValueError) as exc:
+        raise SnippetError(f"the code node's input is not JSON: {exc}") from exc
+    try:
+        found = pass_tool_environment(workdir)
+    except (TaskError, ImportError) as exc:
+        raise SnippetError(f"sealed script {node_id!r}: the Task's tool environment "
+                           f"cannot be read: {exc}") from exc
+    if found is None:
+        raise SnippetError(f"sealed script {node_id!r}: the Task declares no tool environment; "
+                           "a sealed script step needs one (its interpreter)")
+    _ref, environment = found
+    runs = run_roots(workdir)
+    ws_parent = workdir / ".refactory" / "workspaces"
+    ws_parent.mkdir(parents=True, exist_ok=True)
+    root = Path(tempfile.mkdtemp(dir=ws_parent, prefix=f"{node_id}-sealed-"))
+    ws = root / "workspace"
+    bin_dir = root / "tool-bin"
+    try:
+        ws.mkdir()
+        for name in reads:
+            src = workdir / name
+            if src.exists():
+                dst = ws / name
+                dst.parent.mkdir(parents=True, exist_ok=True)
+                if src.is_dir():
+                    shutil.copytree(src, dst)
+                else:
+                    shutil.copy2(src, dst)
+        (ws / SEALED_PAYLOAD).write_text(payload)
+        tools = seal.tool_path_from_environment(
+            environment, bin_dir, workspace=ws, runs=runs,
+            tmp_dir=root / "seal-tmp", workdir=workdir)
+        cap = seal.step_cap(ws)
+        runner = seal.runner_command(ws, cap=cap, tools=tools)
+        argv = [*runner, "--", "python3", "-I", "-c", _SEALED_DRIVER]
+        result = subprocess.run(argv, cwd=os.path.realpath(ws), capture_output=True,
+                                text=True, timeout=timeout_s)
+    except subprocess.TimeoutExpired as exc:
+        raise SnippetTimeout(f"the sealed script ran over its {timeout_s:g} s limit") from exc
+    except seal.SealError as exc:
+        raise SnippetError(f"sealed script {node_id!r}: the seal could not be set up: "
+                           f"{exc}") from exc
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+    if result.returncode != 0 and not result.stdout.strip():
+        tail = (result.stderr.strip().splitlines() or [f"exit {result.returncode}"])[-1]
+        raise SnippetError(f"the sealed script did not finish (exit {result.returncode}): "
+                           f"{tail[:500]}")
+    if len(result.stdout) > MAX_OUTPUT_BYTES:
+        raise SnippetError(f"the sealed script returned more than {MAX_OUTPUT_BYTES} bytes")
+    try:
+        reply = json.loads(result.stdout)
+    except ValueError:
+        tail = (result.stderr.strip().splitlines() or [f"exit {result.returncode}"])[-1]
+        raise SnippetError(f"the sealed script did not finish (exit {result.returncode}): "
+                           f"{tail[:500]}") from None
+    if not isinstance(reply, dict) or not reply.get("ok"):
+        raise SnippetError(f"the sealed script raised "
+                           f"{str((reply or {}).get('error', 'an error'))[:2000]}")
+    return reply.get("result")
+
+
 # ── what a node declares ──────────────────────────────────────────────────
 
 
@@ -770,6 +897,8 @@ def spec(node: Any, labels: Any, knobs: Mapping[str, Any] | None = None) -> dict
     ``inputs`` and ``required_reads``, and -- for a gate -- its out-edge labels. Built
     from the graph on both runtimes: the walker hands it to its child, the lowering
     writes it into the declarations the spine's runner reads."""
+    sealed = getattr(node, "sealed_script", False) or (
+        node.get("sealed_script", False) if isinstance(node, Mapping) else False)
     return {
         "code": str(node.bound("code", knobs or {}) or ""),
         "code_knob": node.bound_knob("code"),
@@ -778,6 +907,7 @@ def spec(node: Any, labels: Any, knobs: Mapping[str, Any] | None = None) -> dict
         "inputs": list(node.inputs),
         "required_reads": list(node.required_reads),
         "labels": sorted({str(label) for label in labels if label}),
+        **({"sealed_script": True} if sealed else {}),
     }
 
 
@@ -894,12 +1024,21 @@ def _renamed_result(result: Any, renames: Mapping[str, Mapping[str, str | None]]
     return out
 
 
+def _execute_code(ctx: Any, found: dict[str, Any]) -> Any:
+    """Run a code node's code, sealed or unsealed as the spec says."""
+    code = _code(ctx, found)
+    inp = _input(ctx, found)
+    if found.get("sealed_script"):
+        return sealed_execute(code, inp, workdir=ctx.workdir, node_id=ctx.node_id,
+                              reads=list(ctx.declared_reads))
+    return execute(code, inp, hide=_hide(ctx))
+
+
 def run(ctx: Any) -> dict[str, Any]:
     """The code op: run the node's code on its declared inputs; write the files it
     returns (each a declared write) and return the facts it returns (each declared)."""
     found = _spec(ctx)
-    result = _renamed_result(execute(_code(ctx, found), _input(ctx, found), hide=_hide(ctx)),
-                             found.get("renames") or {})
+    result = _renamed_result(_execute_code(ctx, found), found.get("renames") or {})
     facts, files = checked_result(ctx.node_id, result, ctx._declared,  # noqa: SLF001
                                   ctx._declared_facts)  # noqa: SLF001
     for name, text in files.items():
@@ -913,7 +1052,7 @@ def gate(ctx: Any) -> Any:
     from refactory_dsh.nn import Verdict
 
     found = _spec(ctx)
-    result = execute(_code(ctx, found), _input(ctx, found), hide=_hide(ctx))
+    result = _execute_code(ctx, found)
     label, reason = checked_verdict(ctx.node_id, result, found)
     return Verdict(label, reason=reason)
 
