@@ -2008,7 +2008,7 @@ def composition_section(catalogue: Sequence[dict[str, Any]], node_states: Sequen
         tools_line(ops) if tools else NO_TOOLS_LINE,
     ]
     if code_nodes:
-        sealed_summaries = _sealed_code_summaries(node_states)
+        sealed_imports, has_packages = _sealed_code_imports(node_states)
         lines += [
             f"- **code op**: `\"call\": \"{snippet.RUN}\"` with `code`, Python that defines "
             "`main(inp)`. `inp` is `{\"files\": {each declared read that exists: its text}, "
@@ -2020,14 +2020,28 @@ def composition_section(catalogue: Sequence[dict[str, Any]], node_states: Sequen
             "V18). The code goes into the node's own `<id>__code` knob, which a later "
             "`set_knob` patches or rewrites.",
         ]
-        if sealed_summaries:
-            lines.append(
-                "  With `\"sealed\": true` on the insert (or loop/route), the code step runs "
-                "in the Task's tool environment instead: it may import the packages that "
-                f"environment provides ({'; '.join(sealed_summaries)}), with no import "
-                f"allowlist (the seal is the boundary), up to {snippet.SEALED_WALL_S} s and "
-                f"{snippet.SEALED_MEMORY_MB} MB. It must still define `main(inp)` and parse. "
-                "Without `\"sealed\": true` a code step imports only the standard library.")
+        if sealed_imports:
+            if has_packages:
+                importable = "; ".join(sealed_imports)
+                lines.append(
+                    "  With `\"sealed\": true` on the insert (or loop/route), the code step "
+                    "runs in the Task's tool environment instead: it may import "
+                    f"{importable} (with no import "
+                    f"allowlist; the seal is the boundary), up to {snippet.SEALED_WALL_S} s "
+                    f"and {snippet.SEALED_MEMORY_MB} MB. It must still define `main(inp)` "
+                    "and parse. "
+                    "Without `\"sealed\": true` a code step imports only the standard "
+                    "library.")
+            else:
+                lines.append(
+                    "  With `\"sealed\": true` on the insert (or loop/route), the code step "
+                    "runs in the Task's tool environment instead: it may import the packages "
+                    f"that environment provides ({'; '.join(sealed_imports)}), with no import "
+                    f"allowlist (the seal is the boundary), up to {snippet.SEALED_WALL_S} s "
+                    f"and {snippet.SEALED_MEMORY_MB} MB. It must still define `main(inp)` "
+                    "and parse. "
+                    "Without `\"sealed\": true` a code step imports only the standard "
+                    "library.")
     lines += [
         "- **gate**: routes by a verdict, to the out-edge whose `condition` is that verdict. "
         "Give each out-edge a single-word condition (`proceed`, `reloop`, `revise` ...). "
@@ -2152,9 +2166,13 @@ def composition_examples(catalogue: Sequence[dict[str, Any]],
                "to": {"proceed": step, "revise": {**agent, "to": step}}} for before in feeding)]),
     ]
     if code_nodes:
+        sealed_imports, _ = _sealed_code_imports(node_states)
+        code_extra: dict[str, Any] = {"sealed": True} if sealed_imports else {}
         shapes.append(("insert", COMPOSITION_SHAPES[4], [
-            {"op": "insert", "before": step, "kind": "code", "id": code_id, "text": code},
-            {"op": "insert", "after": step, "kind": "code", "id": code_id, "text": code}]))
+            {"op": "insert", "before": step, "kind": "code", "id": code_id, "text": code,
+             **code_extra},
+            {"op": "insert", "after": step, "kind": "code", "id": code_id, "text": code,
+             **code_extra}]))
     if tools and "insert" in tool_step_ops(ops):
         tool = {"kind": "agent", "tools": ["bash"], "text": "<what to find out with tools>"}
         shapes.append(("insert", COMPOSITION_SHAPES[5], [
@@ -2669,12 +2687,21 @@ def tool_environment_lines(node_states: Sequence[Mapping[str, Any]]) -> list[str
     return lines
 
 
-def _sealed_code_summaries(node_states: Sequence[Mapping[str, Any]]) -> list[str]:
-    """The `ToolEnvironment.summary` for each per-item part whose Task declares a tool
-    environment, deduplicated: what a sealed code step's interpreter has available."""
+def _sealed_code_imports(node_states: Sequence[Mapping[str, Any]]
+                         ) -> tuple[list[str], bool]:
+    """What a sealed code step may import, derived from the Task's tool environment.
+
+    Returns ``(import_lines, has_packages)``: when any environment declares
+    ``packages``, each line names the packages by name and version
+    (``"openpyxl 3.1.5, pandas 2.3.3"``); otherwise each line is the
+    environment's ``summary`` (the proposer knows what is there, but not
+    exactly which modules). ``has_packages`` is True when every environment
+    declared its packages.
+    """
     from refactory_dsh.task import TaskError, task_tool_environment
 
     seen: list[str] = []
+    all_have_packages = True
     for node in node_states:
         if node.get("kind") != "data" or not node.get("task_ref"):
             continue
@@ -2682,9 +2709,16 @@ def _sealed_code_summaries(node_states: Sequence[Mapping[str, Any]]) -> list[str
             environment = task_tool_environment(str(node["task_ref"]))
         except (TaskError, ImportError):
             continue
-        if environment is not None and environment.summary not in seen:
-            seen.append(environment.summary)
-    return seen
+        if environment is None:
+            continue
+        if environment.packages:
+            line = ", ".join(f"{name} {version}" for name, version in environment.packages)
+        else:
+            line = environment.summary
+            all_have_packages = False
+        if line not in seen:
+            seen.append(line)
+    return seen, bool(seen) and all_have_packages
 
 
 #: The core operators whose new step takes 'to' (where its output goes).

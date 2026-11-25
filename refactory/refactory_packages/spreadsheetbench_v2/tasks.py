@@ -109,7 +109,9 @@ class SpreadsheetBenchV2Task(Task):
     graded_files = (PRED, FINAL)
     item_files = MappingProxyType({"input": INPUT})
     tool_environment = ToolEnvironment(summary=interpreter.SUMMARY, python=interpreter.interpreter,
-                                       hidden=tool_hidden)
+                                       hidden=tool_hidden,
+                                       packages=tuple((name, interpreter.PINS[name])
+                                                      for name in interpreter.NAMED))
     grader_fields = ("gold_path", "input_path")
     item_metadata = ("category",)
     #: The analysts of both arms see the input's preview as the item's context, as the
@@ -261,7 +263,9 @@ class SpreadsheetBenchV2SweTask(SpreadsheetBenchV2Task):
 
     tool_environment = ToolEnvironment(summary=SWE_SUMMARY, python=interpreter.interpreter,
                                        hidden=tool_hidden, commands=swe_commands,
-                                       reads=swe_reads, private_tmp=True)
+                                       reads=swe_reads, private_tmp=True,
+                                       packages=tuple((name, interpreter.PINS[name])
+                                                      for name in interpreter.NAMED))
 
     def verify(self, instance: TaskInstance, workspace: Path, *, part: str | None = None,
                seed: int | None = None) -> VerifyResult:
