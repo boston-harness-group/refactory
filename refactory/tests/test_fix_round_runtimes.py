@@ -36,10 +36,13 @@ NODE = shutil.which("node")
 PYTHON = str(REPO_ROOT / ".venv/bin/python")
 REFACTORY = str(REPO_ROOT / ".venv/bin/refactory")
 
-pytestmark = pytest.mark.skipif(
-    NODE is None or not (REPO_ROOT / "packages/workflow/workflow-spine/node_modules/@deepseek-ai/cordis").exists()
-    or not Path(REFACTORY).exists(),
-    reason="the spine owner needs Node, the installed workspace (pnpm install) and the venv (uv sync)")
+pytestmark = [
+    pytest.mark.skipif(
+        NODE is None or not (REPO_ROOT / "packages/workflow/workflow-spine/node_modules/@deepseek-ai/cordis").exists()
+        or not Path(REFACTORY).exists(),
+        reason="the spine owner needs Node, the installed workspace (pnpm install) and the venv (uv sync)"),
+    pytest.mark.slow,
+]
 
 NAME = "fixround_tool"
 LOGIN = "octo"
