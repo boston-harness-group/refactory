@@ -241,18 +241,19 @@ surface reads.
 ## What a contributor runs before pushing
 
 Iterate with `pnpm test:changed` (contributing.md, "Run the tests your change touches"):
-the tests your diff reaches, on eight workers. The suite below is what you run once before
-pushing; CI's four shards are the binding check.
+the tests your diff reaches, on eight workers. The full suite, `-n 8`, is what you run
+once before pushing; CI's four shards are the binding check. `--toolchain-gate` is the one
+command that must stay in a single process.
 
-Change the glue or a document: `uv run python -m pytest refactory/tests -q`, then the two
-generator `--check` commands and `check_recipes` when a document, a CLI verb, or the API
-reference changed.
+Change the glue or a document: `uv run python -m pytest refactory/tests -q -n 8`, then the
+two generator `--check` commands and `check_recipes` when a document, a CLI verb, or the
+API reference changed.
 
 Change one of the eight packages: `pnpm run build`, `pnpm run test`, and `pnpm run lint`.
 `pnpm run build` is what puts `lib/` on disk, and the graph profile loads `lib/`, so a
 change that is only typechecked has not reached a run.
 
-Change anything that reaches DSH: `uv run python -m pytest refactory/tests -q
+Change anything that reaches DSH: `uv run python -m pytest refactory/tests -q -n 8
 --run-integration`. That is the only check that drives the pinned harness rather than the
 in-process walker. `refactory package smoke` does not touch DSH; it is the walker.
 

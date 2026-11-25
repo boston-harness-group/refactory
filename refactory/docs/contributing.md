@@ -38,7 +38,9 @@ pnpm test:changed -- -x -k x  # ... pass pytest its own options
 import a module it changed, and the engine and structural tests when it changes a hub. A
 change to a file every test reads (`conftest.py`, `pytest.ini`, `pyproject.toml`, a pytest
 plugin, `uv.lock`) selects the whole suite, because no import graph says what it reaches.
-Run the whole suite at most once before pushing, and never on a single worker.
+A changed fixture, document or script selects the test files that name it. The command runs
+the Python suite only: a change under `packages/` needs `pnpm test`. Run the whole suite at
+most once before pushing, and never on a single worker.
 
 `tests/test_ir_parity.py` compares `refactory_dsh/ir.py` with the reference graph
 language over every shipped mode. That reference is a **test-time oracle** and not
