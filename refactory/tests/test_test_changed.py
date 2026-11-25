@@ -343,6 +343,43 @@ def test_a_fixture_named_only_by_a_helper_selects_the_tests_that_import_it(tmp_p
     assert _json(repo)["selection"] == ["refactory/tests/test_loader.py"]
 
 
+def test_a_document_fixture_and_a_python_fixture_select_their_readers(tmp_path):
+    """A fixture can be a document or a module; the data rule has to catch it before the
+    document and `.py` exclusions do."""
+    repo = _repo(tmp_path, {
+        "refactory/tests/fixtures/excerpt.md": "a design\n",
+        "refactory/tests/fixtures/helpers.py": "X = 1\n",
+        "refactory/tests/test_reads_excerpt.py":
+            "from pathlib import Path\n\nEXCERPT = Path(__file__).parent / "
+            "'fixtures/excerpt.md'\n\n\ndef test_reads_excerpt():\n    assert EXCERPT.exists()\n",
+    })
+    (repo / "refactory/tests/fixtures/excerpt.md").write_text("a design, revised\n")
+    assert _json(repo)["selection"] == ["refactory/tests/test_reads_excerpt.py"]
+
+
+def test_a_python_fixture_selects_the_test_that_names_it(tmp_path):
+    repo = _repo(tmp_path, {
+        "refactory/tests/fixtures/helpers.py": "X = 1\n",
+        "refactory/tests/test_uses_helpers.py":
+            "from pathlib import Path\n\nHELPERS = Path(__file__).parent / "
+            "'fixtures/helpers.py'\n\n\ndef test_uses_helpers():\n    assert HELPERS.exists()\n",
+    })
+    (repo / "refactory/tests/fixtures/helpers.py").write_text("X = 2\n")
+    assert _json(repo)["selection"] == ["refactory/tests/test_uses_helpers.py"]
+
+
+def test_an_unimported_helper_beside_an_unrelated_mention_is_not_a_reader(tmp_path):
+    """A helper nobody imports names the data, and an unrelated test happens to mention
+    it: neither reads the data, so the suite runs."""
+    module = _module()
+    repo = _repo(tmp_path, {
+        "refactory/tests/dead_helper.py": "# fixtures/dead/one.bin\n",
+        "refactory/tests/fixtures/dead/one.bin": "z",
+        "refactory/tests/test_other.py": "# a note about dead data\n",
+    })
+    assert module._data_readers(repo, ["refactory/tests/fixtures/dead/one.bin"]) == [SUITE]
+
+
 def test_data_named_only_by_an_unimported_helper_still_selects_the_suite(tmp_path):
     """A helper nobody imports names the file but no test reads it through the helper: the
     data is still unaccounted for, so the suite runs."""
@@ -355,6 +392,13 @@ def test_data_named_only_by_an_unimported_helper_still_selects_the_suite(tmp_pat
 
 
 def test_a_data_file_no_text_names_selects_the_suite(tmp_path):
+    """One unnamed file is enough: nothing can clear it short of the suite."""
+    repo = _repo(tmp_path, {"refactory/tests/fixtures/mystery.bin": "x"})
+    (repo / "refactory/tests/fixtures/mystery.bin").write_text("y")
+    assert _json(repo)["selection"] == [SUITE]
+
+
+def test_a_named_and_an_unnamed_data_file_together_select_the_suite(tmp_path):
     """Nothing can clear a file nothing names, so it is not called "no change". The suite
     replaces what was selected, rather than joining it: a directory plus files collects
     twice."""
@@ -367,8 +411,10 @@ def test_a_data_file_no_text_names_selects_the_suite(tmp_path):
         "refactory/tests/test_docs_english_only.py": "def test_docs():\n    pass\n",
         "refactory/tests/orphan.py": "# names fixtures/nameless.bin\n",
         "refactory/tests/fixtures/nameless.bin": "z",
+        "refactory/tests/fixtures/unspoken.bin": "u",
     })
     (repo / "refactory/tests/fixtures/nameless.bin").write_text("w")
+    (repo / "refactory/tests/fixtures/unspoken.bin").write_text("v")
     (repo / "refactory/tests/fixtures/named.json").write_text('{"a": 1}')
     (repo / "refactory/tests/fixtures/mystery.bin").write_text("y")
     (repo / "docs/guide.md").write_text("# Revised\n")
@@ -388,6 +434,37 @@ def test_only_the_python_suite_is_this_commands(tmp_path):
     record = _json(repo)
     assert record["selection"] == [] and record["not_selected"]
     assert "pnpm test" in _run(repo).stdout
+
+
+def test_a_bytecode_cache_is_never_the_diff(tmp_path):
+    """A run's own imports are not the change: a .pyc would otherwise select the suite."""
+    repo = _repo(tmp_path, {}, failing=True)
+    cache = repo / "refactory" / "tests" / "__pycache__"
+    cache.mkdir()
+    (cache / "test_stale.cpython-312.pyc").write_bytes(b"x")
+    (repo / "docs" / "guide.md").write_text("# Revised\n")
+    record = _json(repo)
+    assert record["touched"] == ["docs/guide.md"] and record["selection"] == []
+
+
+def test_a_spaced_checkout_path_is_quoted_and_re_exec_runs(tmp_path, monkeypatch, capsys):
+    """The printed command must be parseable back (shlex), and `main` must enter the
+    checkout's venv rather than trust the interpreter that ran the script."""
+    module = _module()
+    repo = _repo(tmp_path / "with space", {})
+    (repo / "refactory" / "alpha.py").write_text("A = 2\n")
+    venv = repo / ".venv" / "bin" / "python"
+    venv.parent.mkdir(parents=True)
+    venv.symlink_to(sys.executable)
+
+    calls = []
+    monkeypatch.setattr(os, "execve", lambda *args: calls.append(args))
+    monkeypatch.chdir(repo)
+    assert module.main(["--json", "--base", "HEAD"]) == 0
+    assert calls and calls[0][0] == str(venv)
+
+    printed = json.loads(capsys.readouterr().out)
+    assert shlex.split(printed["command"])[0] == str(venv)
 
 
 def test_pytest_options_after_the_separator_reach_pytest(tmp_path):

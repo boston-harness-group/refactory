@@ -183,9 +183,10 @@ def _data_readers(root: Path, names: list[str]) -> list[str]:
     names falls back to the whole suite, because nothing else can clear it.
     """
     data = [name for name in names
-            if not name.endswith(".py") and not _is_document(name)
-            and name not in SUITE_WIDE and not name.startswith(FOREIGN)
-            and not name.startswith("refactory/docs/")]
+            if name not in SUITE_WIDE and not name.startswith(FOREIGN)
+            and not name.startswith("refactory/docs/")
+            and (name.startswith(f"{SUITE}/fixtures/")
+                 or (not name.endswith(".py") and not _is_document(name)))]
     if not data:
         return []
     workflows = [name for name in data if name.startswith(WORKFLOWS)]
@@ -212,10 +213,14 @@ def _data_readers(root: Path, names: list[str]) -> list[str]:
 
         imports = test_selection.import_map(root, test_selection.repository_files(root),
                                             scope=[SUITE])
-        tests |= {test for test, changed in imports.items() if changed & helpers}
+        imported = {test for test, changed in imports.items() if changed & helpers}
+        if not imported:
+            # A helper nobody imports is no reader: only an unrelated mention was found.
+            return [SUITE]
+        tests |= imported
     if workflows and (root / WORKFLOW_READER).is_file():
         tests.add(WORKFLOW_READER)
-    return sorted(tests) or [SUITE]
+    return sorted(tests)
 
 
 def _script_tests(root: Path, names: list[str]) -> list[str]:
