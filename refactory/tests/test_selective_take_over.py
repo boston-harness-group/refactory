@@ -22,6 +22,7 @@ from __future__ import annotations
 
 from refactory_dsh.nn import edits as nn_edits
 
+import structure_fuzz_graphs as fg
 from refactory_packages.spreadsheetbench_v2.steps_mode import (
     Steps, reply_path, session_path, step_writes,
 )
@@ -147,3 +148,160 @@ def test_selective_take_over_graded_file_reaches_scorer():
 
     # The edit succeeds; the new step's output.xlsx is what gets graded.
     assert "auto_revert" in result["graph"]["nodes"]
+
+
+# ── follow-up 1: agent steps with tools ──────────────────────────────────
+
+
+def test_selective_take_over_agent_with_tools():
+    """An agent step WITH tools can do selective takeover (sealed, Bash)."""
+    state = _steps_state()
+    result = nn_edits.apply(
+        {"op": "insert", "after": "implement", "kind": "agent",
+         "text": "Revert output if wrong.",
+         "id": "auto_revert",
+         "tools": ["Bash"],
+         "takes_over": ["implement", "output.xlsx"]},
+        state)
+
+    nodes = result["graph"]["nodes"]
+    new_step = nodes["auto_revert"]
+    impl_after = nodes["implement"]
+
+    assert "output.xlsx" in new_step["writes"]
+    assert reply_path("implement") in impl_after["writes"]
+    assert session_path("implement") in impl_after["writes"]
+    assert "output.xlsx" not in impl_after["writes"]
+
+
+def test_selective_take_over_sealed_agent_with_tools():
+    """A sealed agent step with tools can do selective takeover."""
+    state = _steps_state()
+    result = nn_edits.apply(
+        {"op": "insert", "after": "implement", "kind": "agent",
+         "text": "Revert output if wrong.",
+         "id": "auto_revert",
+         "tools": ["Bash"],
+         "sealed": True,
+         "takes_over": ["implement", "output.xlsx"]},
+        state)
+
+    nodes = result["graph"]["nodes"]
+    new_step = nodes["auto_revert"]
+    assert "output.xlsx" in new_step["writes"]
+    assert reply_path("implement") in nodes["implement"]["writes"]
+
+
+# ── follow-up 2: generality on non-SpreadsheetBench graph shapes ────────
+
+
+def _fuzz_state(mode_cls: type) -> dict:
+    return mode_cls().state_dict()
+
+
+def test_selective_take_over_inside_fork_branch():
+    """Selective takeover of a step inside a fork branch.
+
+    ForkJoin: setup → fork(left, right_a→right_b) → join → decide → done.
+    right_a writes right_a.txt and produces right_fact.  Take over only
+    right_a.txt: right_b (downstream in the branch) reads it from the new
+    step; decide still reads right_fact from right_a.
+    """
+    state = _fuzz_state(fg.ForkJoin)
+    nodes = state["graph"]["nodes"]
+    assert "right_a.txt" in nodes["right_a"]["writes"]
+    assert "right_fact" in nodes["right_a"]["produces"]
+
+    result = nn_edits.apply(
+        {"op": "insert", "after": "right_a", "kind": "code",
+         "text": "def main(inp):\n    return {'files': {'right_a.txt': 'rewritten'}}",
+         "id": "patch_a",
+         "takes_over": ["right_a", "right_a.txt"]},
+        state)
+
+    nodes = result["graph"]["nodes"]
+    new_step = nodes["patch_a"]
+    original = nodes["right_a"]
+
+    assert "right_a.txt" in new_step["writes"]
+    assert "right_a.txt" not in original["writes"]
+    assert "right_fact" in original["produces"]
+
+    right_b = nodes["right_b"]
+    assert "right_a.txt" in right_b["reads"] or any(
+        "right_a.txt" in (right_b.get(k) or []) for k in ("reads", "required_reads"))
+
+
+def test_selective_take_over_before_fork():
+    """Selective takeover of a step whose outputs feed into a fork.
+
+    ForkJoin: setup writes brief.txt and produces brief.  Take over only
+    brief.txt: both fork branches read it from the new step; brief (fact)
+    still comes from setup.
+    """
+    state = _fuzz_state(fg.ForkJoin)
+    result = nn_edits.apply(
+        {"op": "insert", "after": "setup", "kind": "code",
+         "text": "def main(inp):\n    return {'files': {'brief.txt': 'filtered'}}",
+         "id": "filter_brief",
+         "takes_over": ["setup", "brief.txt"]},
+        state)
+
+    nodes = result["graph"]["nodes"]
+    assert "brief.txt" in nodes["filter_brief"]["writes"]
+    assert "brief.txt" not in nodes["setup"]["writes"]
+    assert "brief" in nodes["setup"]["produces"]
+
+
+def test_selective_take_over_inside_loop():
+    """Selective takeover of a step whose output feeds a loop body.
+
+    GateLoop: prepare(task.txt, task) → work → review → reloop/finish.
+    Take over only task.txt from prepare: work reads it from the new step;
+    task (fact used in work's prompt) still comes from prepare.
+    """
+    state = _fuzz_state(fg.GateLoop)
+    nodes = state["graph"]["nodes"]
+    assert "task.txt" in nodes["prepare"]["writes"]
+    assert "task" in nodes["prepare"]["produces"]
+
+    result = nn_edits.apply(
+        {"op": "insert", "after": "prepare", "kind": "code",
+         "text": "def main(inp):\n    return {'files': {'task.txt': 'augmented'}}",
+         "id": "augment",
+         "takes_over": ["prepare", "task.txt"]},
+        state)
+
+    nodes = result["graph"]["nodes"]
+    assert "task.txt" in nodes["augment"]["writes"]
+    assert "task.txt" not in nodes["prepare"]["writes"]
+    assert "task" in nodes["prepare"]["produces"]
+
+    work = nodes["work"]
+    assert "task.txt" in work["reads"] or any(
+        "task.txt" in (work.get(k) or []) for k in ("reads", "required_reads"))
+
+
+def test_selective_take_over_in_linear_pipeline():
+    """Selective takeover in a straight pipeline (DraftReview).
+
+    intake(brief.txt, brief) → draft → review → finalize → ship.
+    Take over only brief.txt from intake: draft reads it from the new step;
+    brief (fact used in draft's prompt) still comes from intake.
+    """
+    state = _fuzz_state(fg.DraftReview)
+    nodes = state["graph"]["nodes"]
+    assert "brief.txt" in nodes["intake"]["writes"]
+    assert "brief" in nodes["intake"]["produces"]
+
+    result = nn_edits.apply(
+        {"op": "insert", "after": "intake", "kind": "code",
+         "text": "def main(inp):\n    return {'files': {'brief.txt': 'redacted'}}",
+         "id": "redact",
+         "takes_over": ["intake", "brief.txt"]},
+        state)
+
+    nodes = result["graph"]["nodes"]
+    assert "brief.txt" in nodes["redact"]["writes"]
+    assert "brief.txt" not in nodes["intake"]["writes"]
+    assert "brief" in nodes["intake"]["produces"]
