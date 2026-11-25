@@ -356,7 +356,7 @@ def test_an_overwatch_redo_counts_toward_the_review_limit_and_stops_at_it(tmp_pa
          "why": "the brief's only ask has no evidence"}])
     model = FakeModel(_answers(_round(_tool("built"), overwatch=redo),
                                _round(_tool("built!"), overwatch=redo)))
-    result = _design(tmp_path / "run", model, repo, review_attempts=2)
+    result = _design(tmp_path / "run", model, repo, review_attempts=2, fix_rounds=10)
 
     assert result.exit_ok, result.error
     fact = result.facts["draft_delivery"]

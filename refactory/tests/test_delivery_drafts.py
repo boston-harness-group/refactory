@@ -195,7 +195,7 @@ def test_a_review_limit_at_gate_qa_with_a_passing_attempt_delivers_a_draft(githu
     result, model = _limited(run, _attempt(BUILT, judge=redo),
                              _attempt(render({"tool.py": "print('built!')\n"}), judge=redo,
                                       overwatch=overwatch_judgment("pass")),
-                             review_attempts=2)
+                             review_attempts=2, fix_rounds=10)
     assert result.exit_ok, result.error
     assert result.facts["draft_delivery"] == {
         "reason": "review reloop limit reached after 2 review cycle(s)",
@@ -400,7 +400,7 @@ def test_the_overall_limit_on_a_review_send_back_drafts_through_the_overwatch(gi
                              _attempt(BUILT, judge=qa_judgment("redo", must_fix=[QA_HELD])),
                              _attempt(rebuilt, judge=qa_judgment("redo", must_fix=[QA_HELD]),
                                       overwatch=overwatch_judgment("pass")),
-                             check_attempts=2, review_attempts=3, check_attempt_cap=0)
+                             check_attempts=2, review_attempts=3, check_attempt_cap=0, fix_rounds=10)
     assert result.exit_ok, result.error
     fact = result.facts["draft_delivery"]
     assert fact["reason"] == "authoring unresolved after 2 attempt(s)" and "check_failing" not in fact
