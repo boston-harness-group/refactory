@@ -2008,6 +2008,7 @@ def composition_section(catalogue: Sequence[dict[str, Any]], node_states: Sequen
         tools_line(ops) if tools else NO_TOOLS_LINE,
     ]
     if code_nodes:
+        sealed_summaries = _sealed_code_summaries(node_states)
         lines += [
             f"- **code op**: `\"call\": \"{snippet.RUN}\"` with `code`, Python that defines "
             "`main(inp)`. `inp` is `{\"files\": {each declared read that exists: its text}, "
@@ -2019,6 +2020,14 @@ def composition_section(catalogue: Sequence[dict[str, Any]], node_states: Sequen
             "V18). The code goes into the node's own `<id>__code` knob, which a later "
             "`set_knob` patches or rewrites.",
         ]
+        if sealed_summaries:
+            lines.append(
+                "  With `\"sealed\": true` on the insert (or loop/route), the code step runs "
+                "in the Task's tool environment instead: it may import the packages that "
+                f"environment provides ({'; '.join(sealed_summaries)}), with no import "
+                f"allowlist (the seal is the boundary), up to {snippet.SEALED_WALL_S} s and "
+                f"{snippet.SEALED_MEMORY_MB} MB. It must still define `main(inp)` and parse. "
+                "Without `\"sealed\": true` a code step imports only the standard library.")
     lines += [
         "- **gate**: routes by a verdict, to the out-edge whose `condition` is that verdict. "
         "Give each out-edge a single-word condition (`proceed`, `reloop`, `revise` ...). "
@@ -2638,9 +2647,10 @@ def operator_lines(catalogue: Sequence[dict[str, Any]], node_states: Sequence[di
 
 
 def tool_environment_lines(node_states: Sequence[Mapping[str, Any]]) -> list[str]:
-    """What a sealed tool step's commands run with in each per-item part whose Task declares
+    """What a sealed step's commands run with in each per-item part whose Task declares
     it (`task.Task.tool_environment`), in the Task's own words: a fact, said only where the
-    run offers a tool step. Nothing for a Task that declares none (or cannot be read)."""
+    run offers a tool step or a sealed code step. Nothing for a Task that declares none
+    (or cannot be read)."""
     from refactory_dsh.task import TaskError, task_tool_environment
 
     lines: list[str] = []
@@ -2652,11 +2662,29 @@ def tool_environment_lines(node_states: Sequence[Mapping[str, Any]]) -> list[str
         except (TaskError, ImportError):
             continue
         if environment is not None:
-            line = (f"- in the per-item part `{node.get('id')}`, a step with `tools` runs its "
-                    f"commands with {environment.summary}")
+            line = (f"- in the per-item part `{node.get('id')}`, a step with `tools` or a "
+                    f"sealed code step (`\"sealed\": true`) runs with {environment.summary}")
             if line not in lines:
                 lines.append(line)
     return lines
+
+
+def _sealed_code_summaries(node_states: Sequence[Mapping[str, Any]]) -> list[str]:
+    """The `ToolEnvironment.summary` for each per-item part whose Task declares a tool
+    environment, deduplicated: what a sealed code step's interpreter has available."""
+    from refactory_dsh.task import TaskError, task_tool_environment
+
+    seen: list[str] = []
+    for node in node_states:
+        if node.get("kind") != "data" or not node.get("task_ref"):
+            continue
+        try:
+            environment = task_tool_environment(str(node["task_ref"]))
+        except (TaskError, ImportError):
+            continue
+        if environment is not None and environment.summary not in seen:
+            seen.append(environment.summary)
+    return seen
 
 
 #: The core operators whose new step takes 'to' (where its output goes).

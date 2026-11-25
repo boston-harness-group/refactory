@@ -349,6 +349,60 @@ def test_the_pipeline_ask_names_code_steps_when_the_run_allows_them(code_nodes):
     assert "loop or parallelise steps" in text
 
 
+def test_sealed_code_step_description_when_tool_environment_exists(monkeypatch):
+    """When code_nodes is True and a data node's Task declares a tool environment, the
+    request describes sealed code steps and names the packages the environment provides."""
+    from refactory_dsh.task import ToolEnvironment
+
+    env = ToolEnvironment(summary="python3 (and python) = Python 3.12 with openpyxl 3.1.5",
+                          python=lambda: "/usr/bin/python3")
+    monkeypatch.setattr("refactory_dsh.task.task_tool_environment",
+                        lambda ref: env if ref == "test_task" else None)
+    nodes = [{"id": "items", "kind": "data", "task_ref": "test_task"},
+             {"id": "solve", "kind": "agent", "prompt_template": "x", "writes": ["solve.txt"]}]
+    text = _render(node_states=nodes, code_nodes=True)
+    assert "openpyxl" in text
+    assert '"sealed": true' in text or "'sealed': true" in text.lower() or "sealed" in text
+    assert "seal is the boundary" in text
+
+
+def test_no_sealed_code_step_description_without_tool_environment(monkeypatch):
+    """Without a tool environment, code ops are described with the standard-library-only
+    limits; sealed code steps are not mentioned."""
+    monkeypatch.setattr("refactory_dsh.task.task_tool_environment",
+                        lambda ref: None)
+    nodes = [{"id": "items", "kind": "data", "task_ref": "test_task"},
+             {"id": "solve", "kind": "agent", "prompt_template": "x", "writes": ["solve.txt"]}]
+    text = _render(node_states=nodes, code_nodes=True)
+    assert "seal is the boundary" not in text
+    from refactory_dsh.snippet import ALLOWED_IMPORTS_TEXT
+    assert ALLOWED_IMPORTS_TEXT in text
+
+
+def test_no_sealed_code_step_description_without_code_nodes():
+    """When code_nodes is False, the sealed code step paragraph does not appear."""
+    nodes = [{"id": "items", "kind": "data", "task_ref": "test_task"},
+             {"id": "solve", "kind": "agent", "prompt_template": "x", "writes": ["solve.txt"]}]
+    text = _render(node_states=nodes, code_nodes=False)
+    assert "seal is the boundary" not in text
+    assert "**code op**" not in text
+
+
+def test_tool_environment_lines_mention_sealed_code_steps(monkeypatch):
+    """tool_environment_lines mentions both tool steps and sealed code steps."""
+    from refactory_dsh.task import ToolEnvironment
+
+    env = ToolEnvironment(summary="python3 = Python 3.12 with openpyxl 3.1.5",
+                          python=lambda: "/usr/bin/python3")
+    monkeypatch.setattr("refactory_dsh.task.task_tool_environment",
+                        lambda ref: env if ref == "test_task" else None)
+    nodes = [{"id": "items", "kind": "data", "task_ref": "test_task"}]
+    lines = base.tool_environment_lines(nodes)
+    assert len(lines) == 1
+    assert "sealed code step" in lines[0]
+    assert "openpyxl" in lines[0]
+
+
 def test_the_available_table_fits_its_limit_on_a_large_graph():
     """A long pipeline's table is capped: cells name fewer facts and say how many more,
     and rows are left out with a note before the section passes its limit. The advice
