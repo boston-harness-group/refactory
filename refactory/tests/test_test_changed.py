@@ -40,7 +40,6 @@ def _repo(tmp_path: Path, files: dict[str, str], *, failing: bool = False) -> Pa
     tree = {
         "pyproject.toml": "",
         "refactory/pyproject.toml": "",
-        "refactory/refactory_dsh/__init__.py": "",
         "refactory/refactory_dsh/alpha.py": "A = 1\n",
         "refactory/tests/test_alpha.py": ("from refactory_dsh.alpha import A\n\n\n"
                                           "def test_alpha():\n    assert A == 1\n"),
@@ -59,6 +58,8 @@ def _repo(tmp_path: Path, files: dict[str, str], *, failing: bool = False) -> Pa
         _git(repo, "config", key, value)
     _git(repo, "add", ".")
     _git(repo, "commit", "-q", "-m", "init")
+    # A clone has main's tip; the command diffs against the merge base with it.
+    _git(repo, "update-ref", "refs/remotes/origin/main", "HEAD")
     return repo
 
 
@@ -170,6 +171,19 @@ def test_a_changed_fixture_selects_the_tests_that_name_it(tmp_path):
     assert selected == ["refactory/tests/test_reads_fixture.py"], selected
 
 
+def test_a_corpus_fixture_selects_the_helper_that_names_its_directory(tmp_path):
+    """A corpus is read by a helper, not a top-level test, and named by its directory."""
+    repo = _repo(tmp_path, {
+        "refactory/tests/fixtures/corpus/one.json": "{}",
+        "refactory/tests/corpus_support.py":
+            "from pathlib import Path\n\nCORPUS = Path(__file__).parent / 'fixtures' / 'corpus'\n",
+        "refactory/tests/test_corpus.py":
+            "from corpus_support import CORPUS\n\n\ndef test_corpus():\n    assert CORPUS\n",
+    })
+    (repo / "refactory/tests/fixtures/corpus/one.json").write_text('{"b": 2}')
+    assert _json(repo)["selection"] == ["refactory/tests/test_corpus.py"]
+
+
 def test_a_document_and_a_script_select_the_test_that_owns_them(tmp_path):
     """The document census reads every document; a script's test is named for it."""
     repo = _repo(tmp_path, {
@@ -183,10 +197,19 @@ def test_a_document_and_a_script_select_the_test_that_owns_them(tmp_path):
 
     _git(repo, "add", ".")
     _git(repo, "commit", "-q", "-m", "doc")
+    _git(repo, "update-ref", "refs/remotes/origin/main", "HEAD")
     (repo / "scripts/thing.py").write_text("print('y')\n")
     selected = _json(repo)["selection"]
     assert "refactory/tests/test_thing.py" in selected
-    assert "refactory/tests/test_reads_fixture.py" not in selected
+    assert "refactory/tests/test_docs_english_only.py" not in selected
+
+    _git(repo, "add", ".")
+    _git(repo, "commit", "-q", "-m", "script")
+    _git(repo, "update-ref", "refs/remotes/origin/main", "HEAD")
+    tutorial = repo / "refactory" / "docs" / "tutorial.html"
+    tutorial.parent.mkdir(parents=True, exist_ok=True)
+    tutorial.write_text("<p>a tutorial</p>\n")
+    assert _json(repo)["selection"] == ["refactory/tests/test_docs_english_only.py"]
 
 
 def test_list_prints_the_selection_and_runs_nothing(tmp_path):
@@ -238,11 +261,46 @@ def test_the_checkouts_venv_is_the_interpreter_and_its_package_is_first(tmp_path
     finally:
         del os.environ["TEST_CHANGED_IN_VENV"]
 
+    (repo / "refactory" / "refactory_dsh" / "__init__.py").write_text("")
     (repo / "refactory" / "refactory_dsh" / "test_selection.py").write_text("")
     assert module._product(repo) == str(repo / "refactory")
     parts = module._env(repo)["PYTHONPATH"].split(os.pathsep)
     assert parts[0] == str(repo / "refactory")
     assert parts[1:] == ([os.environ["PYTHONPATH"]] if os.environ.get("PYTHONPATH") else [])
+
+
+def test_the_checkouts_own_selector_is_used_and_its_absence_is_an_error(tmp_path):
+    """`select()` must be the checkout's own: a worktree whose selector was deleted must
+    fail, never quietly use the editable install's."""
+    repo = _repo(tmp_path, {
+        "refactory/refactory_dsh/__init__.py": "",
+        "refactory/refactory_dsh/test_selection.py":
+            "def repository_files(root):\n"
+            "    return []\n\n\n"
+            "def select(touched, root, **kwargs):\n"
+            "    class Selection:\n"
+            "        tests = ['refactory/tests/test_marker.py']\n"
+            "    return Selection()\n",
+        "refactory/tests/test_marker.py": "def test_marker():\n    pass\n",
+    })
+    assert _json(repo)["selection"] == ["refactory/tests/test_marker.py"]
+    (repo / "refactory/refactory_dsh/test_selection.py").unlink()
+    done = _run(repo)
+    assert done.returncode != 0 and "test_selection" in done.stderr
+
+
+def test_only_the_python_suite_is_this_commands(tmp_path):
+    """A packages/ or v1/ source is not a Python test: it selects none, and says which
+    command covers it."""
+    repo = _repo(tmp_path, {
+        "packages/client/src/a.ts": "export const a = 1\n",
+        "v1/build_backend.py": "X = 1\n",
+    })
+    (repo / "packages/client/src/a.ts").write_text("export const a = 2\n")
+    (repo / "v1/build_backend.py").write_text("X = 2\n")
+    record = _json(repo)
+    assert record["selection"] == [] and record["not_selected"]
+    assert "pnpm test" in _run(repo).stdout
 
 
 def test_pytest_options_after_the_separator_reach_pytest(tmp_path):
@@ -264,13 +322,23 @@ def test_a_base_that_is_not_a_commit_is_an_error(tmp_path):
     assert done.returncode != 0 and "not a commit" in done.stderr
 
 
+def test_no_origin_main_asks_for_a_base_instead_of_looking_clean(tmp_path):
+    """Without origin/main, a branch's committed work is invisible to a diff against
+    HEAD; the command refuses rather than call it "no change"."""
+    repo = _repo(tmp_path, {})
+    _git(repo, "update-ref", "-d", "refs/remotes/origin/main")
+    done = _run(repo)
+    assert done.returncode != 0 and "no origin/main" in done.stderr, done.stderr
+    assert "Traceback" not in done.stderr, done.stderr
+
+
 def test_a_checkout_without_commits_is_an_error_not_a_green(tmp_path):
     repo = tmp_path / "empty"
     repo.mkdir()
     _git(repo, "init", "-q")
     (repo / "refactory" / "tests").mkdir(parents=True)
-    done = _run(repo)
-    assert done.returncode != 0 and "no commits" in done.stderr
+    assert _run(repo).returncode != 0
+    assert _run(repo, "--base", "HEAD").returncode != 0
 
 
 def test_the_merge_base_is_the_default_base(tmp_path):

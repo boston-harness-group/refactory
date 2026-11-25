@@ -14,9 +14,11 @@ file every test reads (`conftest.py`, `pytest.ini`, `pyproject.toml`, a pytest p
 reaches.
 
 Three things the import graph cannot see are added here: a changed fixture selects the
-test files that name it, a changed document selects the census that reads every document,
-and a changed `scripts/<name>` selects `tests/test_<name>.py`. A TypeScript change is not
-this command's: it selects no Python test, and the output says to run `pnpm test`.
+modules that name it (or the whole suite when no text names it), a changed document selects
+the tests that read documents' content, and a changed `scripts/<name>` selects
+`tests/test_<name>.py`. Only `refactory/` is this command's tree: a TypeScript, `v1/` or
+`scripts/` change selects no Python test of its own, and the output says when `pnpm test`
+covers it.
 
 The full suite is CI's job: it is the binding check, and a pull request's four shards run
 every test once. Run it here at most once before pushing. Everything here runs on eight
@@ -47,8 +49,17 @@ SUITE_WIDE = frozenset({
     "uv.lock", "refactory/tests/model_credential.py", "refactory/tests/repo_guard.py",
 })
 
-#: The test that reads every document, so a changed document is not a false green.
-DOCS_CENSUS = f"{SUITE}/test_docs_english_only.py"
+#: The tests that read a document's content, and the census that reads every document: a
+#: changed document selects them so that a broken example is not a false green.
+DOC_TESTS = (f"{SUITE}/test_ship_ready.py", f"{SUITE}/test_docs_api.py",
+             f"{SUITE}/test_docs_tutorial.py", f"{SUITE}/test_docs_english_only.py")
+
+#: Document suffixes whose content those tests read.
+DOC_SUFFIXES = (".md", ".rst", ".txt", ".html")
+
+#: Where the Python suite's own code and tests live. A change elsewhere (packages/, v1/,
+#: scripts/) is not this command's to test.
+PYTHON_ROOT = "refactory/"
 
 DEFAULT_JOBS = 8
 
@@ -77,25 +88,24 @@ def _root() -> Path:
     return Path(found) if found else SHIPPED
 
 
-def _base(root: Path, requested: str) -> tuple[str, str]:
-    """The commit the diff is taken from, and a note for the person when it is a guess.
+def _base(root: Path, requested: str) -> str:
+    """The commit the diff is taken from: ``requested``, else the merge base with
+    ``origin/main`` (so a branch's own commits count, not what main has since moved).
 
-    ``requested``, else the merge base with ``origin/main`` (so a branch's own commits
-    count, not what main has since moved), else ``HEAD`` — with no ``origin/main`` a
-    branch's committed work cannot be seen, and the call says so rather than look clean.
+    Without ``origin/main`` there is no base that includes a branch's committed work, and
+    diffing ``HEAD`` would call that work "no change": the call refuses and asks for
+    ``--base`` instead of looking clean.
     """
     if requested:
         commit = _git(root, "rev-parse", "--verify", f"{requested}^{{commit}}").strip()
         if not commit:
             raise SystemExit(f"test-changed: --base {requested!r} is not a commit")
-        return commit, ""
-    if _git(root, "rev-parse", "--verify", "--quiet", "origin/main").strip():
-        return (_git(root, "merge-base", "origin/main", "HEAD").strip() or "origin/main"), ""
-    head = _git(root, "rev-parse", "HEAD").strip()
-    if not head:
-        raise SystemExit("test-changed: this checkout has no commits; pass --base <ref>")
-    return head, ("no origin/main here: diffing against HEAD, so work committed on a "
-                  "branch is not selected (pass --base <ref> to include it)")
+        return commit
+    if not _git(root, "rev-parse", "--verify", "--quiet", "origin/main").strip():
+        raise SystemExit("test-changed: no origin/main here, so work committed on a branch "
+                         "would not be selected; pass --base <ref> (for example --base HEAD "
+                         "for only uncommitted work)")
+    return _git(root, "merge-base", "origin/main", "HEAD").strip() or "origin/main"
 
 
 def _touched(root: Path, base: str) -> list[str]:
@@ -121,9 +131,11 @@ def _python(root: Path) -> str:
 
 def _product(root: Path) -> str | None:
     """The checkout's own Python package, when it has one. A worktree without its own
-    install must not import — or run — another checkout's product code."""
+    install must not import — or run — another checkout's product code. Keyed on the
+    package directory, never on one module: a diff that deletes or renames the selector
+    must be an error, not a fallback to the checkout the venv was installed from."""
     return (str(root / "refactory")
-            if (root / "refactory" / "refactory_dsh" / "test_selection.py").is_file() else None)
+            if (root / "refactory" / "refactory_dsh" / "__init__.py").is_file() else None)
 
 
 def _env(root: Path) -> dict[str, str]:
@@ -151,14 +163,28 @@ def _runnable(tests: list[str]) -> list[str]:
 
 
 def _fixture_readers(root: Path, names: list[str]) -> list[str]:
-    """The test files that name a changed fixture: data files are read by path, so no
-    import says which test reads one."""
-    changed = {Path(name).name for name in names if name.startswith(f"{SUITE}/fixtures/")}
+    """The modules under the suite that name a changed fixture: data files are read by
+    path, so no import says which test reads one.
+
+    Every module is scanned, not only the top-level tests: a corpus is read by a helper
+    (`structure_fuzz.py` names its directory), and a fixture deep in the tree is named by
+    its directory rather than its file. A path nobody names falls back to the whole suite,
+    because a fixture no text names is one nothing can be cleared of.
+    """
+    changed = [name for name in names if name.startswith(f"{SUITE}/fixtures/")]
     if not changed:
         return []
-    return [path.relative_to(root).as_posix()
-            for path in sorted((root / SUITE).glob("test_*.py"))
-            if any(filename in path.read_text(errors="replace") for filename in changed)]
+    needles: set[str] = set()
+    for name in changed:
+        needles.add(Path(name).name)
+        parts = Path(name).relative_to(f"{SUITE}/fixtures").parts
+        if len(parts) > 1:
+            needles.add(parts[0])
+    modules = sorted((root / SUITE).rglob("*.py"))
+    readers = [path.relative_to(root).as_posix() for path in modules
+               if path.name.startswith("test_")
+               and any(needle in path.read_text(errors="replace") for needle in needles)]
+    return readers or [SUITE]
 
 
 def _script_tests(root: Path, names: list[str]) -> list[str]:
@@ -173,13 +199,12 @@ def _script_tests(root: Path, names: list[str]) -> list[str]:
     return found
 
 
-def _docs_census(root: Path, names: list[str]) -> list[str]:
-    """Every document is read by the language census, so a changed document selects it."""
-    if not (root / DOCS_CENSUS).is_file():
-        return []
-    changed = any(name.endswith((".md", ".rst", ".txt")) or Path(name).name == "README.i18n.yaml"
-                  for name in names)
-    return [DOCS_CENSUS] if changed else []
+def _doc_tests(root: Path, names: list[str]) -> list[str]:
+    """A changed document selects the tests that read documents' content: their examples,
+    their commands, the generated reference and tutorial, and the language census."""
+    changed = any((name.endswith(DOC_SUFFIXES) or Path(name).name == "README.i18n.yaml")
+                  and not name.startswith(f"{SUITE}/fixtures/") for name in names)
+    return [test for test in DOC_TESTS if changed and (root / test).is_file()]
 
 
 def _selection(touched: list[str], root: Path) -> list[str] | None:
@@ -189,18 +214,30 @@ def _selection(touched: list[str], root: Path) -> list[str] | None:
     product = _product(root)
     if product and product not in sys.path:
         sys.path.insert(0, product)
-    from refactory_dsh import test_selection
+    try:
+        from refactory_dsh import test_selection
+    except ImportError as error:
+        raise SystemExit(f"test-changed: {product} has no importable "
+                         f"refactory_dsh.test_selection ({error}); nothing was selected") from error
+    if product:
+        imported = Path(test_selection.__file__).resolve()
+        if not imported.is_relative_to(Path(product).resolve()):
+            raise SystemExit(f"test-changed: imported {imported}, not {product}: this "
+                             "checkout's own package was not used, so its diff was not tested")
 
     check = f"{_python(root)} -m pytest {SUITE}"
-    # A fixture is data a test reads by path: it is not a source, so it does not select the
-    # structural tests; the test files that name it do (`_fixture_readers`).
-    sources = [name for name in touched if not name.startswith(f"{SUITE}/fixtures/")]
+    # Only the Python suite's own tree is this command's: a TypeScript source, a v1 module
+    # or a script is not a test here (the script and document helpers below say what is).
+    # A fixture is data a test reads by path: it is not a source either.
+    sources = [name for name in touched
+               if name.startswith(PYTHON_ROOT) and not name.startswith(f"{SUITE}/fixtures/")
+               and not name.startswith("refactory/docs/")]
     selected = test_selection.select(sources, root, check_command=check,
                                      files=test_selection.repository_files(root))
     tests = _runnable(selected.tests)
     for related in (_fixture_readers(root, touched), _script_tests(root, touched),
-                    _docs_census(root, touched)):
-        tests += [test for test in related if test not in tests and (root / test).is_file()]
+                    _doc_tests(root, touched)):
+        tests += [test for test in related if test not in tests and (root / test).exists()]
     return tests
 
 
@@ -231,7 +268,8 @@ def _note_for_packages(names: list[str]) -> str:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("--base", default="", help="the commit to diff against (default: the "
-                                                  "merge base with origin/main)")
+                                                  "merge base with origin/main; required "
+                                                  "where there is no origin/main)")
     parser.add_argument("--jobs", type=int, default=DEFAULT_JOBS,
                         help=f"pytest -n workers (default {DEFAULT_JOBS}; 1 runs in-process)")
     parser.add_argument("--list", action="store_true", help="print the selection, run nothing")
@@ -247,7 +285,7 @@ def main(argv: list[str] | None = None) -> int:
         raise SystemExit(f"test-changed: {root} has no {SUITE}")
     _in_venv(root)
 
-    base, note = _base(root, args.base)
+    base = _base(root, args.base)
     touched = _touched(root, base)
     selected = None if args.full else _selection(touched, root)
     if selected is None:
@@ -257,8 +295,6 @@ def main(argv: list[str] | None = None) -> int:
     command = _command(_python(root), max(1, args.jobs), tests, extra)
     packages = _note_for_packages(touched)
 
-    if note:
-        print(f"test-changed: {note}", file=sys.stderr)
     if args.list or args.json:
         record = {"base": base, "touched": touched, "selection": tests,
                   "suite_wide": selected is None,
