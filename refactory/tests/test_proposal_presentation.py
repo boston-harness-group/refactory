@@ -363,7 +363,7 @@ def test_sealed_code_step_description_when_tool_environment_exists(monkeypatch):
              {"id": "solve", "kind": "agent", "prompt_template": "x", "writes": ["solve.txt"]}]
     text = _render(node_states=nodes, code_nodes=True)
     assert "openpyxl 3.1.5" in text
-    assert "the packages that environment provides" not in text
+    assert "anything installed in that environment, including" in text
     assert '"sealed": true' in text or "'sealed': true" in text.lower() or "sealed" in text
     assert "seal is the boundary" in text
 
@@ -381,17 +381,27 @@ def test_no_sealed_code_step_description_without_tool_environment(monkeypatch):
     assert ALLOWED_IMPORTS_TEXT in text
 
 
-def test_no_sealed_code_step_description_without_code_nodes():
-    """When code_nodes is False, the sealed code step paragraph does not appear."""
+def test_no_sealed_code_step_description_without_code_nodes(monkeypatch):
+    """When code_nodes is False, the sealed code step paragraph does not appear, and the
+    environment line does not mention sealed code steps even when tools is True."""
+    from refactory_dsh.task import ToolEnvironment
+
+    env = ToolEnvironment(summary="python3 = Python 3.12 with scipy",
+                          python=lambda: "/usr/bin/python3",
+                          packages=(("scipy", "1.14.0"),))
+    monkeypatch.setattr("refactory_dsh.task.task_tool_environment",
+                        lambda ref: env if ref == "test_task" else None)
     nodes = [{"id": "items", "kind": "data", "task_ref": "test_task"},
              {"id": "solve", "kind": "agent", "prompt_template": "x", "writes": ["solve.txt"]}]
     text = _render(node_states=nodes, code_nodes=False)
     assert "seal is the boundary" not in text
     assert "**code op**" not in text
+    assert "sealed code step" not in text
 
 
 def test_tool_environment_lines_mention_sealed_code_steps(monkeypatch):
-    """tool_environment_lines mentions both tool steps and sealed code steps."""
+    """tool_environment_lines mentions sealed code steps only when code_nodes is True,
+    and tool steps only when tools is True."""
     from refactory_dsh.task import ToolEnvironment
 
     env = ToolEnvironment(summary="python3 = Python 3.12 with openpyxl 3.1.5",
@@ -399,10 +409,21 @@ def test_tool_environment_lines_mention_sealed_code_steps(monkeypatch):
     monkeypatch.setattr("refactory_dsh.task.task_tool_environment",
                         lambda ref: env if ref == "test_task" else None)
     nodes = [{"id": "items", "kind": "data", "task_ref": "test_task"}]
-    lines = base.tool_environment_lines(nodes)
-    assert len(lines) == 1
-    assert "sealed code step" in lines[0]
-    assert "openpyxl" in lines[0]
+    both = base.tool_environment_lines(nodes, tools=True, code_nodes=True)
+    assert len(both) == 1
+    assert "sealed code step" in both[0]
+    assert "tools" in both[0]
+    assert "openpyxl" in both[0]
+
+    tools_only = base.tool_environment_lines(nodes, tools=True, code_nodes=False)
+    assert len(tools_only) == 1
+    assert "sealed code step" not in tools_only[0]
+    assert "tools" in tools_only[0]
+
+    code_only = base.tool_environment_lines(nodes, tools=False, code_nodes=True)
+    assert len(code_only) == 1
+    assert "sealed code step" in code_only[0]
+    assert "step with `tools`" not in code_only[0]
 
 
 def test_sealed_code_step_description_fallback_without_packages(monkeypatch):

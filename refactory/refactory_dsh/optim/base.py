@@ -1526,7 +1526,8 @@ class ProposalContext:
             *operation_lines(self.catalogue, self.node_states, self.edges,
                              protected=self.protected,
                              knob_values={k.get("name"): k.get("value") for k in self.knobs},
-                             step_routes=self.step_routes, tools=self.new_node_tools),
+                             step_routes=self.step_routes, tools=self.new_node_tools,
+                             code_nodes=self.code_nodes),
             "",
             *composition_section(self.catalogue, self.node_states, self.edges,
                                  code_nodes=self.code_nodes,
@@ -1606,7 +1607,7 @@ def operation_lines(catalogue: Sequence[Mapping[str, Any]],
                     edges: Sequence[dict[str, Any]] = (), *, protected: Sequence[str] = (),
                     knob_values: Mapping[str, Any] | None = None,
                     step_routes: Mapping[str, Sequence[str]] | None = None,
-                    tools: bool = True) -> list[str]:
+                    tools: bool = True, code_nodes: bool = False) -> list[str]:
     """"The operations you may use", each said once: the written-out operations in a
     table (fields and description), then the core operators, one line and one example each
     (`operator_lines`, `nn.core_ops.OPERATORS`). Without ``tools`` (the run offers no tool
@@ -1619,7 +1620,7 @@ def operation_lines(catalogue: Sequence[Mapping[str, Any]],
                      for c in written])] if written else []
     return lines + operator_lines(catalogue, node_states, edges, protected=protected,
                                   knob_values=knob_values, step_routes=step_routes,
-                                  tools=tools)
+                                  tools=tools, code_nodes=code_nodes)
 
 
 def _settings_lines(knobs: Sequence[dict[str, Any]], text_chars: int | None = None,
@@ -2025,11 +2026,11 @@ def composition_section(catalogue: Sequence[dict[str, Any]], node_states: Sequen
                 importable = "; ".join(sealed_imports)
                 lines.append(
                     "  With `\"sealed\": true` on the insert (or loop/route), the code step "
-                    "runs in the Task's tool environment instead: it may import "
-                    f"{importable} (with no import "
-                    f"allowlist; the seal is the boundary), up to {snippet.SEALED_WALL_S} s "
-                    f"and {snippet.SEALED_MEMORY_MB} MB. It must still define `main(inp)` "
-                    "and parse. "
+                    "runs in the Task's tool environment instead: it may import anything "
+                    f"installed in that environment, including {importable}; there is no "
+                    f"import allowlist (the seal is the boundary). Up to "
+                    f"{snippet.SEALED_WALL_S} s and {snippet.SEALED_MEMORY_MB} MB. It must "
+                    "still define `main(inp)` and parse. "
                     "Without `\"sealed\": true` a code step imports only the standard "
                     "library.")
             else:
@@ -2623,7 +2624,7 @@ def operator_lines(catalogue: Sequence[dict[str, Any]], node_states: Sequence[di
                    edges: Sequence[dict[str, Any]], *, protected: Sequence[str] = (),
                    knob_values: Mapping[str, Any] | None = None,
                    step_routes: Mapping[str, Sequence[str]] | None = None,
-                   tools: bool = True) -> list[str]:
+                   tools: bool = True, code_nodes: bool = False) -> list[str]:
     """The structural operators: what the system wires for every one, then each core operator
     the run permits in one line -- its fields and its catalogue description (its
     `nn.core_ops.OPERATORS` line, and a written-out form where it has one) -- with one
@@ -2659,12 +2660,13 @@ def operator_lines(catalogue: Sequence[dict[str, Any]], node_states: Sequence[di
                      f"{description} E.g. " + json.dumps(core_ops.example(name, own)))
     if step_routes:
         lines.append(core_ops.route_field_line(step_routes))
-    if tools:
-        lines += tool_environment_lines(node_states)
+    if tools or code_nodes:
+        lines += tool_environment_lines(node_states, tools=tools, code_nodes=code_nodes)
     return lines
 
 
-def tool_environment_lines(node_states: Sequence[Mapping[str, Any]]) -> list[str]:
+def tool_environment_lines(node_states: Sequence[Mapping[str, Any]], *,
+                           tools: bool = True, code_nodes: bool = False) -> list[str]:
     """What a sealed step's commands run with in each per-item part whose Task declares
     it (`task.Task.tool_environment`), in the Task's own words: a fact, said only where the
     run offers a tool step or a sealed code step. Nothing for a Task that declares none
@@ -2680,8 +2682,13 @@ def tool_environment_lines(node_states: Sequence[Mapping[str, Any]]) -> list[str
         except (TaskError, ImportError):
             continue
         if environment is not None:
-            line = (f"- in the per-item part `{node.get('id')}`, a step with `tools` or a "
-                    f"sealed code step (`\"sealed\": true`) runs with {environment.summary}")
+            kinds = []
+            if tools:
+                kinds.append("a step with `tools`")
+            if code_nodes:
+                kinds.append("a sealed code step (`\"sealed\": true`)")
+            line = (f"- in the per-item part `{node.get('id')}`, "
+                    f"{' or '.join(kinds)} runs with {environment.summary}")
             if line not in lines:
                 lines.append(line)
     return lines
