@@ -341,6 +341,7 @@
   "knob_values": {
     "check_timeout_s": 180.0,
     "check_attempt_cap": 8.0,
+    "fix_rounds": 1.0,
     "name": "",
     "brief": "",
     "check": "",
@@ -379,6 +380,17 @@
       "values": [],
       "frozen": false,
       "description": "hard cap on total check attempts including convergence grants; 0 or a value at or below repair_attempts disables the extension",
+      "required": false
+    },
+    "fix_rounds": {
+      "default": 1,
+      "kind": "int",
+      "lo": 0,
+      "hi": 10,
+      "enum": [],
+      "values": [],
+      "frozen": false,
+      "description": "how many fix rounds the builder gets after the first build; every gate's send-back counts against this shared budget, and the run delivers a draft when it is spent",
       "required": false
     },
     "name": {

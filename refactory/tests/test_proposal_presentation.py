@@ -349,6 +349,184 @@ def test_the_pipeline_ask_names_code_steps_when_the_run_allows_them(code_nodes):
     assert "loop or parallelise steps" in text
 
 
+def test_sealed_code_step_description_when_tool_environment_exists(monkeypatch):
+    """When code_nodes is True and a data node's Task declares a tool environment with
+    packages, the request names the exact importable packages by name and version."""
+    from refactory_dsh.task import ToolEnvironment
+
+    env = ToolEnvironment(summary="python3 (and python) = Python 3.12 with openpyxl 3.1.5",
+                          python=lambda: "/usr/bin/python3",
+                          packages=(("openpyxl", "3.1.5"),))
+    monkeypatch.setattr("refactory_dsh.task.task_tool_environment",
+                        lambda ref: env if ref == "test_task" else None)
+    nodes = [{"id": "items", "kind": "data", "task_ref": "test_task"},
+             {"id": "solve", "kind": "agent", "prompt_template": "x", "writes": ["solve.txt"]}]
+    text = _render(node_states=nodes, code_nodes=True)
+    assert "openpyxl 3.1.5" in text
+    assert "anything installed in that environment, including" in text
+    assert '"sealed": true' in text or "'sealed': true" in text.lower() or "sealed" in text
+    assert "seal is the boundary" in text
+
+
+def test_no_sealed_code_step_description_without_tool_environment(monkeypatch):
+    """Without a tool environment, code ops are described with the standard-library-only
+    limits; sealed code steps are not mentioned."""
+    monkeypatch.setattr("refactory_dsh.task.task_tool_environment",
+                        lambda ref: None)
+    nodes = [{"id": "items", "kind": "data", "task_ref": "test_task"},
+             {"id": "solve", "kind": "agent", "prompt_template": "x", "writes": ["solve.txt"]}]
+    text = _render(node_states=nodes, code_nodes=True)
+    assert "seal is the boundary" not in text
+    from refactory_dsh.snippet import ALLOWED_IMPORTS_TEXT
+    assert ALLOWED_IMPORTS_TEXT in text
+
+
+def test_no_sealed_code_step_description_without_code_nodes(monkeypatch):
+    """When code_nodes is False, the sealed code step paragraph does not appear, and the
+    environment line does not mention sealed code steps even when tools is True."""
+    from refactory_dsh.task import ToolEnvironment
+
+    env = ToolEnvironment(summary="python3 = Python 3.12 with scipy",
+                          python=lambda: "/usr/bin/python3",
+                          packages=(("scipy", "1.14.0"),))
+    monkeypatch.setattr("refactory_dsh.task.task_tool_environment",
+                        lambda ref: env if ref == "test_task" else None)
+    nodes = [{"id": "items", "kind": "data", "task_ref": "test_task"},
+             {"id": "solve", "kind": "agent", "prompt_template": "x", "writes": ["solve.txt"]}]
+    text = _render(node_states=nodes, code_nodes=False)
+    assert "seal is the boundary" not in text
+    assert "**code op**" not in text
+    assert "sealed code step" not in text
+
+
+def test_tool_environment_lines_mention_sealed_code_steps(monkeypatch):
+    """tool_environment_lines mentions sealed code steps only when code_nodes is True,
+    and tool steps only when tools is True."""
+    from refactory_dsh.task import ToolEnvironment
+
+    env = ToolEnvironment(summary="python3 = Python 3.12 with openpyxl 3.1.5",
+                          python=lambda: "/usr/bin/python3")
+    monkeypatch.setattr("refactory_dsh.task.task_tool_environment",
+                        lambda ref: env if ref == "test_task" else None)
+    nodes = [{"id": "items", "kind": "data", "task_ref": "test_task"}]
+    both = base.tool_environment_lines(nodes, tools=True, code_nodes=True)
+    assert len(both) == 1
+    assert "sealed code step" in both[0]
+    assert "tools" in both[0]
+    assert "openpyxl" in both[0]
+
+    tools_only = base.tool_environment_lines(nodes, tools=True, code_nodes=False)
+    assert len(tools_only) == 1
+    assert "sealed code step" not in tools_only[0]
+    assert "tools" in tools_only[0]
+
+    code_only = base.tool_environment_lines(nodes, tools=False, code_nodes=True)
+    assert len(code_only) == 1
+    assert "sealed code step" in code_only[0]
+    assert "step with `tools`" not in code_only[0]
+
+
+def test_sealed_code_step_description_fallback_without_packages(monkeypatch):
+    """When the environment declares no packages, the sealed paragraph falls back to its
+    summary string and says 'the packages that environment provides'."""
+    from refactory_dsh.task import ToolEnvironment
+
+    env = ToolEnvironment(summary="python3 = Python 3.12 with scipy 1.14",
+                          python=lambda: "/usr/bin/python3")
+    monkeypatch.setattr("refactory_dsh.task.task_tool_environment",
+                        lambda ref: env if ref == "test_task" else None)
+    nodes = [{"id": "items", "kind": "data", "task_ref": "test_task"},
+             {"id": "solve", "kind": "agent", "prompt_template": "x", "writes": ["solve.txt"]}]
+    text = _render(node_states=nodes, code_nodes=True)
+    assert "the packages that environment provides" in text
+    assert "scipy 1.14" in text
+
+
+def test_sealed_code_step_description_with_different_package(monkeypatch):
+    """The request text is driven only by the declared ToolEnvironment: a toy Task with
+    a different package (not openpyxl or spreadsheet-related) is named in the request."""
+    from refactory_dsh.task import ToolEnvironment
+
+    env = ToolEnvironment(summary="python3 = Python 3.12",
+                          python=lambda: "/usr/bin/python3",
+                          packages=(("scipy", "1.14.0"), ("sklearn", "1.5.2")))
+    monkeypatch.setattr("refactory_dsh.task.task_tool_environment",
+                        lambda ref: env if ref == "test_task" else None)
+    nodes = [{"id": "items", "kind": "data", "task_ref": "test_task"},
+             {"id": "solve", "kind": "agent", "prompt_template": "x", "writes": ["solve.txt"]}]
+    text = _render(node_states=nodes, code_nodes=True)
+    assert "scipy 1.14.0" in text
+    assert "sklearn 1.5.2" in text
+    assert "seal is the boundary" in text
+    assert "openpyxl" not in text
+    assert "spreadsheet" not in text.lower()
+
+
+def test_sealed_composition_example_when_tool_environment_available(monkeypatch):
+    """The composition example for code ops shows ``"sealed": true`` when a tool environment
+    with packages is declared, so the example matches the sealed description."""
+    import json
+
+    from refactory_dsh import nn
+    from refactory_dsh.nn import edits as nn_edits
+    from refactory_dsh.task import ToolEnvironment
+
+    env = ToolEnvironment(summary="python3 = Python 3.12",
+                          python=lambda: "/usr/bin/python3",
+                          packages=(("numpy", "2.1.0"),))
+    monkeypatch.setattr("refactory_dsh.task.task_tool_environment",
+                        lambda ref: env if ref == "test_task" else None)
+    g = nn.Graph()
+    g.add(nn.Node("items", "data", task_ref="test_task",
+                  subgraph_entry="prep", subgraph_exit="grade"))
+    g.add(nn.Node("prep", "agent", prompt_template="prepare", writes=("prep.txt",)))
+    g.add(nn.Node("solve", "agent", prompt_template="solve {{prep_code}}",
+                  reads=("prep.txt",), writes=("solve.txt",)))
+    g.add(nn.Node("grade", "agent", prompt_template="grade", reads=("solve.txt",),
+                  writes=("grade.txt",)))
+    g.connect("items", "prep")
+    g.connect("prep", "solve")
+    g.connect("solve", "grade")
+    state = g.to_state()
+    nodes = list(state["nodes"].values())
+    edges = state["edges"]
+    kv = {f'{n["id"]}__task': n.get("prompt_template", "")
+          for n in nodes if n.get("kind") != "data"}
+    examples, _ = base.composition_examples(nn_edits.catalogue("broad"), nodes, edges,
+                                            code_nodes=True, tools=False, knob_values=kv)
+    code_bundle = next(b for shape, b in examples if "code op" in shape)
+    assert any(e.get("sealed") is True for e in code_bundle)
+
+
+def test_unsealed_composition_example_without_tool_environment(monkeypatch):
+    """Without a tool environment, the code-op composition example omits ``"sealed"``."""
+    from refactory_dsh import nn
+    from refactory_dsh.nn import edits as nn_edits
+
+    monkeypatch.setattr("refactory_dsh.task.task_tool_environment",
+                        lambda ref: None)
+    g = nn.Graph()
+    g.add(nn.Node("items", "data", task_ref="test_task",
+                  subgraph_entry="prep", subgraph_exit="grade"))
+    g.add(nn.Node("prep", "agent", prompt_template="prepare", writes=("prep.txt",)))
+    g.add(nn.Node("solve", "agent", prompt_template="solve {{prep_code}}",
+                  reads=("prep.txt",), writes=("solve.txt",)))
+    g.add(nn.Node("grade", "agent", prompt_template="grade", reads=("solve.txt",),
+                  writes=("grade.txt",)))
+    g.connect("items", "prep")
+    g.connect("prep", "solve")
+    g.connect("solve", "grade")
+    state = g.to_state()
+    nodes = list(state["nodes"].values())
+    edges = state["edges"]
+    kv = {f'{n["id"]}__task': n.get("prompt_template", "")
+          for n in nodes if n.get("kind") != "data"}
+    examples, _ = base.composition_examples(nn_edits.catalogue("broad"), nodes, edges,
+                                            code_nodes=True, tools=False, knob_values=kv)
+    code_bundle = next(b for shape, b in examples if "code op" in shape)
+    assert not any(e.get("sealed") for e in code_bundle)
+
+
 def test_the_available_table_fits_its_limit_on_a_large_graph():
     """A long pipeline's table is capped: cells name fewer facts and say how many more,
     and rows are left out with a note before the section passes its limit. The advice

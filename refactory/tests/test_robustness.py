@@ -1234,6 +1234,57 @@ def test_fast_repair_rolling_convergence_hits_cap(tmp_path):
         fast_repair(ctx, [feedback], kind="check")
 
 
+def test_fast_repair_blocks_when_fix_round_spent(tmp_path):
+    """fast_ops._repair raises when the fix-round budget is spent, even if
+    repair_attempts has room."""
+    from refactory_dsh import finish
+
+    run_dir = tmp_path / "run"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    ctx = _Ctx(run_dir, facts={"finish_rounds": 1},
+               knobs={"repair_attempts": 3, "fix_rounds": 1})
+    with pytest.raises(ValueError, match=finish.FIX_ROUND_SPENT):
+        fast_repair(ctx, ["FAILED tests/test_a.py::test_a"], kind="check")
+
+
+def test_fast_repair_counts_fix_round(tmp_path):
+    """fast_ops._repair counts a reloop against the fix-round budget."""
+    run_dir = tmp_path / "run"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    ctx = _Ctx(run_dir, facts={},
+               knobs={"repair_attempts": 3, "fix_rounds": 2})
+    result = fast_repair(ctx, ["FAILED tests/test_a.py::test_a"], kind="check")
+    assert str(result) == "reloop"
+    assert ctx.facts["finish_rounds"] == 1
+    result2 = fast_repair(ctx, ["FAILED tests/test_a.py::test_a"], kind="check")
+    assert str(result2) == "reloop"
+    assert ctx.facts["finish_rounds"] == 2
+    with pytest.raises(ValueError, match="fix round budget spent"):
+        fast_repair(ctx, ["FAILED tests/test_a.py::test_a"], kind="check")
+
+
+def test_fast_repair_convergence_blocked_by_fix_round(tmp_path):
+    """fast_ops._repair does not grant convergence when the fix-round budget is spent."""
+    from refactory_dsh import finish
+
+    run_dir = tmp_path / "run"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    ctx = _Ctx(run_dir, facts={
+        "check": "python -m pytest -q tests/",
+        "check_failures_history": [
+            ["tests/test_a.py::test_a", "tests/test_b.py::test_b"],
+            ["tests/test_a.py::test_a"],
+        ],
+        "check_blocker_history": [None, None],
+        "repairs_used": 1,
+        "check_repairs_used": 1,
+        "finish_rounds": 1,
+    }, knobs={"repair_attempts": 1, "check_attempt_cap": 8, "fix_rounds": 1})
+    with pytest.raises(ValueError):
+        fast_repair(ctx, ["FAILED tests/test_a.py::test_a\n= 1 failed ="], kind="check")
+    assert ctx.facts.get("convergence_granted") is not True
+
+
 # ── Correction 1: robustness_notes with "credentials" must not stop the run ──
 
 

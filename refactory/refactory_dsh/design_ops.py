@@ -2229,10 +2229,12 @@ def prepare_check(ctx: Any) -> Any:
         verdict = _prepare_attempt(ctx)
         if str(verdict) == "reloop" and not repo_change.refused(ctx):
             # A send-back from the self-check is a finish run's round (`finish.allows_round`);
-            # a refused emission's retry is not, as nothing was applied.
-            if not finish.allows_round(ctx):
-                raise BuildLoopStop(f"{finish.ROUND_SPENT}: {getattr(verdict, 'reason', '') or verdict}")
-            verdict = finish.sent_back(ctx, verdict)
+            # a refused emission's retry is not, as nothing was applied.  On a non-finish run
+            # self-check fix-ups use the `self_check_fixups` counter, not the fix-round budget.
+            if finish.fact(ctx) is not None:
+                if not finish.allows_round(ctx):
+                    raise BuildLoopStop(f"{finish.round_spent_reason(ctx)}: {getattr(verdict, 'reason', '') or verdict}")
+                verdict = finish.sent_back(ctx, verdict)
         return verdict
     except BuildLoopStop as stop:
         if _draft_for_stop(ctx, stop, check_failing=True) is None:
@@ -2964,7 +2966,7 @@ def _gate_check_early_asks(ctx: Any) -> Any:
     if count >= _combined_sendback_bound(ctx) or not finish.allows_round(ctx):
         stop = BuildLoopStop(
             f"asks not built after {count} send-back(s)"
-            + ("" if finish.allows_round(ctx) else f" ({finish.ROUND_SPENT})"))
+            + ("" if finish.allows_round(ctx) else f" ({finish.round_spent_reason(ctx)})"))
         if _draft_for_stop(ctx, stop, check_failing=False) is not None:
             return "draft"
         raise stop
@@ -3070,7 +3072,7 @@ def _gate_check_combined_sendback(ctx: Any, check_reason: str) -> Any:
     if count >= _combined_sendback_bound(ctx) or not finish.allows_round(ctx):
         stop = BuildLoopStop(
             f"check failures exhausted after {count} combined send-back(s)"
-            + ("" if finish.allows_round(ctx) else f" ({finish.ROUND_SPENT})"))
+            + ("" if finish.allows_round(ctx) else f" ({finish.round_spent_reason(ctx)})"))
         if _draft_for_stop(ctx, stop, check_failing=True) is not None:
             return "draft"
         raise stop
@@ -3842,7 +3844,7 @@ def _send_back(ctx: Any, gate_file: str, fact: str, reason: str, *,
     ctx.set_fact(fact, reason)
     try:
         if not finish.allows_round(ctx):
-            raise BuildLoopStop(f"{finish.ROUND_SPENT}: {reason}")
+            raise BuildLoopStop(f"{finish.round_spent_reason(ctx)}: {reason}")
         return finish.sent_back(ctx, repair(ctx, [reason], kind="review"))
     except BuildLoopStop as stop:
         # The check passed on this commit and nothing rewrote its receipt since.

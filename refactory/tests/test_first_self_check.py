@@ -589,7 +589,7 @@ def test_the_check_cap_delivers_a_draft_when_the_attempt_keeps_failing(tmp_path,
     emits = [render({"tool.py": f"VERSION = {10 + n}\n"}) for n in range(12)]
     model = FakeModel(T._answers(*emits))
     result = T._design(tmp_path / "run", model, T._target(tmp_path / "repo", PINNED),
-                       T._mode(check_attempts=3, self_check_fixups=1))
+                       T._mode(check_attempts=3, self_check_fixups=1, fix_rounds=10))
     assert result.exit_ok, result.error
     assert result.facts["draft_delivery"]["reason"] == "check attempts exhausted after 3 check failure(s)"
 
