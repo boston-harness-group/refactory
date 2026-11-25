@@ -630,9 +630,22 @@ class Run:
         ]
 
     def has_part(self, part: str) -> bool:
-        """Whether the parts manifest declares ``part``. Its ids stay withheld."""
+        """Whether the parts manifest declares ``part`` with at least one item."""
+        manifest = getattr(self._loop, '_parts_manifest', None)  # noqa: SLF001
+        return manifest is not None and bool(manifest.get(part))
+
+    def part_declared(self, part: str) -> bool:
+        """Whether the parts manifest declares ``part`` at all, even if its list is empty."""
         manifest = getattr(self._loop, '_parts_manifest', None)  # noqa: SLF001
         return manifest is not None and part in manifest
+
+    def empty_part_reason(self, part: str) -> str:
+        """Why ``part`` has no items: declared-but-empty vs absent; empty when it has items."""
+        if self.has_part(part):
+            return ""
+        if self.part_declared(part):
+            return f"no {part} items: {part} scoring skipped"
+        return f"the parts manifest has no '{part}' part"
 
     def keep(self, candidate: Candidate) -> Candidate:
         """Add a candidate to the search. A strategy that evaluates must also keep.

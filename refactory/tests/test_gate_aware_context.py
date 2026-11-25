@@ -121,8 +121,8 @@ def test_the_epoch_line_says_what_the_gate_decided(tmp_path, monkeypatch):
     call it an improvement."""
     loop, _ = _run(tmp_path, monkeypatch, [[(5, 7)], [(7, 6)], []], val_gate=True)
     lines = _epoch_lines(loop)
-    assert lines[1].startswith("epoch 2 done · validation gate kept 1, rejected 0")
-    assert lines[2].startswith("epoch 3 done · validation gate kept 0, rejected 1")
+    assert "validation gate kept 1, rejected 0" in lines[1]
+    assert "validation gate kept 0, rejected 1" in lines[2]
     assert "val best 0.130 (current 0.130)" in lines[2]  # 0.1234 + 7/1000
     assert "train best" in lines[2] and "improved" not in lines[2]
 

@@ -830,6 +830,32 @@ def test_val_gate_without_a_test_part_records_why_it_skipped(tmp_path, monkeypat
     assert tests == []
 
 
+def test_empty_test_part_skips_test_scoring_cleanly(tmp_path, monkeypatch):
+    """A manifest with ``"test": []`` ends cleanly: exit_ok, no test scoring."""
+    tests = _record_test_rollouts(monkeypatch)
+    # Write a parts manifest with an empty test list.
+    parts_path = tmp_path / "empty-test" / "parts.json"
+    parts_path.parent.mkdir(parents=True, exist_ok=True)
+    parts_path.write_text(json.dumps({"train": TRAIN_IDS, "val": ["v1", "v2"], "test": []}))
+    _, _, report = _gated(tmp_path, monkeypatch, [[(5, 7)], []], epochs=2,
+                          parts_manifest=str(parts_path))
+    assert report["exit_ok"] is True, report.get("error")
+    figures = report["strategy_report"]
+    assert figures["test_eval"] == "skipped"
+    assert figures["test_eval_reason"] == "no test items: test scoring skipped"
+    assert tests == [], "no test rollouts should have run"
+
+
+def test_nonempty_test_part_still_scores(tmp_path, monkeypatch):
+    """A non-empty test part still runs FinalEvaluation (guard against over-skipping)."""
+    tests = _record_test_rollouts(monkeypatch)
+    _, _, report = _gated(tmp_path, monkeypatch, [[(5, 7)], []], epochs=2,
+                          parts_manifest=str(_write_parts(tmp_path / "with-test", test=True)))
+    figures = report["strategy_report"]
+    assert figures["test_eval"] != "skipped", "test scoring should have run"
+    assert len(tests) > 0, "at least one test rollout should have run"
+
+
 def test_a_resumed_run_continues_its_final_evaluation(tmp_path, monkeypatch):
     """A run that dies after the final selection resumes into the test phases
     without repeating it."""

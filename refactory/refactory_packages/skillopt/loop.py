@@ -300,7 +300,7 @@ class SkillOptLoop(OuterLoop):
         )
         # A run that cannot do what it was told is refused before it spends.
         self.proposer.check_knobs(run.seed().state)
-        if self.eval_test and not run.has_part("test"):
+        if self.eval_test and not run.part_declared("test"):
             raise ValueError(
                 "skillopt: eval_test=true needs a parts manifest with a 'test' part; "
                 "give the run one, or set eval_test=false"
@@ -606,7 +606,7 @@ class SkillOptLoop(OuterLoop):
         if self.eval_test is False:
             return "the eval_test strategy option is false"
         if not run.has_part("test"):
-            return "the parts manifest has no 'test' part"
+            return run.empty_part_reason("test")
         return ""
 
     def report(self, run: Run) -> dict[str, Any]:

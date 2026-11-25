@@ -76,3 +76,52 @@ def test_a_child_output_line_is_only_printed_when_verbose():
     events.Printer(loud, verbose=True).output_line("node says something\n")
     assert quiet.getvalue() == ""
     assert "node says something" in loud.getvalue()
+
+
+def test_scheduler_line_shows_proposed_and_accepted():
+    """The scheduler line says what was proposed this round and what the gate decided."""
+    line = events.render({
+        "step": "scheduler", "epoch": 2, "best": 0.5, "bound": "",
+        "proposed": 3, "accepted": 2,
+        "gate": {"kept": 1, "rejected": 1},
+        "val_best": 0.7, "val_current": 0.6,
+    })
+    assert line is not None
+    assert "proposed 3, accepted 2" in line
+    assert "kept 1, rejected 1" in line
+
+
+def test_scheduler_checkpoint_line_shows_proposed_and_accepted():
+    """Under checkpoint selection, proposed/accepted appear alongside applied/not applied."""
+    line = events.render({
+        "step": "scheduler", "epoch": 1, "best": 0.5, "bound": "",
+        "proposed": 5, "accepted": 4,
+        "gate": {"kept": 2, "rejected": 0, "selection": "checkpoint"},
+        "val_best": 0.8, "val_current": 0.7,
+    })
+    assert line is not None
+    assert "proposed 5, accepted 4" in line
+    assert "applied 2, not applied 0" in line
+
+
+def test_scheduler_line_without_proposed_still_works():
+    """Old records without proposed/accepted still render (backward compat)."""
+    line = events.render({
+        "step": "scheduler", "epoch": 1, "best": 0.5, "bound": "",
+        "gate": {"kept": 1, "rejected": 0, "selection": "checkpoint"},
+        "val_best": 0.6, "val_current": 0.6,
+    })
+    assert line is not None
+    assert "applied 1, not applied 0" in line
+    assert "proposed" not in line
+
+
+def test_scheduler_no_gate_shows_proposed():
+    """Without a gate, proposed/accepted appear alongside best/mean."""
+    line = events.render({
+        "step": "scheduler", "epoch": 1, "best": 0.5, "mean": 0.4,
+        "proposed": 2, "accepted": 2, "improved": True, "bound": "no",
+    })
+    assert line is not None
+    assert "proposed 2, accepted 2" in line
+    assert "best 0.500" in line

@@ -740,3 +740,15 @@ def _frontier_outputs() -> list[dict[str, Any]]:
 def test_frontier_functions_give_the_recorded_draws():
     recorded = json.loads(FIDELITY_FIXTURE.read_text())["frontier_functions"]
     assert json.loads(json.dumps(_frontier_outputs())) == recorded
+
+
+@pytest.mark.parametrize("val_items, fragment", [
+    ([], "an empty val part"),
+    (None, "no 'val' part in the parts manifest"),
+])
+def test_pareto_set_val_with_no_val_items_names_the_cause(tmp_path, val_items, fragment):
+    parts: dict[str, list[str]] = {"train": gepa_ops.TRAIN_IDS}
+    if val_items is not None:
+        parts["val"] = val_items
+    with pytest.raises(ValueError, match=fragment):
+        _run(tmp_path, parts=parts, max_rollouts=40, options={"pareto_set": "val"})

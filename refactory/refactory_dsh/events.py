@@ -146,24 +146,36 @@ def render(record: dict[str, Any], *, verbose: bool = False) -> str | None:
         return line
     if step == "scheduler":
         gate = record.get("gate")
+        proposed = record.get("proposed")
+        accepted = record.get("accepted")
+        proposals = (f"proposed {proposed}, accepted {accepted}"
+                     if proposed is not None else "")
         if isinstance(gate, dict) and gate.get("selection") == "checkpoint":
+            gate_part = (f"applied {gate.get('kept', 0)}, "
+                         f"not applied {gate.get('rejected', 0)}")
+            parts = [p for p in (proposals, gate_part) if p]
             return (
-                f"epoch {record.get('epoch', epoch)} done · applied {gate.get('kept', 0)}, "
-                f"not applied {gate.get('rejected', 0)} · val best "
+                f"epoch {record.get('epoch', epoch)} done · "
+                + " · ".join(parts)
+                + f" · val best "
                 f"{_score(record.get('val_best'))} (current {_score(record.get('val_current'))}) · "
                 f"train best {_score(record.get('best'))} · bound {record.get('bound') or 'no'}"
             )
         if isinstance(gate, dict):
-            # With the validation gate: what it decided this epoch and its val scores;
-            # the train scores are labelled as such, and train "improved" is not shown.
+            gate_part = (f"validation gate kept "
+                         f"{gate.get('kept', 0)}, rejected {gate.get('rejected', 0)}")
+            parts = [p for p in (proposals, gate_part) if p]
             return (
-                f"epoch {record.get('epoch', epoch)} done · validation gate kept "
-                f"{gate.get('kept', 0)}, rejected {gate.get('rejected', 0)} · val best "
+                f"epoch {record.get('epoch', epoch)} done · "
+                + " · ".join(parts)
+                + f" · val best "
                 f"{_score(record.get('val_best'))} (current {_score(record.get('val_current'))}) · "
                 f"train best {_score(record.get('best'))} · bound {record.get('bound') or 'no'}"
             )
         return (
-            f"epoch {record.get('epoch', epoch)} done · best {_score(record.get('best'))} · "
+            f"epoch {record.get('epoch', epoch)} done · "
+            + (f"{proposals} · " if proposals else "")
+            + f"best {_score(record.get('best'))} · "
             f"mean {_score(record.get('mean'))} · improved {record.get('improved', '?')} · "
             f"bound {record.get('bound') or 'no'}"
         )

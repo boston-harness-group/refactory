@@ -3450,6 +3450,16 @@ def _with_test_part(tmp_path: Path) -> dict[str, Any]:
     return {"parts_manifest": str(_write_parts(tmp_path / "with_test", test=True))}
 
 
+def _with_empty_test_part(tmp_path: Path) -> dict[str, Any]:
+    """Config overrides for a run whose parts manifest declares ``test: []``."""
+    root = tmp_path / "empty_test"
+    manifest = {"train": TRAIN_IDS, "val": VAL_IDS, "test": []}
+    parts_path = root / "parts.json"
+    parts_path.parent.mkdir(parents=True, exist_ok=True)
+    parts_path.write_text(json.dumps(manifest))
+    return {"parts_manifest": str(parts_path)}
+
+
 def _spy_part_evaluations(monkeypatch) -> list[tuple[str, str, int | None, str]]:  # type: ignore[no-untyped-def]
     """Record (part, candidate id, seed, skill) for every val/test Run.evaluate/evaluate_many call."""
     from refactory_dsh.outerloop import Run
@@ -3638,6 +3648,7 @@ def test_post_training_val_check_promotes_a_better_final_skill(tmp_path, monkeyp
 @pytest.mark.parametrize("option, manifest_test, reason", [
     (False, True, "the eval_test strategy option is false"),
     (None, False, "the parts manifest has no 'test' part"),
+    (None, "empty", "no test items: test scoring skipped"),
 ])
 def test_post_training_evaluation_off_says_why(tmp_path, monkeypatch, option, manifest_test, reason):
     """``eval_test=false``, or no test part, skips the post-training evaluation
@@ -3647,8 +3658,14 @@ def test_post_training_evaluation_off_says_why(tmp_path, monkeypatch, option, ma
     options: dict[str, Any] = {"max_epochs": 1}
     if option is not None:
         options["eval_test"] = option
+    if manifest_test == "empty":
+        overrides = _with_empty_test_part(tmp_path)
+    elif manifest_test:
+        overrides = _with_test_part(tmp_path)
+    else:
+        overrides = None
     _, report = _run_loop(
-        tmp_path, config_overrides=_with_test_part(tmp_path) if manifest_test else None,
+        tmp_path, config_overrides=overrides,
         skillopt_options=options,
     )
     assert not [c for c in calls if c[0] == "test"]
