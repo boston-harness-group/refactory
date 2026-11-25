@@ -40,8 +40,8 @@ def _repo(tmp_path: Path, files: dict[str, str], *, failing: bool = False) -> Pa
     tree = {
         "pyproject.toml": "",
         "refactory/pyproject.toml": "",
-        "refactory/refactory_dsh/alpha.py": "A = 1\n",
-        "refactory/tests/test_alpha.py": ("from refactory_dsh.alpha import A\n\n\n"
+        "refactory/alpha.py": "A = 1\n",
+        "refactory/tests/test_alpha.py": ("from alpha import A\n\n\n"
                                           "def test_alpha():\n    assert A == 1\n"),
         "refactory/tests/test_structural.py": "def test_structural():\n    pass\n",
         "docs/guide.md": "# A guide\n",
@@ -87,10 +87,10 @@ def test_its_selection_is_design_modes_self_check_selection(tmp_path):
     """The command does not select for itself: for the same diff it names what
     `test_selection.select` names, which is the function the self-check calls."""
     repo = _repo(tmp_path, {})
-    (repo / "refactory" / "refactory_dsh" / "alpha.py").write_text("A = 2\n")
+    (repo / "refactory" / "alpha.py").write_text("A = 2\n")
     record = _json(repo)
     expected = test_selection.select(
-        ["refactory/refactory_dsh/alpha.py"], repo,
+        ["refactory/alpha.py"], repo,
         check_command=f"{sys.executable} -m pytest {SUITE}",
         files=test_selection.repository_files(repo))
     assert record["selection"] == expected.tests
@@ -107,7 +107,7 @@ def test_a_typescript_spec_is_never_handed_to_pytest(tmp_path):
     alone = _json(repo)
     assert alone["selection"] == [] and "pnpm test" in _run(repo).stdout
 
-    (repo / "refactory/refactory_dsh/alpha.py").write_text("A = 2\n")
+    (repo / "refactory/alpha.py").write_text("A = 2\n")
     mixed = _json(repo)
     assert "refactory/tests/test_alpha.py" in mixed["selection"]
     assert not [test for test in mixed["selection"] if test.endswith(".ts")]
@@ -130,10 +130,10 @@ def test_a_non_ascii_path_is_not_quoted_away(tmp_path):
     quoted path matches no test and is silently dropped."""
     repo = _repo(tmp_path, {})
     path = repo / "refactory" / "tests" / "test_ünïcode.py"
-    path.write_text("from refactory_dsh.alpha import A\n\n\ndef test_ü():\n    assert A == 1\n")
+    path.write_text("from alpha import A\n\n\ndef test_ü():\n    assert A == 1\n")
     _git(repo, "add", ".")
     _git(repo, "commit", "-q", "-m", "a Unicode test")
-    path.write_text("from refactory_dsh.alpha import A\n\n\ndef test_ü():\n    assert A == 2\n")
+    path.write_text("from alpha import A\n\n\ndef test_ü():\n    assert A == 2\n")
     assert "refactory/tests/test_ünïcode.py" in _json(repo)["selection"]
 
 
@@ -141,9 +141,9 @@ def test_a_renamed_module_still_reaches_its_importers(tmp_path):
     """Renames list both paths (`--no-renames`), so the old name is in the diff and the
     test that imports it runs: it now fails at import."""
     repo = _repo(tmp_path, {})
-    _git(repo, "mv", "refactory/refactory_dsh/alpha.py", "refactory/refactory_dsh/beta.py")
+    _git(repo, "mv", "refactory/alpha.py", "refactory/beta.py")
     record = _json(repo)
-    assert "refactory/refactory_dsh/alpha.py" in record["touched"]
+    assert "refactory/alpha.py" in record["touched"]
     assert "refactory/tests/test_alpha.py" in record["selection"]
 
 
@@ -187,13 +187,18 @@ def test_a_corpus_fixture_selects_the_helper_that_names_its_directory(tmp_path):
 def test_a_document_and_a_script_select_the_test_that_owns_them(tmp_path):
     """The document census reads every document; a script's test is named for it."""
     repo = _repo(tmp_path, {
+        "refactory/tests/test_ship_ready.py": "def test_ship():\n    pass\n",
+        "refactory/tests/test_docs_api.py": "def test_api():\n    pass\n",
+        "refactory/tests/test_docs_tutorial.py": "def test_tutorial():\n    pass\n",
         "refactory/tests/test_docs_english_only.py": "def test_docs():\n    pass\n",
         "scripts/thing.py": "print('x')\n",
         "refactory/tests/test_thing.py":
-            "from refactory_dsh.alpha import A\n\n\ndef test_thing():\n    assert A == 1\n",
+            "from alpha import A\n\n\ndef test_thing():\n    assert A == 1\n",
     })
     (repo / "docs/guide.md").write_text("# Revised\n")
-    assert _json(repo)["selection"] == ["refactory/tests/test_docs_english_only.py"]
+    assert _json(repo)["selection"] == [
+        "refactory/tests/test_ship_ready.py", "refactory/tests/test_docs_api.py",
+        "refactory/tests/test_docs_tutorial.py", "refactory/tests/test_docs_english_only.py"]
 
     _git(repo, "add", ".")
     _git(repo, "commit", "-q", "-m", "doc")
@@ -209,7 +214,7 @@ def test_a_document_and_a_script_select_the_test_that_owns_them(tmp_path):
     tutorial = repo / "refactory" / "docs" / "tutorial.html"
     tutorial.parent.mkdir(parents=True, exist_ok=True)
     tutorial.write_text("<p>a tutorial</p>\n")
-    assert _json(repo)["selection"] == ["refactory/tests/test_docs_english_only.py"]
+    assert "refactory/tests/test_ship_ready.py" in _json(repo)["selection"]
 
 
 def test_list_prints_the_selection_and_runs_nothing(tmp_path):
@@ -234,7 +239,7 @@ def test_a_diff_that_reaches_no_test_runs_nothing(tmp_path):
 
 def test_the_default_is_eight_workers(tmp_path):
     repo = _repo(tmp_path, {})
-    (repo / "refactory" / "refactory_dsh" / "alpha.py").write_text("A = 2\n")
+    (repo / "refactory" / "alpha.py").write_text("A = 2\n")
     words = shlex.split(_json(repo)["command"])
     assert words[:5] == [sys.executable, "-m", "pytest", "-q", "-p"]
     assert words[6:8] == ["-n", "8"]
@@ -261,8 +266,10 @@ def test_the_checkouts_venv_is_the_interpreter_and_its_package_is_first(tmp_path
     finally:
         del os.environ["TEST_CHANGED_IN_VENV"]
 
-    (repo / "refactory" / "refactory_dsh" / "__init__.py").write_text("")
-    (repo / "refactory" / "refactory_dsh" / "test_selection.py").write_text("")
+    package = repo / "refactory" / "refactory_dsh"
+    package.mkdir(parents=True)
+    (package / "__init__.py").write_text("")
+    (package / "test_selection.py").write_text("")
     assert module._product(repo) == str(repo / "refactory")
     parts = module._env(repo)["PYTHONPATH"].split(os.pathsep)
     assert parts[0] == str(repo / "refactory")
@@ -285,8 +292,88 @@ def test_the_checkouts_own_selector_is_used_and_its_absence_is_an_error(tmp_path
     })
     assert _json(repo)["selection"] == ["refactory/tests/test_marker.py"]
     (repo / "refactory/refactory_dsh/test_selection.py").unlink()
-    done = _run(repo)
+    done = _run(repo, "--list")
     assert done.returncode != 0 and "test_selection" in done.stderr
+
+    # A package directory that cannot be imported is refused too: deleting __init__.py
+    # must not fall back to another checkout.
+    (repo / "refactory/refactory_dsh" / "__init__.py").unlink()
+    done = _run(repo, "--list")
+    assert done.returncode != 0 and "no __init__.py" in done.stderr, done.stderr
+
+
+def test_a_root_file_the_suite_reads_selects_its_reader(tmp_path):
+    """`.python-version` and a workflow are read by the pin test; a snapshot by the test
+    that names it. None of them is Python, and none may look like no change."""
+    repo = _repo(tmp_path, {
+        ".python-version": "3.12\n",
+        ".github/workflows/ci.yml": "python-version: '3.12'\n",
+        "refactory/tests/test_python_pin.py":
+            "from pathlib import Path\n\n\n"
+            "def test_the_pin_matches_ci():\n"
+            "    assert (Path(__file__).parents[2] / '.python-version').is_file()\n",
+        "refactory/tests/snapshots/one.json": "{}",
+        "refactory/tests/test_snapshot.py":
+            "from pathlib import Path\n\nSNAPSHOTS = Path(__file__).parent / 'snapshots'\n\n\n"
+            "def test_snapshot():\n    assert SNAPSHOTS\n",
+    })
+    (repo / ".python-version").write_text("3.13\n")
+    assert _json(repo)["selection"] == ["refactory/tests/test_python_pin.py"]
+
+    (repo / ".python-version").write_text("3.12\n")
+    (repo / ".github/workflows/ci.yml").write_text("python-version: '3.13'\n")
+    assert _json(repo)["selection"] == ["refactory/tests/test_python_pin.py"]
+
+    (repo / ".github/workflows/ci.yml").write_text("python-version: '3.12'\n")
+    (repo / "refactory/tests/snapshots/one.json").write_text('{"a": 1}')
+    assert _json(repo)["selection"] == ["refactory/tests/test_snapshot.py"]
+
+
+def test_a_fixture_named_only_by_a_helper_selects_the_tests_that_import_it(tmp_path):
+    """A helper can name the data and a test only import the helper: the test that reads
+    the data is the one that imports the namer, whether or not its own text names it."""
+    repo = _repo(tmp_path, {
+        "refactory/tests/fixtures/rawdata/one.bin": "x",
+        "refactory/tests/loaders.py":
+            "from pathlib import Path\n\nDATA = Path(__file__).parent / 'fixtures' / 'rawdata'\n",
+        "refactory/tests/test_loader.py":
+            "from loaders import DATA\n\n\ndef test_loader():\n    assert DATA\n",
+    })
+    (repo / "refactory/tests/fixtures/rawdata/one.bin").write_text("y")
+    assert _json(repo)["selection"] == ["refactory/tests/test_loader.py"]
+
+
+def test_data_named_only_by_an_unimported_helper_still_selects_the_suite(tmp_path):
+    """A helper nobody imports names the file but no test reads it through the helper: the
+    data is still unaccounted for, so the suite runs."""
+    module = _module()
+    repo = _repo(tmp_path, {
+        "refactory/tests/orphan.py": "# guesses fixtures/lonely.bin\n",
+        "refactory/tests/fixtures/lonely.bin": "z",
+    })
+    assert module._data_readers(repo, ["refactory/tests/fixtures/lonely.bin"]) == [SUITE]
+
+
+def test_a_data_file_no_text_names_selects_the_suite(tmp_path):
+    """Nothing can clear a file nothing names, so it is not called "no change". The suite
+    replaces what was selected, rather than joining it: a directory plus files collects
+    twice."""
+    repo = _repo(tmp_path, {
+        "refactory/tests/fixtures/mystery.bin": "x",
+        "refactory/tests/fixtures/named.json": "{}",
+        "refactory/tests/test_reads_named.py":
+            "from pathlib import Path\n\nF = Path(__file__).parent / 'fixtures/named.json'\n\n\n"
+            "def test_reads_named():\n    assert F.exists()\n",
+        "refactory/tests/test_docs_english_only.py": "def test_docs():\n    pass\n",
+        "refactory/tests/orphan.py": "# names fixtures/nameless.bin\n",
+        "refactory/tests/fixtures/nameless.bin": "z",
+    })
+    (repo / "refactory/tests/fixtures/nameless.bin").write_text("w")
+    (repo / "refactory/tests/fixtures/named.json").write_text('{"a": 1}')
+    (repo / "refactory/tests/fixtures/mystery.bin").write_text("y")
+    (repo / "docs/guide.md").write_text("# Revised\n")
+    record = _json(repo)
+    assert record["selection"] == [SUITE] and record["suite_wide"] is True
 
 
 def test_only_the_python_suite_is_this_commands(tmp_path):
@@ -305,13 +392,13 @@ def test_only_the_python_suite_is_this_commands(tmp_path):
 
 def test_pytest_options_after_the_separator_reach_pytest(tmp_path):
     repo = _repo(tmp_path, {})
-    (repo / "refactory" / "refactory_dsh" / "alpha.py").write_text("A = 2\n")
+    (repo / "refactory" / "alpha.py").write_text("A = 2\n")
     assert shlex.split(_json(repo, "--", "-x", "-k", "alpha")["command"])[-2:] == ["-k", "alpha"]
 
 
 def test_full_runs_the_whole_suite_whatever_the_diff(tmp_path):
     repo = _repo(tmp_path, {})
-    (repo / "refactory" / "refactory_dsh" / "alpha.py").write_text("A = 2\n")
+    (repo / "refactory" / "alpha.py").write_text("A = 2\n")
     record = _json(repo, "--full")
     assert record["selection"] == [SUITE] and record["suite_wide"] is True
 

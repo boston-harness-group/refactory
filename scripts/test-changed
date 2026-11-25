@@ -16,8 +16,9 @@ reaches.
 Three things the import graph cannot see are added here: a changed fixture selects the
 modules that name it (or the whole suite when no text names it), a changed document selects
 the tests that read documents' content, and a changed `scripts/<name>` selects
-`tests/test_<name>.py`. Only `refactory/` is this command's tree: a TypeScript, `v1/` or
-`scripts/` change selects no Python test of its own, and the output says when `pnpm test`
+`tests/test_<name>.py`. A file the suite reads that no import names — a root config, a
+snapshot — selects the tests that name it, and the whole suite when no text does. A
+TypeScript or `v1/` change selects no Python test, and the output says when `pnpm test`
 covers it.
 
 The full suite is CI's job: it is the binding check, and a pull request's four shards run
@@ -57,9 +58,13 @@ DOC_TESTS = (f"{SUITE}/test_ship_ready.py", f"{SUITE}/test_docs_api.py",
 #: Document suffixes whose content those tests read.
 DOC_SUFFIXES = (".md", ".rst", ".txt", ".html")
 
-#: Where the Python suite's own code and tests live. A change elsewhere (packages/, v1/,
-#: scripts/) is not this command's to test.
-PYTHON_ROOT = "refactory/"
+#: Trees that are not the Python suite's. A change there is not this command's to test:
+#: `packages/` and `v1/` have their own runners, and a `scripts/<name>` maps to its test.
+FOREIGN = ("packages/", "v1/", "scripts/")
+
+#: The workflow files the Python pin test reads (it walks `.github/workflows/`).
+WORKFLOWS = ".github/workflows/"
+WORKFLOW_READER = f"{SUITE}/test_python_pin.py"
 
 DEFAULT_JOBS = 8
 
@@ -114,7 +119,8 @@ def _touched(root: Path, base: str) -> list[str]:
     that import its old name; NUL-separated, so a path never arrives quoted."""
     names = (_git_checked(root, "diff", "--name-only", "--no-renames", "-z", base)
              + _git_checked(root, "ls-files", "--others", "--exclude-standard", "-z"))
-    return sorted({name for name in names.split("\0") if name})
+    return sorted({name for name in names.split("\0")
+                   if name and "__pycache__" not in name and not name.endswith((".pyc", ".pyo"))})
 
 
 def _suite_wide(names: list[str]) -> list[str]:
@@ -162,29 +168,54 @@ def _runnable(tests: list[str]) -> list[str]:
             if test.split("::")[0].split(" > ")[0].strip().endswith(".py")]
 
 
-def _fixture_readers(root: Path, names: list[str]) -> list[str]:
-    """The modules under the suite that name a changed fixture: data files are read by
-    path, so no import says which test reads one.
+def _is_document(name: str) -> bool:
+    return name.endswith(DOC_SUFFIXES) or Path(name).name == "README.i18n.yaml"
 
-    Every module is scanned, not only the top-level tests: a corpus is read by a helper
-    (`structure_fuzz.py` names its directory), and a fixture deep in the tree is named by
-    its directory rather than its file. A path nobody names falls back to the whole suite,
-    because a fixture no text names is one nothing can be cleared of.
+
+def _data_readers(root: Path, names: list[str]) -> list[str]:
+    """The collected tests that read a changed data file: a fixture, a snapshot, a root
+    config. Data is read by path or by directory name, so no import names it.
+
+    Every suite module is scanned, not only the top-level tests: a corpus is read by a
+    helper (`structure_fuzz.py` names its directory), and a file deep in the tree is named
+    by its directory. A helper that names the data contributes the tests that import it; a
+    test that merely mentions the name is kept too (over-selection is safe). Data no text
+    names falls back to the whole suite, because nothing else can clear it.
     """
-    changed = [name for name in names if name.startswith(f"{SUITE}/fixtures/")]
-    if not changed:
+    data = [name for name in names
+            if not name.endswith(".py") and not _is_document(name)
+            and name not in SUITE_WIDE and not name.startswith(FOREIGN)
+            and not name.startswith("refactory/docs/")]
+    if not data:
         return []
+    workflows = [name for name in data if name.startswith(WORKFLOWS)]
+    texts = {path.relative_to(root).as_posix(): path.read_text(errors="replace")
+             for path in (root / SUITE).rglob("*.py")}
     needles: set[str] = set()
-    for name in changed:
-        needles.add(Path(name).name)
-        parts = Path(name).relative_to(f"{SUITE}/fixtures").parts
-        if len(parts) > 1:
-            needles.add(parts[0])
-    modules = sorted((root / SUITE).rglob("*.py"))
-    readers = [path.relative_to(root).as_posix() for path in modules
-               if path.name.startswith("test_")
-               and any(needle in path.read_text(errors="replace") for needle in needles)]
-    return readers or [SUITE]
+    for name in data:
+        if name.startswith(WORKFLOWS) and (root / WORKFLOW_READER).is_file():
+            continue  # the pin test reads the workflow files
+        mine = {Path(name).name}
+        parts = Path(name).parts
+        if len(parts) > 2 and parts[0] == "refactory" and parts[1] == "tests":
+            mine.update(part for part in parts[2:-1] if part != "fixtures")
+        needles |= mine
+        if not any(needle in text for text in texts.values() for needle in mine):
+            # A changed file nothing names cannot be cleared by anything short of the suite.
+            return [SUITE]
+    naming = {name for name, text in texts.items()
+              if any(needle in text for needle in needles)}
+    tests = {name for name in naming if Path(name).name.startswith("test_")}
+    helpers = naming - tests
+    if helpers:
+        from refactory_dsh import test_selection
+
+        imports = test_selection.import_map(root, test_selection.repository_files(root),
+                                            scope=[SUITE])
+        tests |= {test for test, changed in imports.items() if changed & helpers}
+    if workflows and (root / WORKFLOW_READER).is_file():
+        tests.add(WORKFLOW_READER)
+    return sorted(tests) or [SUITE]
 
 
 def _script_tests(root: Path, names: list[str]) -> list[str]:
@@ -212,6 +243,10 @@ def _selection(touched: list[str], root: Path) -> list[str] | None:
     if _suite_wide(touched):
         return None
     product = _product(root)
+    if product is None and (root / "refactory" / "refactory_dsh").is_dir():
+        raise SystemExit("test-changed: refactory/refactory_dsh is there but has no "
+                         "__init__.py, so this checkout's package cannot be imported; "
+                         "refusing to run another checkout's")
     if product and product not in sys.path:
         sys.path.insert(0, product)
     try:
@@ -229,16 +264,20 @@ def _selection(touched: list[str], root: Path) -> list[str] | None:
     # Only the Python suite's own tree is this command's: a TypeScript source, a v1 module
     # or a script is not a test here (the script and document helpers below say what is).
     # A fixture is data a test reads by path: it is not a source either.
+    # Only Python modules feed the import graph. Everything else is data (`_data_readers`),
+    # a document (`_doc_tests`) or a script (`_script_tests`), and selecting it as a source
+    # would add the structural tests without the test that reads it.
     sources = [name for name in touched
-               if name.startswith(PYTHON_ROOT) and not name.startswith(f"{SUITE}/fixtures/")
+               if name.endswith(".py") and not name.startswith(FOREIGN)
+               and not name.startswith(f"{SUITE}/fixtures/")
                and not name.startswith("refactory/docs/")]
     selected = test_selection.select(sources, root, check_command=check,
                                      files=test_selection.repository_files(root))
     tests = _runnable(selected.tests)
-    for related in (_fixture_readers(root, touched), _script_tests(root, touched),
+    for related in (_data_readers(root, touched), _script_tests(root, touched),
                     _doc_tests(root, touched)):
         tests += [test for test in related if test not in tests and (root / test).exists()]
-    return tests
+    return [SUITE] if SUITE in tests else tests
 
 
 def _reexec_target(root: Path) -> str | None:
@@ -297,7 +336,7 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.list or args.json:
         record = {"base": base, "touched": touched, "selection": tests,
-                  "suite_wide": selected is None,
+                  "suite_wide": selected is None or tests == [SUITE],
                   "not_selected": sorted(set(touched) - set(tests))}
         if args.json:
             record["command"] = shlex.join(command)
