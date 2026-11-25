@@ -5175,12 +5175,7 @@ class Loop(OuterLoop):
             # scheduler writes: without this state.json shows them "not gated".
             self._write_state()
         if not run.has_part(task_module.TEST):
-            manifest = self._parts_manifest
-            if manifest is not None and task_module.TEST in manifest:
-                reason = "no test items: test scoring skipped"
-            else:
-                reason = "the parts manifest has no 'test' part"
-            final.skip(run, reason, save)
+            final.skip(run, run.empty_part_reason(task_module.TEST), save)
             return
         self._reuse_final_selection(final, save)
         final.run(run, self._gate(), seed=self.config.seed, save=save)

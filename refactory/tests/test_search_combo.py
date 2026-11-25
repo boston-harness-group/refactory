@@ -904,9 +904,8 @@ class _NamesParentInPropose(Loop):
 
 
 def test_a_failed_round_names_the_parent_in_the_strategy_decision(tmp_path):
-    # The model answers two rounds (the seed-only round and the first round
-    # with other parents), then fails. Without the sweep (model proposer),
-    # the first round with other parents is epoch 2.
+    # The model answers two rounds then fails. Two successes ensure at least
+    # one round names a parent and succeeds regardless of the starting sweep.
     answered = [0]
 
     def script(model: ComboModel, request: Request) -> list[dict[str, Any]]:
