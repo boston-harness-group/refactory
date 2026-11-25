@@ -1437,7 +1437,7 @@ prompt names no dataset, task or answer format.
   every strategy's proposals pass it: the default loop and its optimizers (random,
   autoresearch, a parent picker, the portfolio, the pool), `best_of_n`, `reflective`,
   `autoscientists` and a custom strategy such as SkillOpt. The starting population's
-  sweep of single knob moves is not judged, and a state already let through is not
+  sweep of single knob moves (made only for a proposer without a model) is not judged, and a state already let through is not
   judged again. One call of the optimizer's model (its route, without tools, charged
   to the run's token and time budgets; without a budget, the run model's optimizer
   route) per proposal, recorded in `optimizer_trace.jsonl` (kind `integrity_proposal`),

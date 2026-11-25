@@ -1716,9 +1716,15 @@ class Loop(OuterLoop):
         is not, so the first epoch produces a gradient with *contrast* in it. A
         purely structural starting population gives the optimizer plenty of
         candidates and no evidence about which value of anything is worth having.
+
+        Only for a proposer without a model (``random`` and the parent policies run
+        alone). A model proposer writes every candidate of the first round itself
+        from the seed's traces, as it does every later round: a swept neighbour there
+        is a canned phrase or a sampled value nobody asked for, scored on train beside
+        the model's proposals and kept in the population.
         """
         wanted = max(0, int(self.config.batch_size) - 1)
-        if not wanted:
+        if not wanted or getattr(self.optimizer, "uses_model", False):
             return
         sampler = RandomOptimizer(seed=self.config.seed)
         sampler.allow_code_nodes = bool(self.config.allow_code_nodes)

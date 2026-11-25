@@ -425,6 +425,30 @@ def test_the_starting_population_sweeps_the_parameters(tmp_path):
     assert {"order", "grid", "selector"} & moved
 
 
+def test_a_model_proposer_starts_from_the_seed_alone(tmp_path):
+    """With a model proposer the first round's candidates are the model's, not swept.
+
+    A swept neighbour is a canned phrase or a sampled value (on SpreadsheetBench V2,
+    "prefer fewer moving parts" replacing the REPL rule of a system prompt); scored
+    beside the model's proposals it spends a train evaluation and stays in the
+    population. The same loop with a random proposer still sweeps.
+    """
+
+    class ModelProposer(ScriptedOptimizer):
+        uses_model = True
+
+    edit = {"op": "set_knob", "name": "order", "value": "asc"}
+    loop = Loop(MODE, _config(tmp_path / "model", batch_size=5), project=Path("."),
+                optimizer=ModelProposer(edit, k=1))
+    loop.init()
+    assert [c.parent for c in loop.population] == [None]
+    assert not [p for p in loop.proposals.values() if p.get("origin") == "seed_population"]
+
+    swept = Loop(MODE, _config(tmp_path / "random", batch_size=5), project=Path("."))
+    swept.init()
+    assert len(swept.population) > 1
+
+
 def test_a_bounded_numeric_knob_reports_the_values_nobody_ran(tmp_path):
     """`step` declares 1..4; the gradient must say which of those never ran.
 

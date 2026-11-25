@@ -1064,7 +1064,10 @@ the response to them. These are the findings that survived the rewrite:
   all scored the same. A validator can only reject what is invalid; it cannot make
   a batch worth learning from. The response is that `init` **sweeps** instead of
   sampling: one candidate per movable knob, each at a value the default is not, so
-  the first epoch produces a gradient with contrast in it. The same distinction is
+  the first epoch produces a gradient with contrast in it. The sweep is for a
+  proposer without a model; a model proposer (autoresearch, alone or with a parent
+  picker) writes the first round itself, so no canned neighbour takes a train
+  evaluation beside its proposals. The same distinction is
   why `knob_attribution` carries `untried` — a value that failed and a value
   nobody tried are different facts.
 - **The gradient was severed and everything downstream was blind.** The optimizer
