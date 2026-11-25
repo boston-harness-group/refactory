@@ -1002,6 +1002,9 @@ class AutoresearchOptimizer(Optimizer):
         def proposal_call(ctx: ProposalContext, question: str, **extra: Any) -> dict[str, Any]:
             return {"kind": "proposal", "epoch": ctx.epoch, "generation": ctx.generation,
                     "system": self._system, "prompt": question, **extra,
+                    **({"parent": ctx.parent} if ctx.parent else {}),
+                    **({"prior_in_round": len(ctx.prior_proposals)}
+                       if ctx.prior_proposals else {}),
                     # What the request left out of items' texts (item, step, chars): ours
                     # to read; the request itself says only "[… N chars omitted]".
                     **({"omissions": list(ctx.omissions)} if ctx.omissions else {})}

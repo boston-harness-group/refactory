@@ -1252,6 +1252,10 @@ class ProposalContext:
     #: ``per_item_p90_s``/``per_item_max_s`` (the edited candidate's items' own times,
     #: `loop.item_time_spread`); empty says nothing.
     time_facts: dict[str, Any] = field(default_factory=dict)
+    #: Proposals already made earlier in this round (each: ``{"edits", "rationale",
+    #: "parent"}``), so the model does not duplicate them. Shown as facts, not
+    #: instructions.
+    prior_proposals: list[dict[str, Any]] = field(default_factory=list)
 
     def _settled(self) -> frozenset[str]:
         """The lines an item's step does not repeat (`settled_for`) over this request's
@@ -1512,6 +1516,8 @@ class ProposalContext:
                           else list(self.analysis.get("findings") or ())),
                 omissions=self.omissions, settled=self._settled(),
                 shown_room=self.shown_items_room, sizes=self.fit_sizes)]
+        if self.prior_proposals:
+            sections += ["", *_prior_proposals_lines(self.prior_proposals)]
         # 7: the reference, last and once: the operations, how nodes compose, what each
         # node has before it runs, each node in full with the schemas, the rules.
         sections += [
@@ -1620,6 +1626,25 @@ def operation_lines(catalogue: Sequence[Mapping[str, Any]],
     return lines + operator_lines(catalogue, node_states, edges, protected=protected,
                                   knob_values=knob_values, step_routes=step_routes,
                                   tools=tools)
+
+
+def _prior_proposals_lines(prior: Sequence[dict[str, Any]]) -> list[str]:
+    """Facts about proposals already made earlier in this round."""
+    lines = [
+        "## Proposals already made in this round",
+        f"{len(prior)} proposal(s) earlier in this round, each from a separate call. "
+        "Do not duplicate them.",
+    ]
+    for index, entry in enumerate(prior, 1):
+        edits = entry.get("edits") or []
+        if not edits and entry.get("edit"):
+            edits = [entry["edit"]]
+        rationale = str(entry.get("rationale") or "")
+        parent = str(entry.get("parent") or "")
+        edit_summary = compact_edits(edits, {})
+        lines.append(f"- Slot {index}: parent {parent}, edit {edit_summary}"
+                     + (f" — {rationale}" if rationale else ""))
+    return lines
 
 
 def _settings_lines(knobs: Sequence[dict[str, Any]], text_chars: int | None = None,

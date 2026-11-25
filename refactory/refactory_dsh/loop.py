@@ -4225,6 +4225,15 @@ class Loop(OuterLoop):
             return chosen + pinned
         return [c for c in self.population[:n] if c.id not in self.rejected]
 
+    def _split_proposal_calls(self, n: int) -> bool:
+        """Whether this round makes N independent single-proposal calls instead of one
+        call asking for N.  True when the optimizer uses a model and ``n > 1``, unless
+        the strategy signalled a deliberate multi-sample call (BestOfN, Autoscientists)
+        via ``strategy_decision["samples"]``."""
+        return (n > 1
+                and getattr(self.optimizer, "uses_model", False)
+                and not self.strategy_decision.get("samples"))
+
     def propose(self, run: Run, parents: Sequence[Candidate], n: int) -> list[Proposal]:
         """One round of proposals. The default delegates to the optimizer.
 
@@ -4235,7 +4244,19 @@ class Loop(OuterLoop):
         never started. What was refused and why is the optimizer's business;
         whether the optimizer answered at all is the loop's, and it is recorded in
         ``Optimizer.proposal_failures`` so the report can say which happened.
+
+        When :meth:`_split_proposal_calls` is true, makes *n* sequential single-
+        proposal calls instead of one call asking for *n*.  Each call gets its own
+        parent (via the picker, when present), its own per-parent context, and the
+        earlier proposals of the round as facts.  The analysts run once and are
+        shared.
         """
+        if self._split_proposal_calls(n):
+            return self._propose_per_slot(run, parents, n)
+        return self._propose_single(run, parents, n)
+
+    def _propose_single(self, run: Run, parents: Sequence[Candidate], n: int) -> list[Proposal]:
+        """One optimizer call asking for ``n`` proposals (the original path)."""
         from refactory_dsh.budgets import BudgetExhausted
 
         self.optimizer.proposal_rounds += 1
@@ -4274,6 +4295,85 @@ class Loop(OuterLoop):
                            attempt=self._proposal_attempt,
                            error=type(exc).__name__, detail=str(exc)[:500])
             return []
+
+    def _propose_per_slot(self, run: Run, parents: Sequence[Candidate], n: int) -> list[Proposal]:
+        """N sequential single-proposal calls, one per candidate slot.
+
+        Each call gets its own parent (via the picker, when present), its own per-
+        parent context (pipeline view, knobs, trajectories), and a list of the
+        earlier proposals of the round as facts.  The analysts and memory run once
+        and are shared across slots.
+        """
+        from refactory_dsh.budgets import BudgetExhausted
+
+        choose = getattr(self.optimizer, "choose_parent", None)
+        all_proposals: list[Proposal] = []
+        shared_analysis: dict[str, Any] | None = None
+        original_parent = self._editing_parent
+
+        for slot in range(n):
+            # --- pick the parent for this slot ---
+            if callable(choose) and not self.strategy_decision.get("parent"):
+                picked = choose(
+                    ProposalContext(epoch=self.epoch, generation=self.generation,
+                                   mode_name=self.mode_id, elite=int(self.config.elite),
+                                   val_scores=self._val_scores(),
+                                   val_item_scores=self._val_item_scores()), parents)
+                if picked is not None:
+                    self._editing_parent = picked.id
+
+            self.optimizer.proposal_rounds += 1
+            self._proposal_attempt += 1
+
+            try:
+                context = self._context()
+                context.attempt = self._proposal_attempt
+                # The first slot runs the analysts; later slots reuse its analysis.
+                if shared_analysis is not None:
+                    context = dataclasses.replace(
+                        context, analysis=shared_analysis, analysts={})
+                    if hasattr(self.optimizer, "last_analysis"):
+                        self.optimizer.last_analysis = shared_analysis
+                elif hasattr(self.optimizer, "last_analysis"):
+                    self.optimizer.last_analysis = None
+                # Facts about what this round already holds.
+                if all_proposals:
+                    context = dataclasses.replace(context, prior_proposals=[
+                        {"edits": list(p.steps), "rationale": p.rationale,
+                         "parent": p.parent or ""}
+                        for p in all_proposals])
+                # Under portfolio, narrow the edit levels to what this slot should propose.
+                if self._levels_wanted:
+                    missing = [l for l in self._levels_wanted if l not in self._levels_done]
+                    if missing:
+                        context = dataclasses.replace(context, edit_levels=[missing[0]])
+                try:
+                    proposals = self.optimizer.propose(context, 1, parents)
+                finally:
+                    self._keep_analysis()
+                    # Capture the first slot's analysis for sharing.
+                    if slot == 0 and shared_analysis is None:
+                        shared_analysis = getattr(self.optimizer, "last_analysis", None)
+                all_proposals.extend(proposals or [])
+            except BudgetExhausted as exc:
+                self.optimizer.proposal_failures.append(f"{type(exc).__name__}: {exc}")
+                raise
+            except RunStopped:
+                self.optimizer.proposal_rounds -= 1
+                raise
+            except Exception as exc:
+                detail = f"{type(exc).__name__}: {exc}"
+                self.optimizer.proposal_failures.append(detail)
+                run.log(f"{self.optimizer.name} could not propose slot {slot + 1}/{n}: {detail}")
+                self._progress("proposal_failed", optimizer=self.optimizer.name,
+                               parent=self.strategy_decision.get("parent") or self._editing_parent,
+                               attempt=self._proposal_attempt, slot=slot + 1,
+                               error=type(exc).__name__, detail=str(exc)[:500])
+                # A failed slot stays empty; continue to the next.
+                continue
+
+        self._editing_parent = original_parent
+        return all_proposals
 
     def batch_size(self, run: Run) -> int:
         levels = self._round_levels()

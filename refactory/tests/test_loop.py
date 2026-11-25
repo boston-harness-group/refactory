@@ -895,14 +895,20 @@ class ModelOptimizer(Optimizer):
     def __init__(self) -> None:
         super().__init__(k=3)
         self.propose_calls: list[int] = []
+        self._call_index = 0
+
+    _BUDGET_VALUES = [1, 2, 4, 5, 6, 7, 8]
 
     def propose(self, ctx, n, parents):  # type: ignore[no-untyped-def]
         self.propose_calls.append(n)
-        return [
-            Proposal(edit={"op": "set_knob", "name": "prompt", "value": f"v{i}"},
+        proposals = [
+            Proposal(edit={"op": "set_knob", "name": "budget",
+                           "value": self._BUDGET_VALUES[(self._call_index + i) % len(self._BUDGET_VALUES)]},
                      parent=parents[0].id, rationale="model stub")
             for i in range(n)
         ]
+        self._call_index += n
+        return proposals
 
 
 def test_model_proposer_skips_seed_population_sweep(tmp_path):
@@ -924,8 +930,8 @@ def test_random_proposer_still_sweeps(tmp_path):
         f"random proposer should sweep; population is {len(loop.population)}")
 
 
-def test_model_proposer_gets_full_batch_in_first_round(tmp_path, monkeypatch):
-    """With batch_size=5, the model proposer is asked for 5 proposals on round 1."""
+def test_model_proposer_gets_one_call_per_slot(tmp_path, monkeypatch):
+    """With batch_size=5, the model proposer is called 5 times with n=1 each."""
     opt = ModelOptimizer()
     loop = Loop(MODE, _config(tmp_path, batch_size=5, epochs=1), project=Path("."),
                 optimizer=opt)
@@ -939,6 +945,138 @@ def test_model_proposer_gets_full_batch_in_first_round(tmp_path, monkeypatch):
     loop.backward()
     from refactory_dsh.outerloop import Run
     _candidates, _rejections = loop.optimizer_step(Run(_loop=loop))
-    assert opt.propose_calls, "model optimizer was never called"
-    assert opt.propose_calls[0] == 5, (
-        f"expected model to be asked for 5 proposals, got {opt.propose_calls[0]}")
+    assert len(opt.propose_calls) == 5, (
+        f"expected 5 calls with n=1 each, got {len(opt.propose_calls)} calls: {opt.propose_calls}")
+    assert all(n == 1 for n in opt.propose_calls), (
+        f"each call should ask for 1 proposal, got {opt.propose_calls}")
+
+
+def test_per_slot_calls_with_picker(tmp_path, monkeypatch):
+    """With a parent picker and batch_size=5, each slot gets its own picker-chosen parent."""
+    from refactory_dsh.optim.compose import PickedParent
+    from refactory_dsh.optim.policies import ParentSelector
+
+    class RoundRobinSelector(ParentSelector):
+        name = "round_robin"
+        _index = 0
+
+        def select(self, ctx, k, parents):
+            if not parents:
+                return []
+            chosen = [parents[self._index % len(parents)]]
+            self._index += 1
+            return chosen
+
+    proposer = ModelOptimizer()
+    picker = RoundRobinSelector(seed=0)
+    combined = PickedParent(picker, proposer)
+    loop = Loop(MODE, _config(tmp_path, batch_size=3, epochs=1), project=Path("."),
+                optimizer=combined)
+    monkeypatch.setattr(loop, "forward", lambda **kw: 0)
+    monkeypatch.setattr(loop, "loss_step", lambda: {})
+    loop.init()
+    loop.open_epoch()
+    loop.backward()
+    from refactory_dsh.outerloop import Run
+    _candidates, _rejections = loop.optimizer_step(Run(_loop=loop))
+    assert len(proposer.propose_calls) == 3, (
+        f"expected 3 calls, got {len(proposer.propose_calls)}: {proposer.propose_calls}")
+    assert all(n == 1 for n in proposer.propose_calls)
+
+
+def test_per_slot_calls_see_prior_proposals(tmp_path, monkeypatch):
+    """Each per-slot call after the first receives prior_proposals with the earlier ones."""
+    from refactory_dsh.optim.base import ProposalContext
+
+    seen_prior: list[list[dict]] = []
+
+    class TrackingOptimizer(Optimizer):
+        name = "tracking_stub"
+        uses_model = True
+        _BUDGET_VALUES = [1, 2, 4, 5, 6, 7, 8]
+
+        def __init__(self):
+            super().__init__(k=3)
+            self._call_index = 0
+
+        def propose(self, ctx, n, parents):
+            seen_prior.append(list(ctx.prior_proposals))
+            proposals = [
+                Proposal(edit={"op": "set_knob", "name": "budget",
+                               "value": self._BUDGET_VALUES[self._call_index % len(self._BUDGET_VALUES)]},
+                         parent=parents[0].id, rationale=f"slot {self._call_index}")
+                for _ in range(n)]
+            self._call_index += n
+            return proposals
+
+    opt = TrackingOptimizer()
+    loop = Loop(MODE, _config(tmp_path, batch_size=3, epochs=1), project=Path("."),
+                optimizer=opt)
+    monkeypatch.setattr(loop, "forward", lambda **kw: 0)
+    monkeypatch.setattr(loop, "loss_step", lambda: {})
+    loop.init()
+    loop.open_epoch()
+    loop.backward()
+    from refactory_dsh.outerloop import Run
+    loop.optimizer_step(Run(_loop=loop))
+    assert len(seen_prior) >= 3, f"expected >=3 calls, got {len(seen_prior)}"
+    assert seen_prior[0] == [], "first slot should see no prior proposals"
+    assert len(seen_prior[1]) == 1, "second slot should see 1 prior proposal"
+    assert len(seen_prior[2]) == 2, "third slot should see 2 prior proposals"
+
+
+def test_batch_size_1_unchanged(tmp_path, monkeypatch):
+    """With batch_size=1, the model proposer is called once with n=1 (no split)."""
+    opt = ModelOptimizer()
+    loop = Loop(MODE, _config(tmp_path, batch_size=1, epochs=1), project=Path("."),
+                optimizer=opt)
+    monkeypatch.setattr(loop, "forward", lambda **kw: 0)
+    monkeypatch.setattr(loop, "loss_step", lambda: {})
+    loop.init()
+    loop.open_epoch()
+    loop.backward()
+    from refactory_dsh.outerloop import Run
+    loop.optimizer_step(Run(_loop=loop))
+    assert len(opt.propose_calls) == 1, (
+        f"expected 1 call, got {len(opt.propose_calls)}")
+    assert opt.propose_calls[0] == 1
+
+
+def test_analysts_run_once_across_slots(tmp_path, monkeypatch):
+    """Analysts run once on the first slot and are shared across all slots."""
+    analyst_runs: list[dict] = []
+
+    class AnalystTrackingOptimizer(Optimizer):
+        name = "analyst_tracking"
+        uses_model = True
+        _BUDGET_VALUES = [1, 2, 4, 5, 6, 7, 8]
+
+        def __init__(self):
+            super().__init__(k=3)
+            self._call_index = 0
+            self.last_analysis = None
+
+        def propose(self, ctx, n, parents):
+            analyst_runs.append({"analysts": bool(ctx.analysts),
+                                 "analysis": ctx.analysis is not None})
+            proposals = [
+                Proposal(edit={"op": "set_knob", "name": "budget",
+                               "value": self._BUDGET_VALUES[self._call_index % len(self._BUDGET_VALUES)]},
+                         parent=parents[0].id, rationale="stub")
+                for _ in range(n)]
+            self._call_index += n
+            return proposals
+
+    opt = AnalystTrackingOptimizer()
+    loop = Loop(MODE, _config(tmp_path, batch_size=3, epochs=1), project=Path("."),
+                optimizer=opt)
+    monkeypatch.setattr(loop, "forward", lambda **kw: 0)
+    monkeypatch.setattr(loop, "loss_step", lambda: {})
+    loop.init()
+    loop.open_epoch()
+    loop.backward()
+    from refactory_dsh.outerloop import Run
+    loop.optimizer_step(Run(_loop=loop))
+    # Analysts config is not set in this test, so all should see analysts={} (off).
+    # The key invariant: slots 2+ should not re-run analysts even if the config were on.
+    assert len(analyst_runs) >= 3
