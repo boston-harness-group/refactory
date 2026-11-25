@@ -2810,7 +2810,7 @@ _FILE_LINE = re.compile(r"[\w./-]+(?:\.py|\.ts|\.tsx|\.js|\.jsx|\.rs|\.go|\.rb):
 _TEST_ID_RE = re.compile(r"[\w./-]+\.py::[\w\[\]./:-]+|[\w./-]+\.(?:test|spec)\.[jt]sx?")
 
 
-def _collect_open_items(ctx: Any, draft_delivery: dict[str, Any] | None) -> list["open_items_mod.OpenItem"]:
+def _collect_open_items(ctx: Any, draft_delivery: dict[str, Any] | None) -> list:
     """Build open items from the run's records for the PR description.
 
     On a draft: items from the check failure and each unresolved finding.
