@@ -30,23 +30,37 @@ For each, the probe shows:
 Usage:
   cd refactory && PYTHONPATH=$PWD python -m scripts.probe_guard_pattern
 
-  --items PATH   Path to prepared spreadsheetbench items (for end-to-end run).
-  --real         Use the Task's real tool environment and real model calls.
-                 Requires the spreadsheetbench tool environment and API keys.
+  --real              Evaluate candidates using the same machinery Loop.forward
+                      uses: the walker, the mode's Task, real model calls, and
+                      the given items.  Requires API keys and prepared data.
+
+  --items-root PATH   SB2_DATA directory (prepared spreadsheetbench items).
+                      Required with --real.
+
+  --ids id1,id2,...   Comma-separated item IDs to evaluate (default: all).
+
+  --patterns A,B,...  Comma-separated pattern letters (default: all six).
+
+  --out DIR           Output directory for run directories (default: probe_runs).
+
+  --concurrency N     Concurrent evaluations (default: 1).
 
 Without --real, the probe validates graph structure only (no tool environment
 needed).
 
 Lab command:
   cd refactory && PYTHONPATH=$PWD python -m scripts.probe_guard_pattern \\
-      --items /path/to/prepared/data --real
+      --items-root /path/to/prepared/data --ids 1,2,3 --real
 """
 from __future__ import annotations
 
 import argparse
+import concurrent.futures
 import json
+import os
 import sys
 from pathlib import Path
+from typing import Any, Callable
 
 _here = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_here))
@@ -356,59 +370,201 @@ def probe_pattern(name: str, label: str, build_fn, state: dict) -> bool:
     return passed
 
 
+ALL_PATTERNS: list[tuple[str, str, Callable[[dict], dict]]] = [
+    ("A", "sealed code guard (selective takes_over of output.xlsx)", pattern_a),
+    ("B", "agent guard with tools (selective takes_over of output.xlsx)", pattern_b),
+    ("C", "sealed code judge loop around implement", pattern_c),
+    ("D", "route with one way taking over output.xlsx", pattern_d),
+    ("E", "parallel fork (two copies of implement)", pattern_e),
+    ("F", "loop with agent+tools judge", pattern_f),
+]
+
+
+# ── real evaluation ─────────────────────────────────────────────────────
+
+
+def _evaluate_one(
+    name: str,
+    build_fn: Callable[[dict], dict],
+    seed_state: dict,
+    item_id: str,
+    out_dir: Path,
+    model: Any,
+) -> dict[str, Any]:
+    """Evaluate one pattern × item using mode.evaluate (the walker path)."""
+    candidate_state = build_fn(dict(seed_state))
+    mode = Steps(state=candidate_state)
+    trial_dir = out_dir / f"{name}_{item_id}"
+    trial_dir.mkdir(parents=True, exist_ok=True)
+    (trial_dir / "subset.json").write_text(
+        json.dumps({"data": {"ids": [item_id]}})
+    )
+    record: dict[str, Any] = {
+        "pattern": name,
+        "item": item_id,
+        "ran": False,
+        "score": None,
+        "step_produced": False,
+        "downstream_got_it": False,
+        "graded_file_changed": False,
+        "error": None,
+    }
+    try:
+        result = mode.evaluate(trial_dir, model=model)
+        record["ran"] = result.exit_ok
+        record["score"] = getattr(result, "score", None)
+        record["error"] = result.error if not result.exit_ok else None
+        passes_dir = trial_dir / "passes" / "data"
+        if passes_dir.exists():
+            for item_pass in passes_dir.iterdir():
+                if (item_pass / "output.xlsx").exists():
+                    record["step_produced"] = True
+                if (item_pass / "pred.xlsx").exists():
+                    record["downstream_got_it"] = True
+                graded = item_pass / "output.xlsx"
+                if graded.exists() and graded.stat().st_size > 0:
+                    record["graded_file_changed"] = True
+    except Exception as exc:
+        record["error"] = f"{type(exc).__name__}: {str(exc)[:200]}"
+    return record
+
+
+def _run_real(
+    patterns: list[tuple[str, str, Callable[[dict], dict]]],
+    seed_state: dict,
+    items_root: Path,
+    item_ids: list[str] | None,
+    out_dir: Path,
+    concurrency: int,
+) -> bool:
+    """Run selected patterns with real model calls via mode.evaluate."""
+    from refactory_dsh.model import DshModelClient
+
+    os.environ["SB2_DATA"] = str(items_root)
+    model = DshModelClient()
+
+    if item_ids is None:
+        from refactory_packages.spreadsheetbench_v2.tasks import (
+            SpreadsheetBenchV2StepsTask,
+        )
+        task = SpreadsheetBenchV2StepsTask(data_root=str(items_root))
+        item_ids = [inst.id for inst in task.instances()[:5]]
+        print(f"No --ids given; using first 5 items: {item_ids}")
+
+    out_dir.mkdir(parents=True, exist_ok=True)
+    all_records: list[dict[str, Any]] = []
+    jobs: list[tuple[str, str, Callable[[dict], dict], str]] = []
+    for name, _label, fn in patterns:
+        for item_id in item_ids:
+            jobs.append((name, _label, fn, item_id))
+
+    print(f"\nEvaluating {len(jobs)} pattern×item combinations "
+          f"(concurrency={concurrency})...")
+
+    def run_job(job: tuple) -> dict[str, Any]:
+        name, _label, fn, item_id = job
+        return _evaluate_one(name, fn, seed_state, item_id, out_dir, model)
+
+    if concurrency <= 1:
+        for job in jobs:
+            rec = run_job(job)
+            _print_record(rec)
+            all_records.append(rec)
+    else:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=concurrency) as pool:
+            futures = {pool.submit(run_job, j): j for j in jobs}
+            for future in concurrent.futures.as_completed(futures):
+                rec = future.result()
+                _print_record(rec)
+                all_records.append(rec)
+
+    print(f"\n{'='*72}")
+    print(f"{'Pattern':<10} {'Item':<20} {'Ran':<6} {'Score':<8} "
+          f"{'Produced':<10} {'Downstream':<12} {'Error'}")
+    print("-" * 72)
+    for rec in sorted(all_records, key=lambda r: (r["pattern"], r["item"])):
+        err = (rec["error"] or "")[:30]
+        print(f"{rec['pattern']:<10} {rec['item']:<20} "
+              f"{'yes' if rec['ran'] else 'NO':<6} "
+              f"{rec['score'] or ''!s:<8} "
+              f"{'yes' if rec['step_produced'] else 'no':<10} "
+              f"{'yes' if rec['downstream_got_it'] else 'no':<12} "
+              f"{err}")
+
+    failed = [r for r in all_records if not r["ran"]]
+    if failed:
+        print(f"\n{len(failed)} evaluation(s) did not complete.")
+    return not failed
+
+
+def _print_record(rec: dict[str, Any]) -> None:
+    status = "OK" if rec["ran"] else "FAIL"
+    score = f" score={rec['score']}" if rec["score"] is not None else ""
+    err = f" error={rec['error'][:60]}" if rec["error"] else ""
+    print(f"  [{status}] {rec['pattern']} / {rec['item']}{score}{err}")
+
+
+# ── main ────────────────────────────────────────────────────────────────
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--items", type=Path, help="Path to prepared items")
+    parser.add_argument("--items-root", type=Path,
+                        help="Path to prepared SB2 data (SB2_DATA directory)")
+    parser.add_argument("--ids", type=str, default=None,
+                        help="Comma-separated item IDs to evaluate")
+    parser.add_argument("--patterns", type=str, default=None,
+                        help="Comma-separated pattern letters (default: all)")
+    parser.add_argument("--out", type=Path, default=Path("probe_runs"),
+                        help="Output directory for run directories")
+    parser.add_argument("--concurrency", type=int, default=1,
+                        help="Concurrent evaluations")
     parser.add_argument("--real", action="store_true",
-                        help="Use the Task's real tool environment and model calls")
+                        help="Evaluate with the walker, real model calls, "
+                             "and given items")
     args = parser.parse_args()
+
+    selected = ALL_PATTERNS
+    if args.patterns:
+        wanted = {p.strip().upper() for p in args.patterns.split(",")}
+        selected = [(n, l, f) for n, l, f in ALL_PATTERNS if n in wanted]
+        if not selected:
+            print(f"No matching patterns for: {args.patterns}")
+            sys.exit(1)
 
     state = _state()
     print(f"Seed graph: {len(state['graph']['nodes'])} nodes, "
           f"{len(state['graph']['edges'])} edges")
 
-    patterns = [
-        ("A", "sealed code guard (selective takes_over of output.xlsx)", pattern_a),
-        ("B", "agent guard with tools (selective takes_over of output.xlsx)", pattern_b),
-        ("C", "sealed code judge loop around implement", pattern_c),
-        ("D", "route with one way taking over output.xlsx", pattern_d),
-        ("E", "parallel fork (two copies of implement)", pattern_e),
-        ("F", "loop with agent+tools judge", pattern_f),
-    ]
+    # ── dry structural mode (default) ────────────────────────────────────
     results = []
-    for name, label, fn in patterns:
+    for name, label, fn in selected:
         results.append(probe_pattern(name, label, fn, state))
 
     print(f"\n{'='*60}")
-    total = len(results)
     passed = sum(results)
-    print(f"Patterns: {passed}/{total} passed")
+    print(f"Structural: {passed}/{len(results)} passed")
 
+    if not all(results):
+        sys.exit(1)
+
+    # ── real evaluation mode ─────────────────────────────────────────────
     if args.real:
-        print("\n--real requested: use the full harness for end-to-end runs.")
-        print("Lab command:")
-        print("  cd refactory && PYTHONPATH=$PWD python -m scripts.probe_guard_pattern \\")
-        if args.items:
-            print(f"      --items {args.items} --real")
-        else:
-            print("      --items /path/to/prepared/data --real")
-        try:
-            from refactory_packages.spreadsheetbench_v2 import steps_mode
-            print(f"  Mode: {steps_mode.Steps.name}")
-            print("  Run with the full harness:")
-            print("  python -m refactory_dsh.run --mode spreadsheetbench_v2.steps ...")
-        except Exception as exc:
-            print(f"  Tool environment check: {exc}")
+        if not args.items_root or not args.items_root.is_dir():
+            print("--real requires --items-root pointing to a prepared SB2 "
+                  "data directory.")
+            sys.exit(1)
+        item_ids = (
+            [i.strip() for i in args.ids.split(",") if i.strip()]
+            if args.ids else None
+        )
+        ok = _run_real(
+            selected, state, args.items_root, item_ids,
+            args.out, args.concurrency,
+        )
+        sys.exit(0 if ok else 1)
 
-    if args.items:
-        print(f"\n--items {args.items}: checking items directory...")
-        if args.items.is_dir():
-            items = list(args.items.iterdir())
-            print(f"  Found {len(items)} items")
-        else:
-            print(f"  Not a directory: {args.items}")
-
-    sys.exit(0 if all(results) else 1)
+    sys.exit(0)
 
 
 if __name__ == "__main__":

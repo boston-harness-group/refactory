@@ -447,3 +447,59 @@ def test_fallback_line_states_multi_file_constraint():
     line = core_ops.OPERATORS["fallback"]["line"]
     assert "more than one file" in line or "writes more" in line
     assert "code" in line or "tools" in line
+
+
+# ── pattern A end to end: guard restores stray cells ─────────────────
+
+
+@needs_seal
+def test_guard_pattern_a_restores_stray_cells_end_to_end(tmp_path):
+    """Pattern A end to end: a stub produces output.xlsx with stray cell
+    changes, the sealed code guard reads input.xlsx and targets.json, restores
+    every cell changed outside the targets, and writes back output.xlsx.
+
+    Fails if _collect_sealed_writes is reverted: without write-back, the
+    guard's corrected output.xlsx stays in the sandbox and the run directory
+    keeps the stray version."""
+    import openpyxl
+
+    from scripts.probe_guard_pattern import GUARD_CODE
+
+    pass_dir = _sealed_pass(tmp_path)
+
+    wb_in = openpyxl.Workbook()
+    ws_in = wb_in.active
+    ws_in.title = "Sheet"
+    ws_in["A1"] = "original_a1"
+    ws_in["B1"] = "original_b1"
+    ws_in["C1"] = "original_c1"
+    wb_in.save(pass_dir / "input.xlsx")
+
+    targets = {"cells": [{"sheet": "Sheet", "cell": "A1"}]}
+    (pass_dir / "targets.json").write_text(json.dumps(targets))
+
+    wb_out = openpyxl.Workbook()
+    ws_out = wb_out.active
+    ws_out.title = "Sheet"
+    ws_out["A1"] = "answer"
+    ws_out["B1"] = "stray_change"
+    ws_out["C1"] = "original_c1"
+    wb_out.save(pass_dir / "output.xlsx")
+
+    targets_text = json.dumps(targets)
+    result = snippet.sealed_execute(
+        GUARD_CODE,
+        {"files": {"targets.json": targets_text}, "facts": {}},
+        workdir=pass_dir,
+        node_id="guard",
+        reads=["input.xlsx", "output.xlsx", "targets.json"],
+        writes=["output.xlsx"],
+    )
+
+    assert result["facts"]["restored_cells"] == 1
+
+    wb_check = openpyxl.load_workbook(pass_dir / "output.xlsx")
+    ws_check = wb_check.active
+    assert ws_check["A1"].value == "answer", "target cell was not preserved"
+    assert ws_check["B1"].value == "original_b1", "stray cell was not restored"
+    assert ws_check["C1"].value == "original_c1", "unchanged cell was modified"
