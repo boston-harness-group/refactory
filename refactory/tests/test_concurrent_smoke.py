@@ -300,3 +300,98 @@ def test_wall_time_with_slow_evaluator(tmp_path, monkeypatch):
     sequential_minimum = delay * n
     assert elapsed < sequential_minimum, (
         f"smoke checks took {elapsed:.1f}s, sequential would be >= {sequential_minimum:.1f}s")
+
+
+# ── rollout budget (TOCTOU fix) ─────────────────────────────────────────
+
+
+def test_max_rollouts_caps_concurrent_smokes(tmp_path, monkeypatch):
+    """With max_rollouts set tight, only the candidates whose smoke rollouts
+    fit are smoked; the rest are skipped by _smoke_check_batch's atomic
+    reservation.  rollouts never exceeds the cap."""
+    parts = _smoke_parts(tmp_path)
+    monkeypatch.setattr(Loop, "_seed_population", lambda self, seed: None)
+    with _patch_mode(SmokeProbe):
+        loop = Loop(MODE_ID, LoopConfig(
+            epochs=1, batch_size=4, optimizer="random", seed=SEED,
+            runs_root=tmp_path / "run", allowed_ops=("set_knob",),
+            max_evaluations=60, holdout=0.0, parts_manifest=str(parts),
+            max_concurrent_evaluations=4,
+            max_rollouts=10),
+            project=Path("."))
+        loop.optimizer = MultiLevel([[1, 2, 3, 4]])
+        loop.run()
+    smokes = _events(loop, "smoke")
+    assert loop.rollouts <= 10, f"rollouts {loop.rollouts} exceeded cap 10"
+    assert len(smokes) < 4, (
+        "some candidates should be skipped when max_rollouts is tight")
+    assert len(smokes) >= 1, "at least one candidate should be smoked"
+
+
+# ── resume mid-batch ────────────────────────────────────────────────────
+
+
+def test_resume_mid_batch_smokes_only_the_unfinished(tmp_path, monkeypatch):
+    """Crash after 2 of 3 smoke verdicts are journaled.  Resume re-proposes the
+    same batch; the two already-journaled candidates get their verdict from the
+    journal (``_smoke_verdicts``), and only the third is actually smoked.
+
+    The crash fires on the 3rd _measure call (the actual smoke execution), so
+    the 3rd candidate's smoke never completes or journals."""
+    parts = _smoke_parts(tmp_path)
+    monkeypatch.setattr(Loop, "_seed_population", lambda self, seed: None)
+
+    measure_count = [0]
+    original_measure = Loop._measure
+
+    def crash_on_third_measure(self, candidate, workdir, part, **kwargs):
+        if Path(workdir).name.startswith("smoke_"):
+            measure_count[0] += 1
+            if measure_count[0] >= 3:
+                raise KeyboardInterrupt("crash on 3rd smoke measure")
+        return original_measure(self, candidate, workdir, part, **kwargs)
+
+    monkeypatch.setattr(Loop, "_measure", crash_on_third_measure)
+
+    import pytest as _pt
+    with _pt.raises(KeyboardInterrupt):
+        with _patch_mode(SmokeProbe):
+            loop = Loop(MODE_ID, LoopConfig(
+                epochs=1, batch_size=3, optimizer="random", seed=SEED,
+                runs_root=tmp_path / "run", allowed_ops=("set_knob",),
+                max_evaluations=60, holdout=0.0, parts_manifest=str(parts),
+                max_concurrent_evaluations=1),
+                project=Path("."))
+            loop.optimizer = MultiLevel([[1, 2, 3]])
+            loop.run()
+
+    run_root = tmp_path / "run"
+    journal = run_root / "journal.jsonl"
+    assert journal.exists(), "journal should exist after partial run"
+    first_smokes = [json.loads(line) for line in journal.read_text().splitlines()
+                    if line.strip() and json.loads(line).get("event") == "smoke"]
+    assert len(first_smokes) == 2, f"expected 2 journaled smokes, got {len(first_smokes)}"
+
+    monkeypatch.setattr(Loop, "_measure", original_measure)
+    resumed_measure_calls: list[str] = []
+
+    def tracking_measure(self, candidate, workdir, part, **kwargs):
+        if Path(workdir).name.startswith("smoke_"):
+            resumed_measure_calls.append(candidate.id)
+        return original_measure(self, candidate, workdir, part, **kwargs)
+
+    monkeypatch.setattr(Loop, "_measure", tracking_measure)
+    with _patch_mode(SmokeProbe):
+        resumed = Loop(MODE_ID, LoopConfig(
+            epochs=1, batch_size=3, optimizer="random", seed=SEED,
+            runs_root=tmp_path / "run", allowed_ops=("set_knob",),
+            max_evaluations=60, holdout=0.0, parts_manifest=str(parts),
+            max_concurrent_evaluations=4, resume=True),
+            project=Path("."))
+        resumed.optimizer = MultiLevel([[1, 2, 3]])
+        resumed.run()
+
+    already_smoked = {str(s["id"]) for s in first_smokes}
+    assert all(cid not in already_smoked for cid in resumed_measure_calls), (
+        "resumed run should not re-smoke candidates whose verdicts were journaled")
+    assert len(resumed_measure_calls) >= 1, "the unfinished candidate should be smoked on resume"

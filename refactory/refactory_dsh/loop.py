@@ -7554,6 +7554,7 @@ class Loop(OuterLoop):
     def _smoke_check(self, parent: Candidate, candidate: Candidate, *,
                      item_gate: threading.BoundedSemaphore | None = None,
                      stop_event: threading.Event | None = None,
+                     _rollouts_reserved: bool = False,
                      ) -> Candidate | list[str]:
         """Run a new candidate on up to two train items (`_smoke_items`) before it is
         evaluated: ``candidate``, or an ``E-smoke`` refusal when an item failed with an
@@ -7573,7 +7574,12 @@ class Loop(OuterLoop):
         under the run-wide item limit.
 
         ``item_gate`` and ``stop_event`` are forwarded to ``_measure`` when the check
-        runs under ``_smoke_check_batch``."""
+        runs under ``_smoke_check_batch``.
+
+        ``_rollouts_reserved`` is set by ``_smoke_check_batch``, which reserves
+        rollouts atomically before launching threads; the per-thread check and
+        increment are skipped so concurrent threads cannot overshoot
+        ``max_rollouts``."""
         if self._custom_strategy is not None:
             return candidate
         if self._defer_smoke:
@@ -7583,11 +7589,11 @@ class Loop(OuterLoop):
             return [self._smoke_refusal(held)] if held.get("outcome") == "failed" else candidate
         items = self._smoke_items(parent)
         if not items or self.evaluations >= self.config.max_evaluations:
-            # Nothing to run it on, or a candidate the evaluation budget cannot score.
             return candidate
-        cap = self.config.max_rollouts
-        if cap is not None and self.rollouts + len(items) > cap:
-            return candidate
+        if not _rollouts_reserved:
+            cap = self.config.max_rollouts
+            if cap is not None and self.rollouts + len(items) > cap:
+                return candidate
         seed = self._train_seed(self.epoch + 1)
         with self._state_lock:
             number = self._smoke_runs.get(candidate.id, 0) + 1
@@ -7611,11 +7617,12 @@ class Loop(OuterLoop):
         with self._state_lock:
             self._smoke_runs[candidate.id] = number
             self._smoke_verdicts[candidate.id] = record
-            self.rollouts += rolled
+            if not _rollouts_reserved:
+                self.rollouts += rolled
             self._journal("smoke", **record)
             self._journal("rollouts", rollouts=self.rollouts)
-        self._progress("smoke", candidate=candidate.id, parent=parent.id, items=len(items),
-                       outcome=outcome, errors=errors, error=record.get("error"))
+            self._progress("smoke", candidate=candidate.id, parent=parent.id, items=len(items),
+                           outcome=outcome, errors=errors, error=record.get("error"))
         return [self._smoke_refusal(record)] if outcome == "failed" else candidate
 
     def _smoke_outcome(self, result: Any, measurements: Mapping[str, Any]
@@ -7660,6 +7667,11 @@ class Loop(OuterLoop):
         in its own thread through the same ``ThreadPoolExecutor`` machinery
         ``Run.evaluate_many`` uses, sharing the item gate and stop event.
 
+        Rollouts are reserved atomically before any thread starts, as
+        ``evaluate_many`` does: the total rollout cost of the batch is checked
+        and pre-incremented under ``_state_lock``, so concurrent threads cannot
+        overshoot ``max_rollouts``.  Candidates that do not fit are skipped.
+
         A candidate that fails is refused ``E-smoke``: its rejection is recorded and
         the slim repair call runs with the error (``_repair``); a repaired candidate is
         smoked individually (``_defer_smoke`` is off by then).  The returned list keeps
@@ -7671,6 +7683,28 @@ class Loop(OuterLoop):
         if not candidates:
             return candidates
         to_smoke = [(c, smoke_meta[c.id]) for c in candidates if c.id in smoke_meta]
+        if not to_smoke:
+            return candidates
+
+        # ── atomic rollout reservation ───────────────────────────────────
+        items_per: list[list[str]] = []
+        for cand, (_, parent) in to_smoke:
+            items_per.append(self._smoke_items(parent))
+        reserved = 0
+        with self._state_lock:
+            cap = self.config.max_rollouts
+            if cap is not None:
+                remaining = cap - self.rollouts
+                admitted: list[int] = []
+                for i, items in enumerate(items_per):
+                    if reserved + len(items) <= remaining:
+                        admitted.append(i)
+                        reserved += len(items)
+                self.rollouts += reserved
+            else:
+                admitted = list(range(len(to_smoke)))
+        verdicts_before = set(self._smoke_verdicts.keys())
+        to_smoke = [to_smoke[i] for i in admitted]
         if not to_smoke:
             return candidates
 
@@ -7690,7 +7724,8 @@ class Loop(OuterLoop):
                 return
             try:
                 results[index] = self._smoke_check(
-                    parent, cand, item_gate=stoppable_gate, stop_event=stop_event)
+                    parent, cand, item_gate=stoppable_gate, stop_event=stop_event,
+                    _rollouts_reserved=True)
             except BaseException as exc:
                 errors[index] = exc
 
@@ -7719,6 +7754,15 @@ class Loop(OuterLoop):
                     raise
                 finally:
                     pool.shutdown(wait=True)
+
+        # ── reconcile reserved vs actual rollouts ────────────────────────
+        if reserved:
+            with self._state_lock:
+                actual = sum(
+                    self._smoke_verdicts.get(c.id, {}).get("rollouts", 0)
+                    for c, _ in to_smoke
+                    if c.id not in verdicts_before)
+                self.rollouts += actual - reserved
 
         first_error = next((e for e in errors if e is not None), None)
         if first_error is not None:
