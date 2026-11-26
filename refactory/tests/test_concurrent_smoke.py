@@ -307,8 +307,8 @@ def test_wall_time_with_slow_evaluator(tmp_path, monkeypatch):
 
 def test_max_rollouts_caps_concurrent_smokes(tmp_path, monkeypatch):
     """With max_rollouts set tight, only the candidates whose smoke rollouts
-    fit are smoked; the rest are skipped by _smoke_check_batch's atomic
-    reservation.  rollouts never exceeds the cap."""
+    fit are smoked; the rest are skipped by _smoke_check's atomic check
+    under _state_lock.  rollouts never exceeds the cap."""
     parts = _smoke_parts(tmp_path)
     monkeypatch.setattr(Loop, "_seed_population", lambda self, seed: None)
     with _patch_mode(SmokeProbe):
