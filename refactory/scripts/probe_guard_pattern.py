@@ -32,7 +32,15 @@ Usage:
 
   --real              Evaluate candidates using the same machinery Loop.forward
                       uses: the walker, the mode's Task, real model calls, and
-                      the given items.  Requires API keys and prepared data.
+                      the given items.  Requires a resolved profile (for the
+                      worker route) and prepared data.
+
+  --resolved-profile PATH
+                      A run's resolved-profile.json (the snapshot optimize
+                      writes).  Required with --real unless --profile is given.
+
+  --profile NAME      A named profile resolved through profiles.resolve with
+                      REFACTORY_PROJECT.  Alternative to --resolved-profile.
 
   --items-root PATH   SB2_DATA directory (prepared spreadsheetbench items).
                       Required with --real.
@@ -50,7 +58,8 @@ needed).
 
 Lab command:
   cd refactory && PYTHONPATH=$PWD python -m scripts.probe_guard_pattern \\
-      --items-root /path/to/prepared/data --ids 1,2,3 --real
+      --items-root /path/to/prepared/data --ids 1,2,3 \\
+      --resolved-profile ~/experiments/sb-v2/run/resolved-profile.json --real
 """
 from __future__ import annotations
 
@@ -437,6 +446,27 @@ def _evaluate_one(
     return record
 
 
+def _model_from_profile(profile: dict[str, Any]) -> Any:
+    """Build a DshModelClient from a resolved profile's settings, the same way
+    the loop does: worker_backend, provider, model, effort, permission_mode,
+    role_routes, node_routes, setting_sources, claude_executable."""
+    from refactory_dsh.model import DshModelClient
+
+    settings = profile["settings"]
+    return DshModelClient(
+        routes_resolved=True,
+        worker_backend=settings["worker_backend"],
+        provider=settings.get("provider", ""),
+        model=settings.get("model", ""),
+        effort=settings.get("effort", ""),
+        permission_mode=settings.get("permission_mode", ""),
+        role_routes=settings.get("role_routes") or {},
+        node_routes=settings.get("node_routes") or {},
+        setting_sources=settings.get("setting_sources", ""),
+        claude_executable=settings.get("claude_executable", ""),
+    )
+
+
 def _run_real(
     patterns: list[tuple[str, str, Callable[[dict], dict]]],
     seed_state: dict,
@@ -444,12 +474,14 @@ def _run_real(
     item_ids: list[str] | None,
     out_dir: Path,
     concurrency: int,
+    profile: dict[str, Any],
 ) -> bool:
     """Run selected patterns with real model calls via mode.evaluate."""
-    from refactory_dsh.model import DshModelClient
-
     os.environ["SB2_DATA"] = str(items_root)
-    model = DshModelClient()
+    model = _model_from_profile(profile)
+    route = model.route() if callable(getattr(model, "route", None)) else {}
+    print(f"Worker backend: {route.get('worker_backend', '?')}")
+    print(f"Model: {route.get('model', '?')}")
 
     if item_ids is None:
         from refactory_packages.spreadsheetbench_v2.tasks import (
@@ -515,6 +547,23 @@ def _print_record(rec: dict[str, Any]) -> None:
 # ── main ────────────────────────────────────────────────────────────────
 
 
+def _load_profile(args: argparse.Namespace) -> dict[str, Any] | None:
+    """Load a resolved profile from --resolved-profile or --profile."""
+    if args.resolved_profile:
+        path = Path(args.resolved_profile)
+        if not path.is_file():
+            print(f"--resolved-profile: file not found: {path}")
+            sys.exit(1)
+        return json.loads(path.read_text())
+    if args.profile:
+        from refactory_dsh import profiles
+        from refactory_dsh.paths import project_for_nodes
+        project = Path(os.environ["REFACTORY_PROJECT"]) if "REFACTORY_PROJECT" in os.environ else project_for_nodes()
+        return profiles.resolve(project, "spreadsheetbench_v2/steps",
+                                name=args.profile, validate_settings=False)
+    return None
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--items-root", type=Path,
@@ -530,6 +579,10 @@ def main() -> None:
     parser.add_argument("--real", action="store_true",
                         help="Evaluate with the walker, real model calls, "
                              "and given items")
+    parser.add_argument("--resolved-profile", type=str, default="",
+                        help="Path to a run's resolved-profile.json snapshot")
+    parser.add_argument("--profile", type=str, default="",
+                        help="Named profile to resolve via profiles.resolve")
     args = parser.parse_args()
 
     selected = ALL_PATTERNS
@@ -562,13 +615,20 @@ def main() -> None:
             print("--real requires --items-root pointing to a prepared SB2 "
                   "data directory.")
             sys.exit(1)
+        profile = _load_profile(args)
+        if profile is None:
+            print("--real requires a worker route. Supply either:\n"
+                  "  --resolved-profile PATH  (a run's resolved-profile.json)\n"
+                  "  --profile NAME           (a named profile resolved via "
+                  "REFACTORY_PROJECT)")
+            sys.exit(1)
         item_ids = (
             [i.strip() for i in args.ids.split(",") if i.strip()]
             if args.ids else None
         )
         ok = _run_real(
             selected, state, args.items_root, item_ids,
-            args.out, args.concurrency,
+            args.out, args.concurrency, profile,
         )
         sys.exit(0 if ok else 1)
 

@@ -503,3 +503,52 @@ def test_guard_pattern_a_restores_stray_cells_end_to_end(tmp_path):
     assert ws_check["A1"].value == "answer", "target cell was not preserved"
     assert ws_check["B1"].value == "original_b1", "stray cell was not restored"
     assert ws_check["C1"].value == "original_c1", "unchanged cell was modified"
+
+
+# ── --real profile resolution ──────────────────────────────────────────
+
+
+def _fake_profile(*, worker_backend: str = "claude_code",
+                  model: str = "claude-opus-4-6") -> dict:
+    """A minimal resolved-profile.json with the given route settings."""
+    return {
+        "schema_version": 1,
+        "settings": {
+            "worker_backend": worker_backend,
+            "provider": "",
+            "model": model,
+            "effort": "",
+            "permission_mode": "skip",
+            "role_routes": {},
+            "node_routes": {},
+            "setting_sources": "",
+            "claude_executable": "",
+        },
+    }
+
+
+def test_real_mode_uses_profile_route(tmp_path):
+    """--real with a resolved profile naming claude_code passes that route to
+    the model client built by _model_from_profile."""
+    from scripts.probe_guard_pattern import _model_from_profile
+
+    profile = _fake_profile(worker_backend="claude_code",
+                            model="claude-opus-4-6")
+    (tmp_path / "resolved-profile.json").write_text(json.dumps(profile))
+    model = _model_from_profile(profile)
+    route = model.route()
+    assert route["worker_backend"] == "claude_code"
+    assert route["model"] == "claude-opus-4-6"
+
+
+def test_real_mode_refuses_without_profile():
+    """--real without --resolved-profile or --profile exits with an error."""
+    import subprocess
+    result = subprocess.run(
+        [sys.executable, "-m", "scripts.probe_guard_pattern",
+         "--real", "--items-root", "/tmp"],
+        capture_output=True, text=True, cwd=Path(__file__).resolve().parent.parent,
+        env={**os.environ, "PYTHONPATH": str(Path(__file__).resolve().parent.parent)},
+    )
+    assert result.returncode != 0
+    assert "--resolved-profile" in result.stdout or "--resolved-profile" in result.stderr
