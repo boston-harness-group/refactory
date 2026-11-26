@@ -790,7 +790,8 @@ SEALED_OUTPUT_MAX_BYTES = 50 << 20
 
 
 def _collect_sealed_writes(ws: Path, workdir: Path, writes: Sequence[str],
-                           node_id: str) -> list[str]:
+                           node_id: str,
+                           write_renames: Mapping[str, str] | None = None) -> list[str]:
     """Copy declared output files from a sealed workspace back to the run directory.
 
     Only declared ``writes`` are copied. Symlinks, paths that escape the workspace,
@@ -800,6 +801,11 @@ def _collect_sealed_writes(ws: Path, workdir: Path, writes: Sequence[str],
 
     copied: list[str] = []
     ws_real = os.path.realpath(ws)
+    _built_as: dict[str, str] = {}
+    if write_renames:
+        for built, declared in write_renames.items():
+            if declared is not None:
+                _built_as[declared] = built
     for name in writes:
         if name == SEALED_PAYLOAD:
             continue
@@ -808,6 +814,8 @@ def _collect_sealed_writes(ws: Path, workdir: Path, writes: Sequence[str],
             raise SnippetError(f"sealed script {node_id!r}: output {name!r} is not a "
                                "relative path inside the workspace")
         src = ws / name
+        if (not src.exists() or src.is_symlink()) and name in _built_as:
+            src = ws / _built_as[name]
         if not src.exists() or src.is_symlink():
             continue
         src_real = os.path.realpath(src)
@@ -844,6 +852,7 @@ def _collect_sealed_writes(ws: Path, workdir: Path, writes: Sequence[str],
 def sealed_execute(code: str, inp: Any, *, workdir: Path, node_id: str,
                    reads: Sequence[str] = (), writes: Sequence[str] = (),
                    read_renames: Mapping[str, str] | None = None,
+                   write_renames: Mapping[str, str] | None = None,
                    timeout_s: float = SEALED_WALL_S) -> Any:
     """``main(inp)`` of ``code``, run in the Task's sealed environment: the Task's Python
     interpreter, its extra commands, the node's declared ``reads`` visible read-only, no
@@ -927,7 +936,8 @@ def sealed_execute(code: str, inp: Any, *, workdir: Path, node_id: str,
         result = subprocess.run(argv, cwd=os.path.realpath(ws), capture_output=True,
                                 text=True, timeout=timeout_s)
         if writes and result.returncode == 0:
-            collected = _collect_sealed_writes(ws, workdir, writes, node_id)
+            collected = _collect_sealed_writes(ws, workdir, writes, node_id,
+                                                write_renames=write_renames)
     except subprocess.TimeoutExpired as exc:
         raise SnippetTimeout(f"the sealed script ran over its {timeout_s:g} s limit") from exc
     except seal.SealError as exc:
@@ -1107,11 +1117,13 @@ def _execute_code(ctx: Any, found: dict[str, Any]) -> Any:
     code = _code(ctx, found)
     inp = _input(ctx, found)
     if found.get("sealed_script"):
-        renames = dict(ctx.read_renames) if getattr(ctx, "read_renames", None) else None
+        read_rn = dict(ctx.read_renames) if getattr(ctx, "read_renames", None) else None
+        file_rn = (found.get("renames") or {}).get("files")
+        write_rn = dict(file_rn) if file_rn else None
         return sealed_execute(code, inp, workdir=ctx.workdir, node_id=ctx.node_id,
                               reads=list(ctx.declared_reads),
                               writes=list(ctx._declared),  # noqa: SLF001
-                              read_renames=renames)
+                              read_renames=read_rn, write_renames=write_rn)
     return execute(code, inp, hide=_hide(ctx))
 
 

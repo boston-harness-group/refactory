@@ -1506,12 +1506,12 @@ def _take_over_plan(graph: Graph, state: Mapping[str, Any], target_id: Any, side
         raise _Refused(f"nothing after the new step reads {target_id!r}'s outputs ({unscored}), "
                        "so taking it over changes nothing; take over a step whose output a "
                        "later step reads or the Task scores, or insert before those readers")
-    renames = None
-    if _code_text(target, state) is not None:
-        # Code returns its outputs under the names it was written for: the run records
-        # them under the new ones (`graph.Node.renames`), its code as written.
-        renames = _output_renames(target, [names.get(("fact", n), n) for n in target.produces],
-                                  [names.get(("file", n), n) for n in target.writes])
+    # The step's outputs are renamed: its run records them under the new names.
+    # Code steps return values under the names the code was written for;
+    # agent steps write files under the names their prompt says.  Both need a
+    # renames entry so collection maps the produced name to the declared one.
+    renames = _output_renames(target, [names.get(("fact", n), n) for n in target.produces],
+                              [names.get(("file", n), n) for n in target.writes])
     return target, names, readers, texts, renames, group
 
 
@@ -1668,17 +1668,17 @@ def _expand_insert(edit: dict, state: dict) -> list[dict]:
                     else {k: v for k, v in dict(node.renames or {}).items() if k != "reads"}
             if reader in group:
                 # A co-writer of the taken names (a fallback, a route way's step) writes the
-                # new names as the taken step does; code records them so (`renames`).
+                # new names as the taken step does; both code and agent steps record them so
+                # (`renames`), so collection maps the produced name to the declared one.
                 facts = [names.get(("fact", n), n) for n in node.produces]
                 files_new = [names.get(("file", n), n) for n in node.writes]
                 after["writes"], after["produces"] = files_new, facts
-                if _code_text(node, state) is not None:
-                    outputs = _output_renames(node, facts, files_new) or {}
-                    kept = {k: v for k, v in dict(after.get("renames") or {}).items()
-                            if k == "reads"}
-                    after["renames"] = {**kept, **outputs} if kept or outputs else None
-                    if after["renames"] is None:
-                        after.pop("renames")
+                outputs = _output_renames(node, facts, files_new) or {}
+                kept = {k: v for k, v in dict(after.get("renames") or {}).items()
+                        if k == "reads"}
+                after["renames"] = {**kept, **outputs} if kept or outputs else None
+                if after["renames"] is None:
+                    after.pop("renames")
             if after != before:
                 build.add(_respec(build.state, reader, after))
         for knob, text in sorted(texts.items()):

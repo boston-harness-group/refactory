@@ -351,10 +351,9 @@ def _renames(node: "Node") -> dict[str, dict[str, str | None]] | None:
     if not isinstance(value, Mapping) or set(value) - {"facts", "files", "reads"}:
         raise GraphError(f"node {node.id!r}: renames is {{'facts': {{...}}, 'files': {{...}}, "
                          "'reads': {...}}")
-    has_code = bool(node.code) or any(f == "code" for f, _k in node.field_bindings)
-    if (value.get("facts") or value.get("files")) and not (node.kind == "op" and has_code):
-        raise GraphError(f"node {node.id!r} is a {node.kind} without code and renames what it "
-                         "returns; only a code op does")
+    if (value.get("facts") or value.get("files")) and node.kind not in ("op", "agent"):
+        raise GraphError(f"node {node.id!r} is a {node.kind} and renames what it "
+                         "returns; only an op or an agent does")
     if value.get("reads") and node.kind not in ("op", "gate"):
         raise GraphError(f"node {node.id!r} is a {node.kind} and renames what it reads; only an "
                          "op or a gate does")

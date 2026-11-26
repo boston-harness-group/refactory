@@ -571,6 +571,42 @@ def test_sealed_guard_reads_taken_over_file_through_real_edit_path(tmp_path):
     assert ws_check["B1"].value == "original_b1", "stray cell was not restored"
 
 
+# ── takeover rename: collection maps built name to declared name ──────
+
+
+def test_workspace_collect_maps_write_renames(tmp_path):
+    """After takeover renames output.xlsx to implement_own_output.xlsx, the
+    agent still writes output.xlsx.  workspace.collect must find it under the
+    built name and copy it as the declared name.
+
+    Without write_renames the file is silently dropped — the bug that broke
+    pattern A in the lab."""
+    from refactory_dsh.workspace import Workspace, collect
+
+    run = tmp_path / "run"
+    run.mkdir()
+    ws_root = run / ".refactory" / "workspaces" / "implement"
+    ws_root.mkdir(parents=True)
+    ws_path = ws_root / "scratch-1"
+    ws_path.mkdir()
+
+    (ws_path / "output.xlsx").write_bytes(b"fake-xlsx-content")
+
+    place = Workspace(
+        node="implement", kind="scratch", collect="files",
+        root=ws_root, path=ws_path,
+    )
+
+    without = collect(place, run, ["implement_own_output.xlsx"])
+    assert "implement_own_output.xlsx" not in without.get("copied", []), \
+        "without write_renames, the renamed write is silently dropped"
+
+    summary = collect(place, run, ["implement_own_output.xlsx"],
+                      write_renames={"output.xlsx": "implement_own_output.xlsx"})
+    assert "implement_own_output.xlsx" in summary["copied"]
+    assert (run / "implement_own_output.xlsx").read_bytes() == b"fake-xlsx-content"
+
+
 # ── --real profile resolution ──────────────────────────────────────────
 
 

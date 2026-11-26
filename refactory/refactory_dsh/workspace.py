@@ -1327,7 +1327,8 @@ def _raise_seal_incidents(node: str, incidents: Path) -> None:
 
 
 def collect(workspace: Workspace, workdir: Path, writes: list[str], *,
-            final_response: str | None = None) -> dict[str, Any]:
+            final_response: str | None = None,
+            write_renames: dict[str, str] | None = None) -> dict[str, Any]:
     """Make ``workspace``'s work the node's declared outputs, before delivery checks them.
 
     ``diff``: the answer file (the first write) is written from the clone's diff
@@ -1344,6 +1345,11 @@ def collect(workspace: Workspace, workdir: Path, writes: list[str], *,
     visit's copy. A sealed workspace is collected after every process its commands
     left is ended and it is moved off the one path its sandbox may write, so nothing
     sealed changes it while it is read.
+
+    ``write_renames`` maps the name the step's code or agent produces (the built name)
+    to the declared name it is collected under.  When a takeover renames a step's
+    output (output.xlsx -> implement_own_output.xlsx), the agent still writes the
+    built name; collection looks for it there and copies it under the declared name.
     """
     from refactory_dsh.agent_delivery import _path
 
@@ -1415,6 +1421,12 @@ def collect(workspace: Workspace, workdir: Path, writes: list[str], *,
         copied = []
         left = optional_writes(workspace.describe(), writes)
         replies = workspace.runner and workspace.backend == "claude_code"
+        # Reverse map: declared name -> built name the agent actually wrote.
+        _built_as: dict[str, str] = {}
+        if write_renames:
+            for built, declared in write_renames.items():
+                if declared is not None:
+                    _built_as[declared] = built
         root = os.open(workspace.path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
         try:
             for name in (writes[1:] if replies else writes):
@@ -1432,6 +1444,14 @@ def collect(workspace: Workspace, workdir: Path, writes: list[str], *,
                     raise WorkspaceError(f"agent node {workspace.node!r} left {name} in its workspace as a "
                                          "symlink, or under one; an output is a file or a directory of "
                                          "files") from None
+                if source is None and name in _built_as:
+                    built = _built_as[name]
+                    try:
+                        source = _open_beneath(root, Path(built).parts)
+                    except _Linked:
+                        raise WorkspaceError(
+                            f"agent node {workspace.node!r} left {built} (collected as "
+                            f"{name}) as a symlink") from None
                 if source is None:
                     if name in left:
                         stale = _path(workdir, name)
@@ -1439,6 +1459,12 @@ def collect(workspace: Workspace, workdir: Path, writes: list[str], *,
                             shutil.rmtree(stale)
                         else:
                             stale.unlink(missing_ok=True)
+                        continue
+                    if workspace.runner:
+                        raise WorkspaceError(
+                            f"agent node {workspace.node!r} declared write {name!r} but "
+                            f"did not produce it in its workspace at {workspace.path}"
+                        )
                     continue
                 destination = _path(workdir, name)
                 destination.parent.mkdir(parents=True, exist_ok=True)

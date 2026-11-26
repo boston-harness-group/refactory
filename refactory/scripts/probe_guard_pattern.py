@@ -425,6 +425,7 @@ def _evaluate_one(
         "downstream_got_it": False,
         "graded_file_changed": False,
         "error": None,
+        "strict": None,
     }
     try:
         result = mode.evaluate(trial_dir, model=model)
@@ -441,9 +442,97 @@ def _evaluate_one(
                 graded = item_pass / "output.xlsx"
                 if graded.exists() and graded.stat().st_size > 0:
                     record["graded_file_changed"] = True
+                if name in ("A", "B", "D") and record["ran"]:
+                    record["strict"] = _strict_check(name, item_pass)
     except Exception as exc:
         record["error"] = f"{type(exc).__name__}: {str(exc)[:200]}"
     return record
+
+
+def _strict_check(pattern: str, pass_dir: Path) -> str | None:
+    """For A/B/D, verify the guard received implement's output and that the
+    final output.xlsx differs only in restored cells.  Returns None on success
+    or a description of the failure."""
+    import openpyxl
+
+    ws_root = pass_dir / ".refactory" / "workspaces"
+    if pattern in ("A", "B"):
+        impl_ws = _find_collected_file(ws_root / "implement", "output.xlsx")
+        if impl_ws is None:
+            return "implement's output.xlsx not found in its workspace"
+        guard_ws = _find_collected_file(ws_root / "guard", "output.xlsx")
+        final = pass_dir / "output.xlsx"
+    elif pattern == "D":
+        impl_ws = _find_collected_file(ws_root / "implement", "output.xlsx")
+        if impl_ws is None:
+            return "implement's output.xlsx not found in its workspace"
+        revise_nodes = [
+            d.name for d in ws_root.iterdir()
+            if d.is_dir() and d.name not in ("implement",)
+        ]
+        guard_ws = None
+        for rn in revise_nodes:
+            found = _find_collected_file(ws_root / rn, "output.xlsx")
+            if found is not None:
+                guard_ws = found
+                break
+        final = pass_dir / "output.xlsx"
+    else:
+        return None
+
+    if not final.exists():
+        return "final output.xlsx missing from pass directory"
+
+    input_file = pass_dir / "input.xlsx"
+    if not input_file.exists():
+        return "input.xlsx missing from pass directory"
+
+    try:
+        wb_impl = openpyxl.load_workbook(impl_ws)
+        wb_final = openpyxl.load_workbook(final)
+        wb_input = openpyxl.load_workbook(input_file)
+    except Exception as exc:
+        return f"cannot open workbooks: {exc}"
+
+    restored_cells: list[str] = []
+    for sheet_name in wb_final.sheetnames:
+        ws_f = wb_final[sheet_name]
+        ws_impl_s = wb_impl[sheet_name] if sheet_name in wb_impl.sheetnames else None
+        ws_in = wb_input[sheet_name] if sheet_name in wb_input.sheetnames else None
+        if ws_impl_s is None:
+            continue
+        for row in ws_f.iter_rows():
+            for cell in row:
+                impl_val = ws_impl_s[cell.coordinate].value
+                final_val = cell.value
+                if final_val != impl_val:
+                    if ws_in is not None:
+                        orig_val = ws_in[cell.coordinate].value
+                        if final_val == orig_val:
+                            restored_cells.append(f"{sheet_name}!{cell.coordinate}")
+                        else:
+                            return (f"cell {sheet_name}!{cell.coordinate} changed "
+                                    f"from implement's {impl_val!r} to {final_val!r} "
+                                    f"but original was {orig_val!r} — not a restore")
+
+    if restored_cells:
+        print(f"    restored cells: {', '.join(restored_cells[:20])}")
+    return None
+
+
+def _find_collected_file(ws_dir: Path, name: str) -> Path | None:
+    """Find a file in a node's collected workspace (scratch-N.collected/)."""
+    if not ws_dir.exists():
+        return None
+    for child in ws_dir.iterdir():
+        if child.is_dir() and "collected" in child.name:
+            candidate = child / name
+            if candidate.exists():
+                return candidate
+        candidate = child / name
+        if candidate.exists():
+            return candidate
+    return None
 
 
 def _model_from_profile(profile: dict[str, Any]) -> Any:
@@ -518,30 +607,39 @@ def _run_real(
                 _print_record(rec)
                 all_records.append(rec)
 
-    print(f"\n{'='*72}")
+    print(f"\n{'='*80}")
     print(f"{'Pattern':<10} {'Item':<20} {'Ran':<6} {'Score':<8} "
-          f"{'Produced':<10} {'Downstream':<12} {'Error'}")
-    print("-" * 72)
+          f"{'Produced':<10} {'Downstream':<12} {'Strict':<8} {'Error'}")
+    print("-" * 80)
     for rec in sorted(all_records, key=lambda r: (r["pattern"], r["item"])):
         err = (rec["error"] or "")[:30]
+        strict_ok = "ok" if rec.get("strict") is None else "FAIL"
         print(f"{rec['pattern']:<10} {rec['item']:<20} "
               f"{'yes' if rec['ran'] else 'NO':<6} "
               f"{rec['score'] or ''!s:<8} "
               f"{'yes' if rec['step_produced'] else 'no':<10} "
               f"{'yes' if rec['downstream_got_it'] else 'no':<12} "
+              f"{strict_ok:<8} "
               f"{err}")
 
     failed = [r for r in all_records if not r["ran"]]
+    strict_failed = [r for r in all_records if r.get("strict") is not None]
     if failed:
         print(f"\n{len(failed)} evaluation(s) did not complete.")
-    return not failed
+    if strict_failed:
+        for r in strict_failed:
+            print(f"  STRICT-FAIL {r['pattern']}/{r['item']}: {r['strict']}")
+    return not failed and not strict_failed
 
 
 def _print_record(rec: dict[str, Any]) -> None:
     status = "OK" if rec["ran"] else "FAIL"
     score = f" score={rec['score']}" if rec["score"] is not None else ""
     err = f" error={rec['error'][:60]}" if rec["error"] else ""
-    print(f"  [{status}] {rec['pattern']} / {rec['item']}{score}{err}")
+    strict = ""
+    if rec.get("strict") is not None:
+        strict = f" STRICT-FAIL: {rec['strict'][:60]}"
+    print(f"  [{status}] {rec['pattern']} / {rec['item']}{score}{err}{strict}")
 
 
 # ── main ────────────────────────────────────────────────────────────────

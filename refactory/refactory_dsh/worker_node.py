@@ -195,7 +195,8 @@ def execute(spec: dict[str, Any], workdir: Path) -> dict[str, Any]:
         keeps_tool_markup=bool(spec.get('keeps_tool_markup')),
         # The verdict gate that reads this answer, as the lowering declared it
         # (`lowering.judge_verdict`), as the walker takes it from the graph.
-        verdict=_declared(workdir, node).get('verdict'))
+        verdict=_declared(workdir, node).get('verdict'),
+        write_renames=dict(spec['write_renames']) if spec.get('write_renames') else None)
     for check in spec.get('post_checks', []):
         artifact = _path(workdir, check['path'])
         if check.get('must_exist', True) and not artifact.exists():
