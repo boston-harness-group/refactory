@@ -2043,7 +2043,10 @@ def composition_section(catalogue: Sequence[dict[str, Any]], node_states: Sequen
             "`\"sealed\": true` a code step cannot read them from disk (the sandbox has no "
             "file access). `main` returns "
             "`{\"facts\": {...}, \"files\": {...}}`, each one declared in its `produces` / "
-            "`writes`. It costs no model call. Limits: imports only these modules: "
+            "`writes`. An insert takes `produces` (default: one fact named after the step's "
+            "id) and `writes` (default: none; a takes_over adds the taken-over files). "
+            "`main` must return exactly the declared names. "
+            "It costs no model call. Limits: imports only these modules: "
             f"{snippet.ALLOWED_IMPORTS_TEXT}; at most {snippet.MAX_CODE_BYTES} "
             f"bytes, {snippet.WALL_S} s, no files, network, open/exec/eval or dunders (rule "
             "V18). The code goes into the node's own `<id>__code` knob, which a later "
@@ -2179,7 +2182,7 @@ def composition_examples(catalogue: Sequence[dict[str, Any]],
     step = str(anchor[0]["id"])
     code_id = f"{step}_code"
     code = ("def main(inp):\n    result = len(inp['facts'])  # <what it computes>\n"
-            f"    return {{'facts': {{{code_id!r}: str(result)}}}}\n")
+            f"    return {{'facts': {{{code_id!r}: str(result)}}, 'files': {{}}}}\n")
     agent = {"kind": "agent", "text": "<what the new step does>"}
     # The step just before the anchor, when one plain edge leads to it: branches there feed it.
     into = [e for e in edges if e.get("target") == step]
@@ -2207,9 +2210,9 @@ def composition_examples(catalogue: Sequence[dict[str, Any]],
         code_extra: dict[str, Any] = {"sealed": True} if sealed_imports else {}
         shapes.append(("insert", COMPOSITION_SHAPES[4], [
             {"op": "insert", "before": step, "kind": "code", "id": code_id, "text": code,
-             **code_extra},
+             "produces": [code_id], **code_extra},
             {"op": "insert", "after": step, "kind": "code", "id": code_id, "text": code,
-             **code_extra}]))
+             "produces": [code_id], **code_extra}]))
     if tools and "insert" in tool_step_ops(ops):
         tool = {"kind": "agent", "tools": ["bash"], "text": "<what to find out with tools>"}
         shapes.append(("insert", COMPOSITION_SHAPES[5], [

@@ -654,3 +654,46 @@ def test_real_mode_refuses_without_profile():
     )
     assert result.returncode != 0
     assert "--resolved-profile" in result.stdout or "--resolved-profile" in result.stderr
+
+
+def test_request_text_states_produces_and_writes_defaults():
+    """The proposer's code-op line documents that insert takes produces (default:
+    one fact named after the id) and writes (default: none)."""
+    from refactory_dsh.nn import edits as edits_mod
+    from refactory_dsh.optim.base import composition_section
+
+    state = _steps_state()
+    nodes = [dict(s, id=node_id)
+             for node_id, s in state["graph"]["nodes"].items()]
+    text = "\n".join(composition_section(
+        edits_mod.catalogue(), nodes, state["graph"]["edges"],
+        code_nodes=True))
+    assert "`produces`" in text
+    assert "one fact named after the step" in text
+    assert "`writes`" in text
+    assert "default: none" in text
+
+
+def test_cell_value_key_compares_array_formula_semantically():
+    """_cell_value_key treats ArrayFormula by (ref, text), not identity."""
+    from scripts.probe_guard_pattern import _cell_value_key
+
+    class FakeArrayFormula:
+        def __init__(self, ref, text):
+            self.ref = ref
+            self.text = text
+        def __repr__(self):
+            return f"<ArrayFormula at {id(self):#x}>"
+
+    FakeArrayFormula.__name__ = "ArrayFormula"
+    a = FakeArrayFormula("A1:B2", "=SUM(A1:A2)")
+    b = FakeArrayFormula("A1:B2", "=SUM(A1:A2)")
+    assert a is not b
+    assert _cell_value_key(a) == _cell_value_key(b)
+
+    c = FakeArrayFormula("A1:B2", "=MAX(A1:A2)")
+    assert _cell_value_key(a) != _cell_value_key(c)
+
+    assert _cell_value_key(None) is None
+    assert _cell_value_key(42) == 42
+    assert _cell_value_key("hello") == "hello"

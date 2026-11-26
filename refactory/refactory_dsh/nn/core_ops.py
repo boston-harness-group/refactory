@@ -1637,6 +1637,10 @@ def _expand_insert(edit: dict, state: dict) -> list[dict]:
         step_kw = {"writes": list(plan[0].writes), "produces": list(plan[0].produces)}
     else:
         step_kw: dict[str, Any] = {}
+        if edit.get("produces") is not None:
+            step_kw["produces"] = list(edit["produces"])
+        if edit.get("writes") is not None:
+            step_kw["writes"] = list(edit["writes"])
     nodes = _step_nodes(graph, state, spec, node_id,
                         _seen(graph, state, there, view, spec.get("sees")),
                         settings_from=anchor if anchor.kind == "agent" else None,
@@ -3695,7 +3699,7 @@ OPERATORS: dict[str, dict[str, Any]] = {
     "insert": {
         "reads_as": ('step',),
         "fields": ("after", "before", "kind", "text", "system", "sees", "to", "id", "call",
-                   "reads", "tools", "takes_over", "route", "sealed"),
+                   "reads", "tools", "takes_over", "route", "sealed", "produces", "writes"),
         "line": "a new step after (or before) a step: 'kind' agent (text = its prompt; "
                 "'system' its system prompt), code (text = Python) or op (with 'call' and "
                 "'reads'); it sees what that step sees plus its outputs; "

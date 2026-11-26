@@ -134,6 +134,7 @@ def pattern_a(state: dict) -> dict:
         "id": "guard",
         "text": GUARD_CODE,
         "sealed": True,
+        "produces": ["restored_cells"],
         "takes_over": ["implement", "output.xlsx"],
     }
     return nn_edits.apply(edit, state)
@@ -449,6 +450,19 @@ def _evaluate_one(
     return record
 
 
+def _cell_value_key(val: object) -> object:
+    """Semantic key for an openpyxl cell value, so objects like ArrayFormula
+    compare by content rather than identity."""
+    if val is None:
+        return None
+    cls = type(val).__name__
+    if cls == "ArrayFormula":
+        return ("ArrayFormula", getattr(val, "ref", None), getattr(val, "text", None))
+    if isinstance(val, (int, float, str, bool)):
+        return val
+    return repr(val)
+
+
 def _strict_check(pattern: str, pass_dir: Path) -> str | None:
     """For A/B/D, verify the guard received implement's output and that the
     final output.xlsx differs only in restored cells.  Returns None on success
@@ -503,11 +517,11 @@ def _strict_check(pattern: str, pass_dir: Path) -> str | None:
             continue
         for row in ws_f.iter_rows():
             for cell in row:
-                impl_val = ws_impl_s[cell.coordinate].value
-                final_val = cell.value
+                impl_val = _cell_value_key(ws_impl_s[cell.coordinate].value)
+                final_val = _cell_value_key(cell.value)
                 if final_val != impl_val:
                     if ws_in is not None:
-                        orig_val = ws_in[cell.coordinate].value
+                        orig_val = _cell_value_key(ws_in[cell.coordinate].value)
                         if final_val == orig_val:
                             restored_cells.append(f"{sheet_name}!{cell.coordinate}")
                         else:
