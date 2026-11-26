@@ -391,14 +391,22 @@ def _evaluate_one(
     out_dir: Path,
     model: Any,
 ) -> dict[str, Any]:
-    """Evaluate one pattern × item using mode.evaluate (the walker path)."""
+    """Evaluate one pattern × item using mode.evaluate (the walker path).
+
+    Uses the same subset mechanism the loop uses: a parts.json manifest that
+    lists the requested item ID, and a subset.json that selects the "train"
+    part.  select_subset() then filters the Task's items to just this one.
+    """
+    from refactory_dsh.task import write_subset, MANIFEST
+
     candidate_state = build_fn(dict(seed_state))
     mode = Steps(state=candidate_state)
     trial_dir = out_dir / f"{name}_{item_id}"
     trial_dir.mkdir(parents=True, exist_ok=True)
-    (trial_dir / "subset.json").write_text(
-        json.dumps({"data": {"ids": [item_id]}})
+    (trial_dir / MANIFEST).write_text(
+        json.dumps({"train": [str(item_id)]})
     )
+    write_subset(trial_dir, "train", holdout=0.0)
     record: dict[str, Any] = {
         "pattern": name,
         "item": item_id,
