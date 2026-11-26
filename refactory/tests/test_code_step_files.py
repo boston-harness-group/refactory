@@ -16,6 +16,7 @@ Tests here cover:
 """
 from __future__ import annotations
 
+import importlib.util
 import json
 import os
 import sys
@@ -30,6 +31,16 @@ from refactory_dsh.nn.validate import validate_state
 from refactory_packages.spreadsheetbench_v2.steps_mode import Steps
 
 import structure_fuzz_graphs as fg
+
+
+def _load_probe():
+    """Load scripts/probe_guard_pattern.py regardless of working directory."""
+    here = Path(__file__).resolve().parent
+    path = here.parent / "scripts" / "probe_guard_pattern.py"
+    spec = importlib.util.spec_from_file_location("probe_guard_pattern", path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
 
 needs_sandbox = pytest.mark.skipif(not snippet.available()[0],
                                    reason=f"no code-node sandbox here: {snippet.available()[1]}")
@@ -191,15 +202,19 @@ def test_sealed_execute_refuses_oversized_output(tmp_path):
 
 
 @needs_seal
-def test_sealed_execute_missing_declared_write_is_an_error(tmp_path):
-    """A declared write the code did not produce raises SnippetError."""
+def test_sealed_execute_allows_missing_disk_write_delivered_in_return(tmp_path):
+    """A declared write absent from disk but returned in main's files is not an
+    error at sealed_execute time — the check is in run() after both paths."""
     pass_dir = _sealed_pass(tmp_path)
-    code = "def main(inp):\n    return {}\n"
-    with pytest.raises(snippet.SnippetError, match="declared write.*was not produced"):
-        snippet.sealed_execute(
-            code, {"files": {}, "facts": {}},
-            workdir=pass_dir, node_id="skip",
-            reads=[], writes=["optional.txt"])
+    code = (
+        "def main(inp):\n"
+        "    return {'files': {'result.txt': 'from return value'}}\n"
+    )
+    result = snippet.sealed_execute(
+        code, {"files": {}, "facts": {}},
+        workdir=pass_dir, node_id="mixed",
+        reads=[], writes=["result.txt"])
+    assert result["files"]["result.txt"] == "from return value"
 
 
 # ── security: symlink in directory write refused ────────────────────────
@@ -530,7 +545,7 @@ def test_guard_pattern_a_restores_stray_cells_end_to_end(tmp_path):
     keeps the stray version."""
     import openpyxl
 
-    from scripts.probe_guard_pattern import GUARD_CODE
+    probe = _load_probe()
 
     pass_dir = _sealed_pass(tmp_path)
 
@@ -555,7 +570,7 @@ def test_guard_pattern_a_restores_stray_cells_end_to_end(tmp_path):
 
     targets_text = json.dumps(targets)
     result = snippet.sealed_execute(
-        GUARD_CODE,
+        probe.GUARD_CODE,
         {"files": {"targets.json": targets_text}, "facts": {}},
         workdir=pass_dir,
         node_id="guard",
@@ -585,10 +600,10 @@ def test_sealed_guard_reads_taken_over_file_through_real_edit_path(tmp_path):
     gets FileNotFoundError because only implement_own_output.xlsx exists in
     the workspace."""
     import openpyxl
-    from scripts.probe_guard_pattern import GUARD_CODE, pattern_a, _state
+    probe = _load_probe()
 
-    state = _state()
-    edited = pattern_a(state)
+    state = probe._state()
+    edited = probe.pattern_a(state)
     guard = edited["graph"]["nodes"]["guard"]
 
     guard_reads = guard["reads"]
@@ -622,7 +637,7 @@ def test_sealed_guard_reads_taken_over_file_through_real_edit_path(tmp_path):
     wb_out.save(pass_dir / "implement_own_output.xlsx")
 
     result = snippet.sealed_execute(
-        GUARD_CODE,
+        probe.GUARD_CODE,
         {"files": {"targets.json": json.dumps(targets)}, "facts": {}},
         workdir=pass_dir,
         node_id="guard",
@@ -699,12 +714,12 @@ def _fake_profile(*, worker_backend: str = "claude_code",
 def test_real_mode_uses_profile_route(tmp_path):
     """--real with a resolved profile naming claude_code passes that route to
     the model client built by _model_from_profile."""
-    from scripts.probe_guard_pattern import _model_from_profile
+    probe = _load_probe()
 
     profile = _fake_profile(worker_backend="claude_code",
                             model="claude-opus-4-6")
     (tmp_path / "resolved-profile.json").write_text(json.dumps(profile))
-    model = _model_from_profile(profile)
+    model = probe._model_from_profile(profile)
     route = model.route()
     assert route["worker_backend"] == "claude_code"
     assert route["model"] == "claude-opus-4-6"
@@ -743,7 +758,8 @@ def test_request_text_states_produces_and_writes_defaults():
 
 def test_cell_value_key_compares_array_formula_semantically():
     """_cell_value_key treats ArrayFormula by (ref, text), not identity."""
-    from scripts.probe_guard_pattern import _cell_value_key
+    probe = _load_probe()
+    _cell_value_key = probe._cell_value_key
 
     class FakeArrayFormula:
         def __init__(self, ref, text):

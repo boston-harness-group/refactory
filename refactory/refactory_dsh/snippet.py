@@ -838,8 +838,7 @@ def _collect_sealed_writes(ws: Path, workdir: Path, writes: Sequence[str],
                         f"sealed script {node_id!r}: output {_built_as[name]!r} (collected "
                         f"as {name!r}) is a symlink") from None
             if source is None:
-                raise SnippetError(
-                    f"sealed script {node_id!r}: declared write {name!r} was not produced")
+                continue
             try:
                 st = os.fstat(source)
                 if stat.S_ISREG(st.st_mode):
@@ -1177,6 +1176,13 @@ def run(ctx: Any) -> dict[str, Any]:
         ctx.write_text(name, text)
     for name in sealed_files:
         ctx._note_write(name)
+    if found.get("sealed_script"):
+        produced = sealed_files | set(files)
+        for name in ctx._declared:  # noqa: SLF001
+            if name not in produced and not (ctx.workdir / name).exists():
+                raise SnippetError(
+                    f"sealed script {ctx.node_id!r}: declared write {name!r} was not "
+                    "produced (not on disk and not in the return value)")
     return facts
 
 

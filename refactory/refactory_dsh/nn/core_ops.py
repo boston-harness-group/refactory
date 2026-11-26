@@ -3675,6 +3675,8 @@ SEALED_JUDGE_CODE = ("; with 'sealed' true on a code judge, it runs in the Task'
 #: take-over's, a fallback's): said only where the run offers a tool step
 #: (`refusal_without_tools`).
 TOOLS_HINTS = (", or with 'tools'", ", or 'tools'")
+#: What the fallback line says of 'tools': a multi-file fallback may be an agent with tools.
+FALLBACK_TOOLS = " or an agent with tools"
 
 
 def refusal_without_tools(reason: str) -> str:
@@ -3688,7 +3690,7 @@ def without_tools(description: str, fields: Sequence[str]) -> tuple[str, list[st
     """An operator's request line and fields with no offer of tools: for a run where a new
     step has none (no seal, or ``new_step_tools`` off)."""
     for clause in (INSERT_TOOLS, MAP_TOOLS, JUDGE_TOOLS, ROUTE_JUDGE_TOOLS, MERGE_TOOLS,
-                   STEP_TOOLS, SEALED_CODE, SEALED_JUDGE_CODE):
+                   STEP_TOOLS, SEALED_CODE, SEALED_JUDGE_CODE, FALLBACK_TOOLS):
         description = description.replace(clause, "")
     return description, [f for f in fields if f not in ("tools", "sealed")]
 
@@ -3818,8 +3820,8 @@ OPERATORS: dict[str, dict[str, Any]] = {
                 "crashes past its retries or hits its output or prompt limit; never for time or a "
                 "harness fault: it writes that step's outputs, so what reads them still "
                 "gets an answer; 'kind' as in insert; it sees what 'step' sees; when the step "
-                "writes more than one file, the fallback must be a code step or an agent with "
-                "tools (a plain agent writes only its reply)",
+                "writes more than one file, the fallback must be a code step"
+                + FALLBACK_TOOLS + " (a plain agent writes only its reply)",
         "example": {"op": "fallback", "step": "<step>", "kind": "agent",
                     "text": "<a simpler way to the same output>"},
     },
