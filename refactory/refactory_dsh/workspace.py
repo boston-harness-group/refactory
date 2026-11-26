@@ -1327,7 +1327,8 @@ def _raise_seal_incidents(node: str, incidents: Path) -> None:
 
 
 def collect(workspace: Workspace, workdir: Path, writes: list[str], *,
-            final_response: str | None = None) -> dict[str, Any]:
+            final_response: str | None = None,
+            write_renames: dict[str, str] | None = None) -> dict[str, Any]:
     """Make ``workspace``'s work the node's declared outputs, before delivery checks them.
 
     ``diff``: the answer file (the first write) is written from the clone's diff
@@ -1344,6 +1345,11 @@ def collect(workspace: Workspace, workdir: Path, writes: list[str], *,
     visit's copy. A sealed workspace is collected after every process its commands
     left is ended and it is moved off the one path its sandbox may write, so nothing
     sealed changes it while it is read.
+
+    ``write_renames`` maps the name the step's code or agent produces (the built name)
+    to the declared name it is collected under.  When a takeover renames a step's
+    output (output.xlsx -> implement_own_output.xlsx), the agent still writes the
+    built name; collection looks for it there and copies it under the declared name.
     """
     from refactory_dsh.agent_delivery import _path
 
@@ -1415,6 +1421,12 @@ def collect(workspace: Workspace, workdir: Path, writes: list[str], *,
         copied = []
         left = optional_writes(workspace.describe(), writes)
         replies = workspace.runner and workspace.backend == "claude_code"
+        # Reverse map: declared name -> built name the agent actually wrote.
+        _built_as: dict[str, str] = {}
+        if write_renames:
+            for built, declared in write_renames.items():
+                if declared is not None:
+                    _built_as[declared] = built
         root = os.open(workspace.path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
         try:
             for name in (writes[1:] if replies else writes):
@@ -1432,6 +1444,14 @@ def collect(workspace: Workspace, workdir: Path, writes: list[str], *,
                     raise WorkspaceError(f"agent node {workspace.node!r} left {name} in its workspace as a "
                                          "symlink, or under one; an output is a file or a directory of "
                                          "files") from None
+                if source is None and name in _built_as:
+                    built = _built_as[name]
+                    try:
+                        source = _open_beneath(root, Path(built).parts)
+                    except _Linked:
+                        raise WorkspaceError(
+                            f"agent node {workspace.node!r} left {built} (collected as "
+                            f"{name}) as a symlink") from None
                 if source is None:
                     if name in left:
                         stale = _path(workdir, name)
@@ -1553,22 +1573,31 @@ def _copy_file(source: int, destination: Path) -> None:
             copy.write(chunk)
 
 
-def _copy_dir_beneath(source: int, destination: Path) -> None:
-    """Copy the directory open at ``source`` to ``destination``, leaving out links (and
-    anything neither a file nor a directory), each entry opened relative to its
-    directory's descriptor without following a link."""
+def _copy_dir_beneath(source: int, destination: Path, *,
+                      refuse_links: bool = False) -> None:
+    """Copy the directory open at ``source`` to ``destination``, each entry opened
+    relative to its directory's descriptor without following a link.
+
+    When ``refuse_links`` is False (the default), symlinks and other non-regular,
+    non-directory entries are silently left out.  When True, a symlink raises
+    `_Linked` so the caller can treat it as an error (the sealed code-step path
+    uses this)."""
     destination.mkdir(parents=True, exist_ok=True)
     for name in sorted(os.listdir(source)):
         try:
             fd = os.open(name, _NOFOLLOW, dir_fd=source)
         except OSError as exc:
-            if exc.errno in (errno.ELOOP, errno.ENOENT, errno.EMLINK, errno.ENXIO):
-                continue  # a link (or gone): left out, as a link always is
+            if exc.errno in (errno.ELOOP, errno.EMLINK):
+                if refuse_links:
+                    raise _Linked from None
+                continue
+            if exc.errno in (errno.ENOENT, errno.ENXIO):
+                continue
             raise
         try:
             mode = os.fstat(fd).st_mode
             if stat.S_ISDIR(mode):
-                _copy_dir_beneath(fd, destination / name)
+                _copy_dir_beneath(fd, destination / name, refuse_links=refuse_links)
             elif stat.S_ISREG(mode):
                 _copy_file(fd, destination / name)
         finally:

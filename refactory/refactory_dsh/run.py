@@ -382,6 +382,8 @@ def declarations(workdir: Path, node_id: str) -> dict[str, Any]:
                 result["reloop"] = dict(entry["reloop"])
             if isinstance(entry.get("read_renames"), dict):
                 result["read_renames"] = dict(entry["read_renames"])
+            if isinstance(entry.get("write_renames"), dict):
+                result["write_renames"] = dict(entry["write_renames"])
             if isinstance(entry.get("verdict"), dict):
                 result["verdict"] = dict(entry["verdict"])
             return result

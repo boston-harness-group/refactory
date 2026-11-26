@@ -172,6 +172,8 @@ def node_declarations(state: dict[str, Any]) -> dict[str, dict[str, Any]]:
             # The name each built file is read under (`nn.declared_files`), as the walker
             # hands it to its child.
             entry["read_renames"] = dict(node.renames["reads"])
+        if (node.renames or {}).get("files"):
+            entry["write_renames"] = dict(node.renames["files"])
         if node_id in blind:
             entry["blind_reloops"] = blind[node_id]
         verdicts = sorted({condition for gate, _target, condition in reloops if gate == node_id})

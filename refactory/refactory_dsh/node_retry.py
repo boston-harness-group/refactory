@@ -619,6 +619,7 @@ def deliver(
     tool_policy: str = "",
     keeps_tool_markup: bool = False,
     verdict: dict[str, Any] | None = None,
+    write_renames: dict[str, str] | None = None,
 ) -> tuple[str, dict[str, Any]]:
     """Run one agent node's model work through the delivery bracket, honouring ``rule``.
 
@@ -698,7 +699,8 @@ def deliver(
                 output = ask(attempt_client, delivery["prompt"], place)
                 invented = invented_tool_calls(output) if markup else []
                 if place is not None and not invented:
-                    workspaces.collect(place, workdir, writes, final_response=output)
+                    workspaces.collect(place, workdir, writes, final_response=output,
+                                       write_renames=write_renames)
         except Exception as error:
             kind = failure_kind(error)
             if started is not None and isinstance(error, RuntimeError):

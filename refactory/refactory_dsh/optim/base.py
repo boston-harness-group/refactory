@@ -2037,16 +2037,28 @@ def composition_section(catalogue: Sequence[dict[str, Any]], node_states: Sequen
         sealed_imports, has_packages = _sealed_code_imports(node_states)
         lines += [
             f"- **code op**: `\"call\": \"{snippet.RUN}\"` with `code`, Python that defines "
-            "`main(inp)`. `inp` is `{\"files\": {each declared read that exists: its text}, "
-            "\"facts\": {each name in its `inputs`: its value}}`; `main` returns "
+            "`main(inp)`. `inp` is `{\"files\": {each declared read whose content is text: "
+            "its text}, \"facts\": {each name in its `inputs`: its value}}`; binary reads "
+            "(e.g. .xlsx) are silently absent from `inp[\"files\"]`, and without "
+            "`\"sealed\": true` a code step cannot read them from disk (the sandbox has no "
+            "file access). `main` returns "
             "`{\"facts\": {...}, \"files\": {...}}`, each one declared in its `produces` / "
-            "`writes`. It costs no model call. Limits: imports only these modules: "
+            "`writes`. An insert takes `produces` (default: one fact named after the step's "
+            "id) and `writes` (default: none; a takes_over adds the taken-over files). "
+            "`main` must return exactly the declared names. "
+            "It costs no model call. Limits: imports only these modules: "
             f"{snippet.ALLOWED_IMPORTS_TEXT}; at most {snippet.MAX_CODE_BYTES} "
             f"bytes, {snippet.WALL_S} s, no files, network, open/exec/eval or dunders (rule "
             "V18). The code goes into the node's own `<id>__code` knob, which a later "
             "`set_knob` patches or rewrites.",
         ]
         if sealed_imports:
+            sealed_io = (
+                " Its declared `reads` are present as files in the working directory, so "
+                "it can `open()` them directly (including binary files such as .xlsx that "
+                "`inp[\"files\"]` does not carry). It may also write its declared `writes` "
+                "to the working directory; those files are copied back to the run directory "
+                "after a successful run, so downstream steps read them.")
             if has_packages:
                 importable = "; ".join(sealed_imports)
                 lines.append(
@@ -2055,7 +2067,8 @@ def composition_section(catalogue: Sequence[dict[str, Any]], node_states: Sequen
                     f"installed in that environment, including {importable}; there is no "
                     f"import allowlist (the seal is the boundary). Up to "
                     f"{snippet.SEALED_WALL_S} s and {snippet.SEALED_MEMORY_MB} MB. It must "
-                    "still define `main(inp)` and parse. "
+                    "still define `main(inp)` and parse."
+                    f"{sealed_io} "
                     "Without `\"sealed\": true` a code step imports only the standard "
                     "library.")
             else:
@@ -2065,7 +2078,8 @@ def composition_section(catalogue: Sequence[dict[str, Any]], node_states: Sequen
                     f"that environment provides ({'; '.join(sealed_imports)}), with no import "
                     f"allowlist (the seal is the boundary), up to {snippet.SEALED_WALL_S} s "
                     f"and {snippet.SEALED_MEMORY_MB} MB. It must still define `main(inp)` "
-                    "and parse. "
+                    "and parse."
+                    f"{sealed_io} "
                     "Without `\"sealed\": true` a code step imports only the standard "
                     "library.")
     lines += [
@@ -2168,7 +2182,7 @@ def composition_examples(catalogue: Sequence[dict[str, Any]],
     step = str(anchor[0]["id"])
     code_id = f"{step}_code"
     code = ("def main(inp):\n    result = len(inp['facts'])  # <what it computes>\n"
-            f"    return {{'facts': {{{code_id!r}: str(result)}}}}\n")
+            f"    return {{'facts': {{{code_id!r}: str(result)}}, 'files': {{}}}}\n")
     agent = {"kind": "agent", "text": "<what the new step does>"}
     # The step just before the anchor, when one plain edge leads to it: branches there feed it.
     into = [e for e in edges if e.get("target") == step]
@@ -2196,9 +2210,9 @@ def composition_examples(catalogue: Sequence[dict[str, Any]],
         code_extra: dict[str, Any] = {"sealed": True} if sealed_imports else {}
         shapes.append(("insert", COMPOSITION_SHAPES[4], [
             {"op": "insert", "before": step, "kind": "code", "id": code_id, "text": code,
-             **code_extra},
+             "produces": [code_id], **code_extra},
             {"op": "insert", "after": step, "kind": "code", "id": code_id, "text": code,
-             **code_extra}]))
+             "produces": [code_id], **code_extra}]))
     if tools and "insert" in tool_step_ops(ops):
         tool = {"kind": "agent", "tools": ["bash"], "text": "<what to find out with tools>"}
         shapes.append(("insert", COMPOSITION_SHAPES[5], [

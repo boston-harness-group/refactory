@@ -2415,7 +2415,8 @@ class Executor:
                 capture_final=_capture_final, rule=self.graph.retry_rule(node.id),
                 timeout_s=node.timeout_s, budget=self.ctx.budget, workspace=dispatch_workspace,
                 tool_policy=tool_policy, keeps_tool_markup=node.keeps_tool_markup,
-                verdict=judge_verdict(self.graph, node.id))
+                verdict=judge_verdict(self.graph, node.id),
+                write_renames=dict((node.renames or {}).get("files") or {}) or None)
         finally:
             # SWEEP-6: clean up temporarily injected refilled keys, even on error.
             for k, prev in _refilled_snap.items():

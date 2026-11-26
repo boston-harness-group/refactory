@@ -1506,12 +1506,12 @@ def _take_over_plan(graph: Graph, state: Mapping[str, Any], target_id: Any, side
         raise _Refused(f"nothing after the new step reads {target_id!r}'s outputs ({unscored}), "
                        "so taking it over changes nothing; take over a step whose output a "
                        "later step reads or the Task scores, or insert before those readers")
-    renames = None
-    if _code_text(target, state) is not None:
-        # Code returns its outputs under the names it was written for: the run records
-        # them under the new ones (`graph.Node.renames`), its code as written.
-        renames = _output_renames(target, [names.get(("fact", n), n) for n in target.produces],
-                                  [names.get(("file", n), n) for n in target.writes])
+    # The step's outputs are renamed: its run records them under the new names.
+    # Code steps return values under the names the code was written for;
+    # agent steps write files under the names their prompt says.  Both need a
+    # renames entry so collection maps the produced name to the declared one.
+    renames = _output_renames(target, [names.get(("fact", n), n) for n in target.produces],
+                              [names.get(("file", n), n) for n in target.writes])
     return target, names, readers, texts, renames, group
 
 
@@ -1637,6 +1637,10 @@ def _expand_insert(edit: dict, state: dict) -> list[dict]:
         step_kw = {"writes": list(plan[0].writes), "produces": list(plan[0].produces)}
     else:
         step_kw: dict[str, Any] = {}
+        if edit.get("produces") is not None:
+            step_kw["produces"] = list(edit["produces"])
+        if edit.get("writes") is not None:
+            step_kw["writes"] = list(edit["writes"])
     nodes = _step_nodes(graph, state, spec, node_id,
                         _seen(graph, state, there, view, spec.get("sees")),
                         settings_from=anchor if anchor.kind == "agent" else None,
@@ -1668,22 +1672,36 @@ def _expand_insert(edit: dict, state: dict) -> list[dict]:
                     else {k: v for k, v in dict(node.renames or {}).items() if k != "reads"}
             if reader in group:
                 # A co-writer of the taken names (a fallback, a route way's step) writes the
-                # new names as the taken step does; code records them so (`renames`).
+                # new names as the taken step does; both code and agent steps record them so
+                # (`renames`), so collection maps the produced name to the declared one.
                 facts = [names.get(("fact", n), n) for n in node.produces]
                 files_new = [names.get(("file", n), n) for n in node.writes]
                 after["writes"], after["produces"] = files_new, facts
-                if _code_text(node, state) is not None:
-                    outputs = _output_renames(node, facts, files_new) or {}
-                    kept = {k: v for k, v in dict(after.get("renames") or {}).items()
-                            if k == "reads"}
-                    after["renames"] = {**kept, **outputs} if kept or outputs else None
-                    if after["renames"] is None:
-                        after.pop("renames")
+                outputs = _output_renames(node, facts, files_new) or {}
+                kept = {k: v for k, v in dict(after.get("renames") or {}).items()
+                        if k == "reads"}
+                after["renames"] = {**kept, **outputs} if kept or outputs else None
+                if after["renames"] is None:
+                    after.pop("renames")
             if after != before:
                 build.add(_respec(build.state, reader, after))
         for knob, text in sorted(texts.items()):
             build.add([{"op": "set_knob", "name": knob, "value": text}])
         nodes = [_renamed_refs(n, names) for n in nodes]
+        # A sealed code step opens its reads by name in its code.  When a
+        # takeover renames a file (output.xlsx -> implement_own_output.xlsx),
+        # the code still opens the original name: record the mapping so
+        # sealed_execute can stage the file under both names.
+        file_renames = {old: new for (kind, old), new in names.items()
+                        if kind == "file"}
+        if file_renames:
+            for n in nodes:
+                if not n.get("sealed_script"):
+                    continue
+                read_map = {old: new for old, new in file_renames.items()
+                            if new in (n.get("reads") or [])}
+                if read_map:
+                    n["renames"] = {**(n.get("renames") or {}), "reads": read_map}
     head, _end = _chain(nodes)
     if side == "before":
         build.add(_renamed(build.state, anchor.id, [head], joins=False))
@@ -3657,6 +3675,8 @@ SEALED_JUDGE_CODE = ("; with 'sealed' true on a code judge, it runs in the Task'
 #: take-over's, a fallback's): said only where the run offers a tool step
 #: (`refusal_without_tools`).
 TOOLS_HINTS = (", or with 'tools'", ", or 'tools'")
+#: What the fallback line says of 'tools': a multi-file fallback may be an agent with tools.
+FALLBACK_TOOLS = " or an agent with tools"
 
 
 def refusal_without_tools(reason: str) -> str:
@@ -3670,7 +3690,7 @@ def without_tools(description: str, fields: Sequence[str]) -> tuple[str, list[st
     """An operator's request line and fields with no offer of tools: for a run where a new
     step has none (no seal, or ``new_step_tools`` off)."""
     for clause in (INSERT_TOOLS, MAP_TOOLS, JUDGE_TOOLS, ROUTE_JUDGE_TOOLS, MERGE_TOOLS,
-                   STEP_TOOLS, SEALED_CODE, SEALED_JUDGE_CODE):
+                   STEP_TOOLS, SEALED_CODE, SEALED_JUDGE_CODE, FALLBACK_TOOLS):
         description = description.replace(clause, "")
     return description, [f for f in fields if f not in ("tools", "sealed")]
 
@@ -3681,7 +3701,7 @@ OPERATORS: dict[str, dict[str, Any]] = {
     "insert": {
         "reads_as": ('step',),
         "fields": ("after", "before", "kind", "text", "system", "sees", "to", "id", "call",
-                   "reads", "tools", "takes_over", "route", "sealed"),
+                   "reads", "tools", "takes_over", "route", "sealed", "produces", "writes"),
         "line": "a new step after (or before) a step: 'kind' agent (text = its prompt; "
                 "'system' its system prompt), code (text = Python) or op (with 'call' and "
                 "'reads'); it sees what that step sees plus its outputs; "
@@ -3799,7 +3819,9 @@ OPERATORS: dict[str, dict[str, Any]] = {
         "line": "a step run instead when 'step' (one run per item) fails -- it raises, "
                 "crashes past its retries or hits its output or prompt limit; never for time or a "
                 "harness fault: it writes that step's outputs, so what reads them still "
-                "gets an answer; 'kind' as in insert; it sees what 'step' sees",
+                "gets an answer; 'kind' as in insert; it sees what 'step' sees; when the step "
+                "writes more than one file, the fallback must be a code step"
+                + FALLBACK_TOOLS + " (a plain agent writes only its reply)",
         "example": {"op": "fallback", "step": "<step>", "kind": "agent",
                     "text": "<a simpler way to the same output>"},
     },
