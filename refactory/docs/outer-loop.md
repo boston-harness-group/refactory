@@ -2221,6 +2221,14 @@ pickers (their proposals all go through `Run.attempt`); a custom strategy's prop
 (the SkillOpt port's) are not smoked. The item history below reaches every strategy that
 builds the default request (`Loop._context`).
 
+With `batch_size` > 1, a round's smoke checks run concurrently
+(`Loop._smoke_check_batch`): `install` defers the check while each proposal passes
+validation and integrity, then the batch is smoked through a `ThreadPoolExecutor` under the
+run-wide item limit (`max_items_in_flight`) and the same stop-event machinery
+`Run.evaluate_many` uses, up to `max_concurrent_evaluations` at once. A candidate that
+fails is refused `E-smoke` and sent to the slim repair call; a repaired candidate is smoked
+individually. `batch_size` 1 keeps the sequential path.
+
 **The wiring review** (every strategy's proposals, through `Run.attempt`). A proposal
 that applies and validates, but whose edit adds wiring warnings (`W-unread-output`,
 `W-reloop-target`: its new or changed steps judged against its parent, less what the

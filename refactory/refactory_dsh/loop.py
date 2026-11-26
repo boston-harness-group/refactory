@@ -1027,6 +1027,9 @@ class Loop(OuterLoop):
         self._item_gate: threading.BoundedSemaphore | None = None
         #: Whether _init_item_gate has been called.
         self._item_gate_initialized: bool = False
+        #: When True, ``_smoke_check`` returns the candidate without running it;
+        #: ``install`` sets it for ``batch_size`` > 1 and smokes the batch after.
+        self._defer_smoke: bool = False
         #: The validation gate when ``config.val_gate`` is on (see ``_gate``), and
         #: the candidates it accepted and rejected, in order.
         self._val_gate: ValidationGate | None = None
@@ -4410,10 +4413,17 @@ class Loop(OuterLoop):
         This is the validating loop the whole design rests on: apply, refuse with a
         coded reason, feed the reasons back, and only ever hand a candidate to
         evaluation. Overriding it is how a strategy changes how many times it asks.
+
+        With ``batch_size`` > 1 (and no custom strategy), the smoke check is deferred:
+        every candidate passes validation and integrity first, then the batch is smoked
+        concurrently through ``_smoke_check_batch``.
         """
         accepted: list[Candidate] = []
         accepted_ids: set[str] = set()
         wanted = self.batch_size(run)
+        defer_smoke = wanted > 1 and self._custom_strategy is None
+        smoke_meta: dict[str, tuple[Proposal, Candidate]] = {}
+        self._defer_smoke = defer_smoke
         # `k` adapts: one more round when the last batch was refused more than it was
         # accepted, because that is the signal that the optimizer is close to
         # something legal rather than out of ideas.
@@ -4479,6 +4489,8 @@ class Loop(OuterLoop):
                         continue
                     accepted_ids.add(outcome.id)
                     accepted.append(outcome)
+                    if defer_smoke:
+                        smoke_meta[outcome.id] = (proposal, parent)
                     if repaired_from and getattr(self, "_repaired_level", ""):
                         level = self._repaired_level  # the fix's level, as E-level judged it
                     if self._levels_wanted:
@@ -4501,6 +4513,10 @@ class Loop(OuterLoop):
             proposals = self.propose(run, parents, wanted - len(accepted))
             if not proposals:
                 break
+        if defer_smoke and accepted:
+            self._defer_smoke = False
+            accepted = self._smoke_check_batch(run, accepted, smoke_meta)
+        self._defer_smoke = False
         refused = sum(1 for r in self.rejections[before_all:] if not r.repaired)
         self._refusal_pressure = refused / max(1, refused + len(accepted))
         self.attempts_used.append(rounds)
@@ -7535,7 +7551,10 @@ class Loop(OuterLoop):
         right = next((r for r in records if r.get("passed")), None)
         return list(dict.fromkeys(str(r.get("id")) for r in (wrong, right) if r is not None))
 
-    def _smoke_check(self, parent: Candidate, candidate: Candidate) -> Candidate | list[str]:
+    def _smoke_check(self, parent: Candidate, candidate: Candidate, *,
+                     item_gate: threading.BoundedSemaphore | None = None,
+                     stop_event: threading.Event | None = None,
+                     ) -> Candidate | list[str]:
         """Run a new candidate on up to two train items (`_smoke_items`) before it is
         evaluated: ``candidate``, or an ``E-smoke`` refusal when an item failed with an
         error (`optim.base.pipeline_item_errors`) or the run failed before any item. A
@@ -7547,8 +7566,17 @@ class Loop(OuterLoop):
         (``max_evaluations``), or no room in ``max_rollouts``, it does not run. Its records
         are no train records (no item history, no traces); its items count as rollouts,
         not as an evaluation. Journaled (``smoke``), so a resumed run never smokes a graph twice.
-        The default loop's proposals only: a custom strategy (SkillOpt) is not smoked."""
+        The default loop's proposals only: a custom strategy (SkillOpt) is not smoked.
+
+        With ``batch_size`` > 1, ``install`` defers the check (``_defer_smoke``) and
+        runs the batch through ``_smoke_check_batch``, so a round's smoke checks overlap
+        under the run-wide item limit.
+
+        ``item_gate`` and ``stop_event`` are forwarded to ``_measure`` when the check
+        runs under ``_smoke_check_batch``."""
         if self._custom_strategy is not None:
+            return candidate
+        if self._defer_smoke:
             return candidate
         held = self._smoke_verdicts.get(candidate.id)
         if held is not None:
@@ -7566,8 +7594,13 @@ class Loop(OuterLoop):
         workdir = self.root / "runs" / candidate.id / "occasions" / f"smoke_{number}"
         self._archive_unfinished(candidate.id, workdir)
         task_module.make_manifest(workdir, train_ids=items)
+        measure_kw: dict[str, Any] = {}
+        if item_gate is not None:
+            measure_kw["item_gate"] = item_gate
+        if stop_event is not None:
+            measure_kw["stop_event"] = stop_event
         result, measurements = self._measure(candidate, workdir, task_module.TRAIN, seed=seed,
-                                             items=items, repeats=1, traces=False)
+                                             items=items, repeats=1, traces=False, **measure_kw)
         outcome, errors = self._smoke_outcome(result, measurements)
         rolled = ((len(result.item_records or ()) or 1)
                   if measurements.get("count") and not measurements.get("cached_from") else 0)
@@ -7613,6 +7646,110 @@ class Loop(OuterLoop):
             for e in list(record.get("errors") or ())[:2])
         return (f"{SMOKE_CODE}: a smoke run on {items} train item(s) the parent ran without an "
                 "error failed: " + (said or f"before any item: {_clip(record.get('error'), 300)}"))
+
+    def _smoke_check_batch(
+        self,
+        run: Run,
+        candidates: list[Candidate],
+        smoke_meta: dict[str, tuple[Proposal, Candidate]],
+    ) -> list[Candidate]:
+        """Smoke-check a batch of candidates concurrently, under the run-wide item limit.
+
+        Called by ``install`` when ``batch_size`` > 1 after every candidate passed
+        validation and integrity without being smoked. Each candidate's check runs
+        in its own thread through the same ``ThreadPoolExecutor`` machinery
+        ``Run.evaluate_many`` uses, sharing the item gate and stop event.
+
+        A candidate that fails is refused ``E-smoke``: its rejection is recorded and
+        the slim repair call runs with the error (``_repair``); a repaired candidate is
+        smoked individually (``_defer_smoke`` is off by then).  The returned list keeps
+        the input order, with failed-and-not-repaired candidates removed.
+        """
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        from refactory_dsh.owned_process import StoppableGate
+
+        if not candidates:
+            return candidates
+        to_smoke = [(c, smoke_meta[c.id]) for c in candidates if c.id in smoke_meta]
+        if not to_smoke:
+            return candidates
+
+        seed_candidate = self.population[0] if self.population else candidates[0]
+        self._init_item_gate(seed_candidate)
+        gate = getattr(self, '_item_gate', None)
+        stop_event = threading.Event()
+        stoppable_gate = StoppableGate(gate, stop_event) if gate is not None else None
+
+        results: list[Candidate | list[str] | None] = [None] * len(to_smoke)
+        errors: list[BaseException | None] = [None] * len(to_smoke)
+
+        def _run_one(index: int) -> None:
+            cand, (_, parent) = to_smoke[index]
+            if stop_event.is_set():
+                results[index] = cand
+                return
+            try:
+                results[index] = self._smoke_check(
+                    parent, cand, item_gate=stoppable_gate, stop_event=stop_event)
+            except BaseException as exc:
+                errors[index] = exc
+
+        max_workers = int(self.config.max_concurrent_evaluations or 4)
+        if len(to_smoke) == 1:
+            _run_one(0)
+        else:
+            from refactory_dsh.dsh_runtime import shutdown_tracked_runs
+            from refactory_dsh.owned_process import _termination_as_exit
+
+            with _termination_as_exit():
+                pool = ThreadPoolExecutor(
+                    max_workers=min(max_workers, len(to_smoke)))
+                futures = [pool.submit(_run_one, i) for i in range(len(to_smoke))]
+                try:
+                    for future in as_completed(futures):
+                        try:
+                            future.result()
+                        except BaseException:
+                            pass
+                except BaseException:
+                    stop_event.set()
+                    for f in futures:
+                        f.cancel()
+                    shutdown_tracked_runs()
+                    raise
+                finally:
+                    pool.shutdown(wait=True)
+
+        first_error = next((e for e in errors if e is not None), None)
+        if first_error is not None:
+            raise first_error
+
+        passed_ids: set[str] = set()
+        repaired: dict[str, Candidate] = {}
+        for i, (cand, (proposal, parent)) in enumerate(to_smoke):
+            outcome = results[i]
+            if outcome is cand or isinstance(outcome, Candidate):
+                passed_ids.add(cand.id)
+            elif isinstance(outcome, list):
+                self.rejections.append(
+                    Rejection(attempt=1, edit=proposal.edit, reasons=outcome,
+                              rationale=proposal.rationale))
+                fixed = self._repair(run, proposal, parent, outcome)
+                if isinstance(fixed, Candidate):
+                    repaired[cand.id] = fixed
+                    notes = self._proposal_notes.get(cand.id) or {}
+                    self._proposal_notes[fixed.id] = {
+                        **notes, "repaired_from": list(outcome)}
+
+        final: list[Candidate] = []
+        for cand in candidates:
+            if cand.id in passed_ids:
+                final.append(cand)
+            elif cand.id in repaired:
+                final.append(repaired[cand.id])
+            elif cand.id not in smoke_meta:
+                final.append(cand)
+        return final
 
     def _integrity_of(self, candidate_id: str) -> dict[str, Any] | None:
         """The latest proposal verdict on ``candidate_id`` (the change ledger's column);
