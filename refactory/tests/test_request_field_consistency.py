@@ -158,7 +158,7 @@ def test_available_section_agent_fields(name):
     _, avail, _ = _build_sections(_modes()[name])
     if not avail:
         pytest.skip("no available section")
-    lead = "\n".join(avail[:5])
+    lead = "\n".join(avail)
     agent_ctx = re.search(r'[Aa]gent without tools(.*?)\.', lead, re.DOTALL)
     if agent_ctx is None:
         pytest.skip("no agent-without-tools text in available section")
