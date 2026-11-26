@@ -646,8 +646,9 @@ def test_workspace_collect_maps_write_renames(tmp_path):
     agent still writes output.xlsx.  workspace.collect must find it under the
     built name and copy it as the declared name.
 
-    Without write_renames the file is not found and collection raises."""
-    from refactory_dsh.workspace import Workspace, WorkspaceError, collect
+    Without write_renames the file is silently dropped (unsealed agent
+    workspaces skip missing writes, matching main's behaviour)."""
+    from refactory_dsh.workspace import Workspace, collect
 
     run = tmp_path / "run"
     run.mkdir()
@@ -663,8 +664,9 @@ def test_workspace_collect_maps_write_renames(tmp_path):
         root=ws_root, path=ws_path,
     )
 
-    with pytest.raises(WorkspaceError, match="declared write.*did not produce"):
-        collect(place, run, ["implement_own_output.xlsx"])
+    without = collect(place, run, ["implement_own_output.xlsx"])
+    assert "implement_own_output.xlsx" not in without.get("copied", []), \
+        "without write_renames, the renamed write is silently dropped"
 
     summary = collect(place, run, ["implement_own_output.xlsx"],
                       write_renames={"output.xlsx": "implement_own_output.xlsx"})

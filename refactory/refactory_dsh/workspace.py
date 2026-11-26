@@ -1460,10 +1460,12 @@ def collect(workspace: Workspace, workdir: Path, writes: list[str], *,
                         else:
                             stale.unlink(missing_ok=True)
                         continue
-                    raise WorkspaceError(
-                        f"agent node {workspace.node!r} declared write {name!r} but "
-                        f"did not produce it in its workspace at {workspace.path}"
-                    )
+                    if workspace.runner:
+                        raise WorkspaceError(
+                            f"agent node {workspace.node!r} declared write {name!r} but "
+                            f"did not produce it in its workspace at {workspace.path}"
+                        )
+                    continue
                 destination = _path(workdir, name)
                 destination.parent.mkdir(parents=True, exist_ok=True)
                 try:
