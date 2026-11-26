@@ -59,6 +59,7 @@ import json
 import os
 import re
 import shutil
+import stat
 import subprocess
 import sys
 from pathlib import Path
@@ -794,58 +795,93 @@ def _collect_sealed_writes(ws: Path, workdir: Path, writes: Sequence[str],
                            write_renames: Mapping[str, str] | None = None) -> list[str]:
     """Copy declared output files from a sealed workspace back to the run directory.
 
-    Only declared ``writes`` are copied. Symlinks, paths that escape the workspace,
-    the payload file and files over :data:`SEALED_OUTPUT_MAX_BYTES` are refused.
+    Only declared ``writes`` are copied. Symlinks are refused at every level
+    (opened with O_NOFOLLOW through each path component, same as
+    ``workspace.collect``). Paths that escape the workspace, the payload file
+    and files over :data:`SEALED_OUTPUT_MAX_BYTES` are refused. A declared
+    write that the code did not produce is an error.
+
     Returns the names that were copied."""
     from refactory_dsh.items import detach_read_through
+    from refactory_dsh.workspace import _open_beneath, _copy_dir_beneath, _copy_file, _Linked
+
+    def _validate_relative(path_str: str, label: str) -> None:
+        rel = Path(path_str)
+        if rel.is_absolute() or ".." in rel.parts:
+            raise SnippetError(f"sealed script {node_id!r}: {label} {path_str!r} is not a "
+                               "relative path inside the workspace")
 
     copied: list[str] = []
-    ws_real = os.path.realpath(ws)
     _built_as: dict[str, str] = {}
     if write_renames:
         for built, declared in write_renames.items():
             if declared is not None:
+                _validate_relative(built, "renamed output")
                 _built_as[declared] = built
-    for name in writes:
-        if name == SEALED_PAYLOAD:
-            continue
-        relative = Path(name)
-        if relative.is_absolute() or ".." in relative.parts:
-            raise SnippetError(f"sealed script {node_id!r}: output {name!r} is not a "
-                               "relative path inside the workspace")
-        src = ws / name
-        if (not src.exists() or src.is_symlink()) and name in _built_as:
-            src = ws / _built_as[name]
-        if not src.exists() or src.is_symlink():
-            continue
-        src_real = os.path.realpath(src)
-        if not src_real.startswith(ws_real.rstrip("/") + "/"):
-            raise SnippetError(f"sealed script {node_id!r}: output {name!r} escapes the "
-                               "workspace")
-        if src.is_file():
-            size = src.stat().st_size
-            if size > SEALED_OUTPUT_MAX_BYTES:
+    root = os.open(str(ws), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        for name in writes:
+            if name == SEALED_PAYLOAD:
+                continue
+            _validate_relative(name, "output")
+            try:
+                source = _open_beneath(root, Path(name).parts)
+            except _Linked:
                 raise SnippetError(
-                    f"sealed script {node_id!r}: output {name!r} is {size} bytes, over "
-                    f"the {SEALED_OUTPUT_MAX_BYTES} byte limit for a code step's output")
-            detach_read_through(workdir, name)
-            dst = workdir / name
-            dst.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(src, dst)
-            copied.append(name)
-        elif src.is_dir():
-            total = sum(f.stat().st_size for f in src.rglob("*") if f.is_file()
-                        and not f.is_symlink())
-            if total > SEALED_OUTPUT_MAX_BYTES:
+                    f"sealed script {node_id!r}: output {name!r} is a symlink, or under "
+                    "one; an output is a file or a directory of files") from None
+            if source is None and name in _built_as:
+                try:
+                    source = _open_beneath(root, Path(_built_as[name]).parts)
+                except _Linked:
+                    raise SnippetError(
+                        f"sealed script {node_id!r}: output {_built_as[name]!r} (collected "
+                        f"as {name!r}) is a symlink") from None
+            if source is None:
                 raise SnippetError(
-                    f"sealed script {node_id!r}: output directory {name!r} holds {total} "
-                    f"bytes, over the {SEALED_OUTPUT_MAX_BYTES} byte limit")
-            detach_read_through(workdir, name)
-            dst = workdir / name
-            if dst.exists():
-                shutil.rmtree(dst)
-            shutil.copytree(src, dst, symlinks=False)
-            copied.append(name)
+                    f"sealed script {node_id!r}: declared write {name!r} was not produced")
+            try:
+                st = os.fstat(source)
+                if stat.S_ISREG(st.st_mode):
+                    if st.st_size > SEALED_OUTPUT_MAX_BYTES:
+                        raise SnippetError(
+                            f"sealed script {node_id!r}: output {name!r} is {st.st_size} "
+                            f"bytes, over the {SEALED_OUTPUT_MAX_BYTES} byte limit for a "
+                            "code step's output")
+                    detach_read_through(workdir, name)
+                    dst = workdir / name
+                    dst.parent.mkdir(parents=True, exist_ok=True)
+                    _copy_file(source, dst)
+                    copied.append(name)
+                elif stat.S_ISDIR(st.st_mode):
+                    detach_read_through(workdir, name)
+                    dst = workdir / name
+                    if dst.exists():
+                        shutil.rmtree(dst)
+                    try:
+                        _copy_dir_beneath(source, dst, refuse_links=True)
+                    except _Linked:
+                        if dst.exists():
+                            shutil.rmtree(dst)
+                        raise SnippetError(
+                            f"sealed script {node_id!r}: output directory {name!r} "
+                            "contains a symlink; an output is a file or a directory "
+                            "of files") from None
+                    total = sum(f.stat().st_size for f in dst.rglob("*") if f.is_file())
+                    if total > SEALED_OUTPUT_MAX_BYTES:
+                        shutil.rmtree(dst)
+                        raise SnippetError(
+                            f"sealed script {node_id!r}: output directory {name!r} holds "
+                            f"{total} bytes, over the {SEALED_OUTPUT_MAX_BYTES} byte limit")
+                    copied.append(name)
+                else:
+                    raise SnippetError(
+                        f"sealed script {node_id!r}: output {name!r} is neither a file "
+                        "nor a directory")
+            finally:
+                os.close(source)
+    finally:
+        os.close(root)
     return copied
 
 

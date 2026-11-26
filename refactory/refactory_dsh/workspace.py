@@ -1460,12 +1460,10 @@ def collect(workspace: Workspace, workdir: Path, writes: list[str], *,
                         else:
                             stale.unlink(missing_ok=True)
                         continue
-                    if workspace.runner:
-                        raise WorkspaceError(
-                            f"agent node {workspace.node!r} declared write {name!r} but "
-                            f"did not produce it in its workspace at {workspace.path}"
-                        )
-                    continue
+                    raise WorkspaceError(
+                        f"agent node {workspace.node!r} declared write {name!r} but "
+                        f"did not produce it in its workspace at {workspace.path}"
+                    )
                 destination = _path(workdir, name)
                 destination.parent.mkdir(parents=True, exist_ok=True)
                 try:
@@ -1579,22 +1577,31 @@ def _copy_file(source: int, destination: Path) -> None:
             copy.write(chunk)
 
 
-def _copy_dir_beneath(source: int, destination: Path) -> None:
-    """Copy the directory open at ``source`` to ``destination``, leaving out links (and
-    anything neither a file nor a directory), each entry opened relative to its
-    directory's descriptor without following a link."""
+def _copy_dir_beneath(source: int, destination: Path, *,
+                      refuse_links: bool = False) -> None:
+    """Copy the directory open at ``source`` to ``destination``, each entry opened
+    relative to its directory's descriptor without following a link.
+
+    When ``refuse_links`` is False (the default), symlinks and other non-regular,
+    non-directory entries are silently left out.  When True, a symlink raises
+    `_Linked` so the caller can treat it as an error (the sealed code-step path
+    uses this)."""
     destination.mkdir(parents=True, exist_ok=True)
     for name in sorted(os.listdir(source)):
         try:
             fd = os.open(name, _NOFOLLOW, dir_fd=source)
         except OSError as exc:
-            if exc.errno in (errno.ELOOP, errno.ENOENT, errno.EMLINK, errno.ENXIO):
-                continue  # a link (or gone): left out, as a link always is
+            if exc.errno in (errno.ELOOP, errno.EMLINK):
+                if refuse_links:
+                    raise _Linked from None
+                continue
+            if exc.errno in (errno.ENOENT, errno.ENXIO):
+                continue
             raise
         try:
             mode = os.fstat(fd).st_mode
             if stat.S_ISDIR(mode):
-                _copy_dir_beneath(fd, destination / name)
+                _copy_dir_beneath(fd, destination / name, refuse_links=refuse_links)
             elif stat.S_ISREG(mode):
                 _copy_file(fd, destination / name)
         finally:

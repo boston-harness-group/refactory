@@ -191,16 +191,83 @@ def test_sealed_execute_refuses_oversized_output(tmp_path):
 
 
 @needs_seal
-def test_sealed_execute_missing_declared_write_is_not_an_error(tmp_path):
-    """A declared write the code did not produce is simply absent — not an error."""
+def test_sealed_execute_missing_declared_write_is_an_error(tmp_path):
+    """A declared write the code did not produce raises SnippetError."""
     pass_dir = _sealed_pass(tmp_path)
     code = "def main(inp):\n    return {}\n"
-    result = snippet.sealed_execute(
-        code, {"files": {}, "facts": {}},
-        workdir=pass_dir, node_id="skip",
-        reads=[], writes=["optional.txt"])
-    assert not (pass_dir / "optional.txt").exists()
-    assert result.get("_sealed_files", []) == []
+    with pytest.raises(snippet.SnippetError, match="declared write.*was not produced"):
+        snippet.sealed_execute(
+            code, {"files": {}, "facts": {}},
+            workdir=pass_dir, node_id="skip",
+            reads=[], writes=["optional.txt"])
+
+
+# ── security: symlink in directory write refused ────────────────────────
+
+
+@needs_seal
+def test_sealed_execute_refuses_symlink_in_directory_write(tmp_path):
+    """A declared directory write containing a symlink to a file outside the
+    workspace is refused, and nothing outside is copied."""
+    pass_dir = _sealed_pass(tmp_path)
+    secret = tmp_path / "outside" / "secret.txt"
+    secret.parent.mkdir()
+    secret.write_text("sensitive data")
+    code = (
+        "import os\n"
+        "def main(inp):\n"
+        "    os.makedirs('outdir', exist_ok=True)\n"
+        "    with open('outdir/legit.txt', 'w') as f:\n"
+        "        f.write('ok')\n"
+        f"    os.symlink({str(secret)!r}, 'outdir/leak')\n"
+        "    return {}\n"
+    )
+    with pytest.raises(snippet.SnippetError, match="symlink"):
+        snippet.sealed_execute(
+            code, {"files": {}, "facts": {}},
+            workdir=pass_dir, node_id="escape",
+            reads=[], writes=["outdir"])
+    assert not (pass_dir / "outdir" / "leak").exists()
+
+
+@needs_seal
+def test_sealed_execute_refuses_symlink_file_write(tmp_path):
+    """A declared file write that is itself a symlink is refused."""
+    pass_dir = _sealed_pass(tmp_path)
+    secret = tmp_path / "outside" / "secret.txt"
+    secret.parent.mkdir()
+    secret.write_text("sensitive data")
+    code = (
+        "import os\n"
+        "def main(inp):\n"
+        f"    os.symlink({str(secret)!r}, 'leak.txt')\n"
+        "    return {}\n"
+    )
+    with pytest.raises(snippet.SnippetError, match="symlink"):
+        snippet.sealed_execute(
+            code, {"files": {}, "facts": {}},
+            workdir=pass_dir, node_id="escape",
+            reads=[], writes=["leak.txt"])
+
+
+# ── defence in depth: _built_as validation ──────────────────────────────
+
+
+def test_collect_sealed_writes_validates_built_as_paths(tmp_path):
+    """_collect_sealed_writes validates _built_as values for absolute paths
+    and '..' before using them, same as the declared name."""
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    (ws / "legit.txt").write_text("ok")
+
+    from refactory_dsh.snippet import _collect_sealed_writes
+
+    with pytest.raises(snippet.SnippetError, match="relative path"):
+        _collect_sealed_writes(ws, tmp_path / "run", ["out.txt"], "node",
+                               write_renames={"/etc/passwd": "out.txt"})
+    with pytest.raises(snippet.SnippetError, match="relative path"):
+        _collect_sealed_writes(ws, tmp_path / "run", ["out.txt"], "node",
+                               write_renames={"../../escape": "out.txt"})
 
 
 # ── proposer request text ────────────────────────────────────────────────
@@ -579,9 +646,8 @@ def test_workspace_collect_maps_write_renames(tmp_path):
     agent still writes output.xlsx.  workspace.collect must find it under the
     built name and copy it as the declared name.
 
-    Without write_renames the file is silently dropped — the bug that broke
-    pattern A in the lab."""
-    from refactory_dsh.workspace import Workspace, collect
+    Without write_renames the file is not found and collection raises."""
+    from refactory_dsh.workspace import Workspace, WorkspaceError, collect
 
     run = tmp_path / "run"
     run.mkdir()
@@ -597,9 +663,8 @@ def test_workspace_collect_maps_write_renames(tmp_path):
         root=ws_root, path=ws_path,
     )
 
-    without = collect(place, run, ["implement_own_output.xlsx"])
-    assert "implement_own_output.xlsx" not in without.get("copied", []), \
-        "without write_renames, the renamed write is silently dropped"
+    with pytest.raises(WorkspaceError, match="declared write.*did not produce"):
+        collect(place, run, ["implement_own_output.xlsx"])
 
     summary = collect(place, run, ["implement_own_output.xlsx"],
                       write_renames={"output.xlsx": "implement_own_output.xlsx"})
