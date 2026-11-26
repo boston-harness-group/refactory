@@ -350,13 +350,10 @@ def test_wrap_on_a_gate_needs_a_gate():
     assert _validate(moved) == []
 
 
-def test_bypass_reconnects_predecessor_to_successor():
-    """Bypass rewires the edges and leaves the data hole for the validator.
-
-    Removing ``b`` reconnects ``a`` to ``c``, but ``c`` still reads what ``b``
-    produced. That dangling read is reported rather than papered over, which is
-    the difference between a naive operator and a repairing one.
-    """
+def test_bypass_refuses_when_downstream_reads_unique_output():
+    """Bypass is refused when the target is the only writer of an output that a
+    later step reads, so the proposer can repair the edit instead of leaving a
+    data hole for the validator."""
     chain = nn.Graph()
     chain.add(nn.Node("a", "op", call="json:dumps", writes=("a.json",)))
     chain.add(nn.Node("b", "op", call="json:loads", reads=("a.json",), writes=("b.json",)))
@@ -364,11 +361,10 @@ def test_bypass_reconnects_predecessor_to_successor():
     chain.connect("a", "b")
     chain.connect("b", "c")
     state = {"version": nn.STATE_VERSION, "graph": chain.to_state(), "knobs": {}}
-    moved = nn.edits.apply({"op": "bypass", "target": "b"}, state)
-    graph = nn.Graph.from_state(moved["graph"])
-    assert sorted(graph.nodes) == ["a", "c"]
-    assert [e.target for e in graph.out_edges("a")] == ["c"]
-    assert _audit(graph) == ["c: reads 'b.json', nothing produces it"]
+    reason = nn.edits.precheck({"op": "bypass", "target": "b"}, state)
+    assert reason is not None
+    assert "b.json" in reason
+    assert "only" in reason or "unique" in reason or "produces" in reason
 
 
 def test_bypass_refuses_the_start_node():

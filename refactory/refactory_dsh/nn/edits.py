@@ -1115,6 +1115,49 @@ def _pre_bypass(edit: dict, state: State) -> str | None:
             "reconnecting predecessors to successors would make that node feed "
             "itself"
         )
+    other_writers: dict[str, set[str]] = {}
+    for nid, node in graph.nodes.items():
+        if nid == target.id:
+            continue
+        for w in node.writes:
+            other_writers.setdefault(w, set()).add(nid)
+    other_producers: dict[str, set[str]] = {}
+    for nid, node in graph.nodes.items():
+        if nid == target.id:
+            continue
+        for p in node.produces:
+            other_producers.setdefault(p, set()).add(nid)
+    downstream: set[str] = set()
+    stack = [e.target for e in outgoing]
+    while stack:
+        nid = stack.pop()
+        if nid in downstream:
+            continue
+        downstream.add(nid)
+        stack.extend(e.target for e in graph.out_edges(nid))
+    stranded: list[str] = []
+    for w in target.writes:
+        if w in other_writers:
+            continue
+        for nid in downstream:
+            node = graph.nodes[nid]
+            if w in node.reads or w in node.required_reads:
+                stranded.append(w)
+                break
+    for p in target.produces:
+        if p in other_producers:
+            continue
+        for nid in downstream:
+            node = graph.nodes[nid]
+            if p in node.inputs:
+                stranded.append(p)
+                break
+    if stranded:
+        names = ", ".join(sorted(set(stranded)))
+        return (
+            f"{target.id!r} is the only node that produces {names}; steps after it "
+            "read them, so bypassing it would leave those reads unsatisfied"
+        )
     return None
 
 
@@ -1417,7 +1460,8 @@ _macro("insert_before", "Splice a new node in front of an existing node.",
 _macro("wrap", "Put a new node on every out-edge of an existing node, so it sees "
        "the same verdicts (an observer, a verifier, a retry wrapper).",
        ("target", "node"), _pre_wrap, _expand_wrap, reads_as=("step",))
-_macro("bypass", "Remove a node and reconnect each predecessor to each successor.",
+_macro("bypass", "Remove a node and reconnect each predecessor to each successor. "
+       "Refused when the node is the only writer of an output that a later step reads.",
        ("target",), _pre_bypass, _expand_bypass, reads_as=("step", "edges"))
 _macro("duplicate", "Insert a copy of a node directly after it; the copy gets its own "
        "knobs (same current values) for every field the original binds to a knob. The copy "

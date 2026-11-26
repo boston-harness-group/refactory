@@ -2037,8 +2037,11 @@ def composition_section(catalogue: Sequence[dict[str, Any]], node_states: Sequen
         sealed_imports, has_packages = _sealed_code_imports(node_states)
         lines += [
             f"- **code op**: `\"call\": \"{snippet.RUN}\"` with `code`, Python that defines "
-            "`main(inp)`. `inp` is `{\"files\": {each declared read that exists: its text}, "
-            "\"facts\": {each name in its `inputs`: its value}}`; `main` returns "
+            "`main(inp)`. `inp` is `{\"files\": {each declared read whose content is text: "
+            "its text}, \"facts\": {each name in its `inputs`: its value}}`; binary reads "
+            "(e.g. .xlsx) are silently absent from `inp[\"files\"]`, and without "
+            "`\"sealed\": true` a code step cannot read them from disk (the sandbox has no "
+            "file access). `main` returns "
             "`{\"facts\": {...}, \"files\": {...}}`, each one declared in its `produces` / "
             "`writes`. It costs no model call. Limits: imports only these modules: "
             f"{snippet.ALLOWED_IMPORTS_TEXT}; at most {snippet.MAX_CODE_BYTES} "

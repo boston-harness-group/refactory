@@ -3799,7 +3799,9 @@ OPERATORS: dict[str, dict[str, Any]] = {
         "line": "a step run instead when 'step' (one run per item) fails -- it raises, "
                 "crashes past its retries or hits its output or prompt limit; never for time or a "
                 "harness fault: it writes that step's outputs, so what reads them still "
-                "gets an answer; 'kind' as in insert; it sees what 'step' sees",
+                "gets an answer; 'kind' as in insert; it sees what 'step' sees; when the step "
+                "writes more than one file, the fallback must be a code step or an agent with "
+                "tools (a plain agent writes only its reply)",
         "example": {"op": "fallback", "step": "<step>", "kind": "agent",
                     "text": "<a simpler way to the same output>"},
     },

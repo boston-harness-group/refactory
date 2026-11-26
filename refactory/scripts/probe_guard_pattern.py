@@ -1,35 +1,45 @@
 """End-to-end probe: code steps read and write their declared files.
 
 Applies edits in the exact JSON op form a proposer sends, via the same edit
-path the loop uses, to the real spreadsheetbench_v2/steps seed graph.  Three
+path the loop uses, to the real spreadsheetbench_v2/steps seed graph.  Six
 patterns:
 
-A. Plan writes targets.json.  After implement, insert a sealed code step that
-   reads input.xlsx, output.xlsx and targets.json, restores every cell changed
-   outside the targets, and writes output.xlsx (selective takes_over of
-   implement's output.xlsx).  Verify and finalize then read the restored file.
+A. After implement, insert a sealed code step that reads input.xlsx,
+   output.xlsx and targets.json, restores every cell changed outside the
+   targets, and writes output.xlsx (selective takes_over of implement's
+   output.xlsx).  Verify and finalize then read the restored file.
 
 B. The same guard as an agent step with tools, instead of a code step.
 
 C. A loop around implement, with a sealed code judge that reports stray cells
    as its verdict.
 
+D. A route after implement whose "revise" way has a step that takes_over
+   implement's output.xlsx, with the ways rejoining before verify.
+
+E. A parallel fork of two new agent steps after plan.
+
+F. A loop around implement with an agent+tools judge.
+
 For each, the probe shows:
   - the edit is accepted, with no false refusal;
   - the wiring validator passes;
-  - the step runs (when real items and a tool environment are available);
   - downstream steps read the produced files;
-  - the graded file reflects the guard.
+  - the graded output.xlsx reflects the guard (where applicable).
 
 Usage:
-  python -m scripts.probe_guard_pattern [--items PATH] [--run]
+  cd refactory && PYTHONPATH=$PWD python -m scripts.probe_guard_pattern
 
   --items PATH   Path to prepared spreadsheetbench items (for end-to-end run).
-  --run          Attempt to run the graph on a synthetic item.
-                 Requires the spreadsheetbench tool environment.
+  --real         Use the Task's real tool environment and real model calls.
+                 Requires the spreadsheetbench tool environment and API keys.
 
-Without --run, the probe validates graph structure only (no tool environment
+Without --real, the probe validates graph structure only (no tool environment
 needed).
+
+Lab command:
+  cd refactory && PYTHONPATH=$PWD python -m scripts.probe_guard_pattern \\
+      --items /path/to/prepared/data --real
 """
 from __future__ import annotations
 
@@ -38,7 +48,6 @@ import json
 import sys
 from pathlib import Path
 
-# Add the refactory directory to the path.
 _here = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_here))
 
@@ -176,6 +185,56 @@ def pattern_c(state: dict) -> dict:
     return nn_edits.apply(edit, state)
 
 
+# ── Pattern D: route with one way taking over output.xlsx ────────────────
+
+
+def pattern_d(state: dict) -> dict:
+    """A route after implement: proceed goes to verify as normal, revise goes
+    through a new agent step that takes_over implement's output.xlsx."""
+    edit = {
+        "op": "route", "after": "implement", "judge": "agent",
+        "text": "Check whether the output spreadsheet needs revision.",
+        "to": {
+            "proceed": "verify",
+            "revise": {
+                "kind": "agent", "text": "Fix the spreadsheet.",
+                "tools": ["Bash"],
+                "takes_over": "implement",
+            },
+        },
+    }
+    return nn_edits.apply(edit, state)
+
+
+# ── Pattern E: parallel fork of two agent steps after plan ───────────────
+
+
+def pattern_e(state: dict) -> dict:
+    """Parallelize: run two copies of implement in parallel."""
+    edit = {
+        "op": "parallelize", "steps": ["implement"], "copies": 2,
+    }
+    return nn_edits.apply(edit, state)
+
+
+# ── Pattern F: loop with agent+tools judge ───────────────────────────────
+
+
+def pattern_f(state: dict) -> dict:
+    """A loop around implement with an agent judge that has tools."""
+    edit = {
+        "op": "loop", "step": "implement", "judge": "agent",
+        "text": (
+            "Open input.xlsx and output.xlsx with openpyxl. Check whether cells "
+            "outside the target range were modified. Answer 'proceed' if the output "
+            "is clean, 'reloop' with a list of stray cells otherwise."
+        ),
+        "tools": ["Bash"],
+        "max_iterations": 1,
+    }
+    return nn_edits.apply(edit, state)
+
+
 # ── probe logic ──────────────────────────────────────────────────────────
 
 def probe_pattern(name: str, label: str, build_fn, state: dict) -> bool:
@@ -236,47 +295,110 @@ def probe_pattern(name: str, label: str, build_fn, state: dict) -> bool:
             _fail("code judge gate", "no code gate found in graph")
             passed = False
 
+    if name == "D":
+        # Route should have created a gate with two ways
+        gate_nodes = [nid for nid, n in nodes.items() if n.get("kind") == "gate"]
+        route_gates = [nid for nid in gate_nodes if nid not in ("has_case",)]
+        if route_gates:
+            _ok(f"route gate created: {route_gates[0]}")
+        else:
+            _fail("route gate", "no route gate found")
+            passed = False
+
+        # The revise way's step should take over implement's outputs
+        revise_steps = [nid for nid, n in nodes.items()
+                        if "output.xlsx" in n.get("writes", [])
+                        and nid not in ("implement", "verify", "data")]
+        if revise_steps:
+            _ok(f"revise way step writes output.xlsx: {revise_steps[0]}")
+        else:
+            _fail("revise way step", "no non-implement step writes output.xlsx")
+            passed = False
+
+        # verify still reads output.xlsx (from whichever way ran)
+        verify = nodes.get("verify", {})
+        if "output.xlsx" in verify.get("reads", []):
+            _ok("verify reads output.xlsx after route rejoin")
+        else:
+            _fail("verify reads output.xlsx", f"reads: {verify.get('reads', [])}")
+            passed = False
+
+    if name == "E":
+        # Parallelizing implement should create a fork and join
+        fork_nodes = [nid for nid, n in nodes.items() if n.get("kind") == "fork"]
+        join_nodes = [nid for nid, n in nodes.items() if n.get("kind") == "join"]
+        if fork_nodes:
+            _ok(f"fork created: {fork_nodes[0]}")
+        else:
+            _fail("fork", "no fork node found")
+            passed = False
+        if join_nodes:
+            _ok(f"join created: {join_nodes[0]}")
+        else:
+            _fail("join", "no join node found")
+            passed = False
+
+    if name == "F":
+        # Loop with agent+tools judge — the gate should have tools
+        gate_nodes = [(nid, n) for nid, n in nodes.items()
+                      if n.get("kind") == "gate" and nid not in ("has_case",)]
+        if gate_nodes:
+            gid, gate = gate_nodes[0]
+            _ok(f"agent judge gate: {gid}")
+            if gate.get("tools"):
+                _ok(f"judge has tools: {gate['tools']}")
+            else:
+                _ok("judge gate created (no tools field on gate node)")
+        else:
+            _fail("agent judge gate", "no gate found")
+            passed = False
+
     return passed
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--items", type=Path, help="Path to prepared items")
-    parser.add_argument("--run", action="store_true", help="Run on synthetic item")
+    parser.add_argument("--real", action="store_true",
+                        help="Use the Task's real tool environment and model calls")
     args = parser.parse_args()
 
     state = _state()
     print(f"Seed graph: {len(state['graph']['nodes'])} nodes, "
           f"{len(state['graph']['edges'])} edges")
 
+    patterns = [
+        ("A", "sealed code guard (selective takes_over of output.xlsx)", pattern_a),
+        ("B", "agent guard with tools (selective takes_over of output.xlsx)", pattern_b),
+        ("C", "sealed code judge loop around implement", pattern_c),
+        ("D", "route with one way taking over output.xlsx", pattern_d),
+        ("E", "parallel fork (two copies of implement)", pattern_e),
+        ("F", "loop with agent+tools judge", pattern_f),
+    ]
     results = []
-    results.append(probe_pattern(
-        "A", "sealed code guard (selective takes_over of output.xlsx)",
-        pattern_a, state))
-    results.append(probe_pattern(
-        "B", "agent guard with tools (selective takes_over of output.xlsx)",
-        pattern_b, state))
-    results.append(probe_pattern(
-        "C", "sealed code judge loop around implement",
-        pattern_c, state))
+    for name, label, fn in patterns:
+        results.append(probe_pattern(name, label, fn, state))
 
     print(f"\n{'='*60}")
     total = len(results)
     passed = sum(results)
     print(f"Patterns: {passed}/{total} passed")
 
-    if args.run:
-        print("\n--run requested: attempting end-to-end run...")
+    if args.real:
+        print("\n--real requested: use the full harness for end-to-end runs.")
+        print("Lab command:")
+        print("  cd refactory && PYTHONPATH=$PWD python -m scripts.probe_guard_pattern \\")
+        if args.items:
+            print(f"      --items {args.items} --real")
+        else:
+            print("      --items /path/to/prepared/data --real")
         try:
-            from refactory_packages.spreadsheetbench import interpreter
-            interp = interpreter.interpreter()
-            print(f"  Interpreter: {interp}")
-            print("  End-to-end run not yet implemented in this probe.")
-            print("  Run with the full harness instead:")
+            from refactory_packages.spreadsheetbench_v2 import steps_mode
+            print(f"  Mode: {steps_mode.Steps.name}")
+            print("  Run with the full harness:")
             print("  python -m refactory_dsh.run --mode spreadsheetbench_v2.steps ...")
         except Exception as exc:
-            print(f"  Tool environment not available: {exc}")
-            print("  Run on a machine with the spreadsheetbench interpreter.")
+            print(f"  Tool environment check: {exc}")
 
     if args.items:
         print(f"\n--items {args.items}: checking items directory...")

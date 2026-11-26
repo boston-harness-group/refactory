@@ -387,3 +387,63 @@ def test_code_judge_loop_on_gate_loop_graph():
     assert "length_check" in nodes
     issues = validate_state(result)
     assert not issues, issues
+
+
+# ── gap 1: inp['files'] drops binary reads ──────────────────────────────
+
+
+def test_request_text_states_binary_reads_absent_from_inp():
+    """The proposer's request text states that binary reads are absent from
+    inp['files'] and that an unsealed code step cannot read them from disk."""
+    from refactory_dsh.nn import edits as edits_mod
+    from refactory_dsh.optim.base import composition_section
+
+    state = _steps_state()
+    nodes = [dict(s, id=node_id)
+             for node_id, s in state["graph"]["nodes"].items()]
+    text_knobs = [name for name, entry in state["knobs"].items()
+                  if entry["spec"]["kind"] == "str"]
+    text = "\n".join(composition_section(
+        edits_mod.catalogue(), nodes, state["graph"]["edges"],
+        code_nodes=True, text_knobs=text_knobs))
+    assert "binary" in text.lower()
+    assert "absent" in text or "silently" in text or "not carry" in text
+    assert "sandbox" in text or "sealed" in text
+
+
+# ── gap 2: bypass refused when downstream reads unique output ───────────
+
+
+def test_bypass_refused_when_downstream_reads_unique_output():
+    """Bypassing a step whose unique output is read downstream is refused at
+    edit time, so the proposer can repair the edit."""
+    state = _steps_state()
+    reason = nn_edits.precheck({"op": "bypass", "target": "implement"}, state)
+    assert reason is not None
+    assert "output.xlsx" in reason or "implement" in reason
+
+
+def test_bypass_allowed_when_output_has_another_writer():
+    """When a co-writer produces the same output, bypass is allowed."""
+    import refactory_dsh.nn as nn
+    chain = nn.Graph()
+    chain.add(nn.Node("a", "op", call="json:dumps", writes=("x.txt",)))
+    chain.add(nn.Node("b", "op", call="json:dumps", writes=("x.txt",)))
+    chain.add(nn.Node("c", "op", call="json:loads", reads=("x.txt",), writes=("out",)))
+    chain.connect("a", "b")
+    chain.connect("b", "c")
+    state = {"version": nn.STATE_VERSION, "graph": chain.to_state(), "knobs": {}}
+    reason = nn_edits.precheck({"op": "bypass", "target": "b"}, state)
+    assert reason is None
+
+
+# ── gap 3: fallback multi-file constraint stated ────────────────────────
+
+
+def test_fallback_line_states_multi_file_constraint():
+    """The fallback operator's description states that a step writing more than
+    one file needs a code or tools fallback, not a plain agent."""
+    from refactory_dsh.nn import core_ops
+    line = core_ops.OPERATORS["fallback"]["line"]
+    assert "more than one file" in line or "writes more" in line
+    assert "code" in line or "tools" in line
