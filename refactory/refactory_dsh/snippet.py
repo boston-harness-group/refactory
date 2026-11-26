@@ -843,6 +843,7 @@ def _collect_sealed_writes(ws: Path, workdir: Path, writes: Sequence[str],
 
 def sealed_execute(code: str, inp: Any, *, workdir: Path, node_id: str,
                    reads: Sequence[str] = (), writes: Sequence[str] = (),
+                   read_renames: Mapping[str, str] | None = None,
                    timeout_s: float = SEALED_WALL_S) -> Any:
     """``main(inp)`` of ``code``, run in the Task's sealed environment: the Task's Python
     interpreter, its extra commands, the node's declared ``reads`` visible read-only, no
@@ -856,7 +857,11 @@ def sealed_execute(code: str, inp: Any, *, workdir: Path, node_id: str,
     declared write the code left in the workspace is copied back to ``workdir``, so a
     sealed code step can produce binary files (xlsx, images) that downstream steps read.
     Only declared names are copied, symlinks are refused, and each file is bounded by
-    :data:`SEALED_OUTPUT_MAX_BYTES`."""
+    :data:`SEALED_OUTPUT_MAX_BYTES`.
+
+    ``read_renames`` maps a file's built (original) name to the name it is read under
+    after a takeover renamed it.  When present, the file is staged under both its
+    current name and its built name so the code can open either."""
     import tempfile
 
     from refactory_dsh import seal
@@ -905,6 +910,13 @@ def sealed_execute(code: str, inp: Any, *, workdir: Path, node_id: str,
                     shutil.copytree(src, dst)
                 else:
                     shutil.copy2(src, dst)
+        if read_renames:
+            for built_name, current_name in read_renames.items():
+                staged = ws / current_name
+                alias = ws / built_name
+                if staged.exists() and not alias.exists():
+                    alias.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(staged, alias)
         (ws / SEALED_PAYLOAD).write_text(payload)
         tools = seal.tool_path_from_environment(
             environment, bin_dir, workspace=ws, runs=runs,
@@ -1095,9 +1107,11 @@ def _execute_code(ctx: Any, found: dict[str, Any]) -> Any:
     code = _code(ctx, found)
     inp = _input(ctx, found)
     if found.get("sealed_script"):
+        renames = dict(ctx.read_renames) if getattr(ctx, "read_renames", None) else None
         return sealed_execute(code, inp, workdir=ctx.workdir, node_id=ctx.node_id,
                               reads=list(ctx.declared_reads),
-                              writes=list(ctx._declared))  # noqa: SLF001
+                              writes=list(ctx._declared),  # noqa: SLF001
+                              read_renames=renames)
     return execute(code, inp, hide=_hide(ctx))
 
 

@@ -1684,6 +1684,20 @@ def _expand_insert(edit: dict, state: dict) -> list[dict]:
         for knob, text in sorted(texts.items()):
             build.add([{"op": "set_knob", "name": knob, "value": text}])
         nodes = [_renamed_refs(n, names) for n in nodes]
+        # A sealed code step opens its reads by name in its code.  When a
+        # takeover renames a file (output.xlsx -> implement_own_output.xlsx),
+        # the code still opens the original name: record the mapping so
+        # sealed_execute can stage the file under both names.
+        file_renames = {old: new for (kind, old), new in names.items()
+                        if kind == "file"}
+        if file_renames:
+            for n in nodes:
+                if not n.get("sealed_script"):
+                    continue
+                read_map = {old: new for old, new in file_renames.items()
+                            if new in (n.get("reads") or [])}
+                if read_map:
+                    n["renames"] = {**(n.get("renames") or {}), "reads": read_map}
     head, _end = _chain(nodes)
     if side == "before":
         build.add(_renamed(build.state, anchor.id, [head], joins=False))

@@ -505,6 +505,72 @@ def test_guard_pattern_a_restores_stray_cells_end_to_end(tmp_path):
     assert ws_check["C1"].value == "original_c1", "unchanged cell was modified"
 
 
+# ── takeover rename: sealed code reads the version it replaces ─────────
+
+
+@needs_seal
+def test_sealed_guard_reads_taken_over_file_through_real_edit_path(tmp_path):
+    """After takes_over renames output.xlsx to implement_own_output.xlsx, the
+    sealed guard code opens 'output.xlsx' — the original (built) name. The
+    file is staged under both names via read_renames.
+
+    Reproduces the RuntimeError from the lab: without read_renames, the code
+    gets FileNotFoundError because only implement_own_output.xlsx exists in
+    the workspace."""
+    import openpyxl
+    from scripts.probe_guard_pattern import GUARD_CODE, pattern_a, _state
+
+    state = _state()
+    edited = pattern_a(state)
+    guard = edited["graph"]["nodes"]["guard"]
+
+    guard_reads = guard["reads"]
+    guard_writes = guard["writes"]
+    guard_renames = (guard.get("renames") or {}).get("reads") or {}
+
+    assert "implement_own_output.xlsx" in guard_reads, \
+        "takeover should rename output.xlsx to implement_own_output.xlsx"
+    assert "output.xlsx" not in guard_reads, \
+        "output.xlsx should no longer appear in reads after rename"
+    assert guard_renames.get("output.xlsx") == "implement_own_output.xlsx", \
+        "renames.reads should map built -> current"
+
+    pass_dir = _sealed_pass(tmp_path)
+
+    wb_in = openpyxl.Workbook()
+    ws_in = wb_in.active
+    ws_in.title = "Sheet"
+    ws_in["A1"] = "original_a1"
+    ws_in["B1"] = "original_b1"
+    wb_in.save(pass_dir / "input.xlsx")
+
+    targets = {"cells": [{"sheet": "Sheet", "cell": "A1"}]}
+    (pass_dir / "targets.json").write_text(json.dumps(targets))
+
+    wb_out = openpyxl.Workbook()
+    ws_out = wb_out.active
+    ws_out.title = "Sheet"
+    ws_out["A1"] = "answer"
+    ws_out["B1"] = "stray_change"
+    wb_out.save(pass_dir / "implement_own_output.xlsx")
+
+    result = snippet.sealed_execute(
+        GUARD_CODE,
+        {"files": {"targets.json": json.dumps(targets)}, "facts": {}},
+        workdir=pass_dir,
+        node_id="guard",
+        reads=guard_reads,
+        writes=guard_writes,
+        read_renames=guard_renames,
+    )
+
+    assert result["facts"]["restored_cells"] == 1
+    wb_check = openpyxl.load_workbook(pass_dir / "output.xlsx")
+    ws_check = wb_check.active
+    assert ws_check["A1"].value == "answer", "target cell was not preserved"
+    assert ws_check["B1"].value == "original_b1", "stray cell was not restored"
+
+
 # ── --real profile resolution ──────────────────────────────────────────
 
 
