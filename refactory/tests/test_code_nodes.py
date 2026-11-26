@@ -1594,7 +1594,7 @@ def test_the_request_says_agents_read_no_files_and_where_a_fact_is_filled_in(cod
     prompt and system prompt knobs and, on this graph, in the task knobs its ops fill."""
     text = _composition(code_nodes)
     assert "cannot read a file" not in text
-    assert "the files it lists in `reads` (pasted in after the prompt)" in text
+    assert "the files it names in `sees` (they become its declared reads, pasted in after the prompt)" in text
     assert ("a code op that reads the file and `produces` the fact" in text) is code_nodes
     assert "or when the agent that writes the file declares `produces`" in text
     filled = text[text.index("where `{{fact}}` is filled in"):]

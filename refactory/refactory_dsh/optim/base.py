@@ -2021,7 +2021,7 @@ def composition_section(catalogue: Sequence[dict[str, Any]], node_states: Sequen
         "- **agent**: one model call. Its prompt fills each `{{name}}` from a fact (or knob) "
         "produced upstream; its reply is written to its first `writes` file and, when it "
         "declares `produces`, also becomes that fact. A new agent without `tools` "
-        "sees only its prompt and the files it lists in `reads` (pasted in after the prompt): "
+        "sees only its prompt and the files it names in `sees` (they become its declared reads, pasted in after the prompt): "
         "hand it anything else as `{{facts}}`. "
         f"A file's text becomes a fact through {reader}, or when the agent that writes the "
         "file declares `produces`.",
@@ -2054,9 +2054,10 @@ def composition_section(catalogue: Sequence[dict[str, Any]], node_states: Sequen
         ]
         if sealed_imports:
             sealed_io = (
-                " Its declared `reads` are present as files in the working directory, so "
-                "it can `open()` them directly (including binary files such as .xlsx that "
-                "`inp[\"files\"]` does not carry). It may also write its declared `writes` "
+                " The files it names in `sees` become its declared reads and are present "
+                "as files in the working directory, so it can `open()` them directly "
+                "(including binary files such as .xlsx that `inp[\"files\"]` does not carry). "
+                "It may also write its declared `writes` "
                 "to the working directory; those files are copied back to the run directory "
                 "after a successful run, so downstream steps read them.")
             if has_packages:
@@ -2263,8 +2264,8 @@ def tools_line(ops: Iterable[str]) -> str:
             "tools or refuses them stays so). A new agent step may still have `tools` "
             f"(made by {_or_list(makers)}: in the edit's own 'tools', or in a step or node "
             "it carries): it runs sealed, in a fresh workspace holding "
-            "only the files it reads -- in the per-item part, unless its 'sees' (or a node's "
-            "'reads') names its inputs, the item's input files (the pipeline view lists "
+            "only the files it reads -- in the per-item part, unless its 'sees' "
+            "names its inputs, the item's input files (the pipeline view lists "
             "them) beside what it sees -- with no network and no grader files.")
 #: The same when this run offers no tool step (no seal here, or ``new_step_tools`` off).
 NO_TOOLS_LINE = ("- **tools**: every existing step keeps its own tool rules, and in this run "
@@ -4117,7 +4118,7 @@ def _available_section(available: Mapping[str, Mapping[str, Any]], *,
         "step makes. A prompt's "
         "`{{name}}` may name only a fact listed for its node (or a knob): a file's name is "
         "not a fact, and `{{notes}}` does not read `notes.txt`. An agent without tools sees "
-        "its prompt and the files it lists in `reads`, pasted in after the prompt. To hand "
+        "its prompt and the files in its `sees` (its declared reads, pasted in after the prompt). To hand "
         "files to a prompt as one `{{name}}`, insert a collect op before the node "
         f"(`\"call\": \"{COLLECT_CALL}\"`, the files in `reads`, the fact in `produces`: "
         "each file under its own header, a missing one said to be missing; one file over "
