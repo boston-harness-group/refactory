@@ -75,7 +75,8 @@ def no_smoke(monkeypatch: pytest.MonkeyPatch) -> None:
     `test_checkpoint_selection` tests the check itself."""
     from refactory_dsh.loop import Loop
 
-    monkeypatch.setattr(Loop, "_smoke_check", lambda self, parent, candidate: candidate)
+    monkeypatch.setattr(Loop, "_smoke_check",
+                        lambda self, parent, candidate, **kw: candidate)
 
 
 @pytest.fixture(autouse=True)
