@@ -14,6 +14,10 @@ The selection, in order:
   as files, its layout, records and docs, so no import says a change cannot reach them)
   and the tests that import every hub, the ones built on the whole engine.
 - **The test files the emission touched.**
+- **The importers of a changed file the check does not run.** A deleted test file, a test
+  another suite collects, or a product module named like a test (``test_selection.py``)
+  is not run, and does not widen the selection to the structural tests, but a collected
+  test that imports it now breaks: the file is resolved and its importers run.
 - **The last check's failures** that are not inherited (dm-128's set), as test ids.
 - **The tests that import a module the emission changed**, depth 1, and, when a source
   file changed but no hub did, the structural tests: cheapest first, so a slow file at
@@ -372,10 +376,12 @@ def select(touched: list[str], root: Path, prev_record: dict[str, Any] | None = 
 
     ``touched`` are paths from the repository root (`base_check._all_changed_files`);
     ``files`` the repository's files, listed from git when not given. Only Python tests
-    the check's pytest steps collect are selected (`pytest_scope`), and the hubs are
-    counted among them. ``imports`` stands for `import_map` when given: the imports of
-    a tree as it was, for a selection replayed on it. ``first`` are the ids the last
-    self-check found failing, on a fix-up; ``costs`` the seconds earlier self-checks
+    the check's pytest steps collect are run (`pytest_scope`), and the hubs are counted
+    among them. A touched file the check does not run — a deleted test, a test another
+    suite collects, a product module named like a test — is resolved for imports, so the
+    collected tests that import it run. ``imports`` stands for `import_map` when given: the
+    imports of a tree as it was, for a selection replayed on it. ``first`` are the ids the
+    last self-check found failing, on a fix-up; ``costs`` the seconds earlier self-checks
     timed test files at (`costs_from_record`), ``bounds`` those of them that are only lower
     bounds (`lower_bounds`); ``alone`` the files to run one per chunk (`run_alone`), kept
     in ``Selection.alone`` when the selection holds them.
@@ -388,33 +394,34 @@ def select(touched: list[str], root: Path, prev_record: dict[str, Any] | None = 
     last_failures = _failures(prev_record or {}, root)
     touched_tests: list[str] = []
     sources: list[str] = []
+    gone: list[str] = []
     for name in dict.fromkeys(path.strip() for path in touched if path.strip()):
         if name.endswith(DOC_SUFFIXES) or is_generated(root, name):
             continue
         if is_test_file(name):
             if (root / name).is_file() and (not name.endswith(".py") or _in_scope(name, scope)):
                 touched_tests.append(name)
-            elif name.endswith(".py") and (root / name).is_file():
-                # A Python file named like a test but outside the check's pytest scope is
-                # not a test the check runs: the product may name a module ``test_*.py``,
-                # as ``refactory_dsh/test_selection.py`` is, and the tests that import it
-                # are what the change reaches. A deleted test file still selects nothing.
-                sources.append(name)
+            elif name.endswith(".py"):
+                # Not a test this check runs, but a file a collected test may import: a
+                # deleted test (it imports it and now fails at import), a test another
+                # suite collects, or a product module named ``test_*.py`` (as
+                # ``refactory_dsh/test_selection.py`` is). Its importers run; it does not.
+                gone.append(name)
         else:
             sources.append(name)
     selection = Selection(touched_tests=sorted(touched_tests), last_failures=last_failures,
                           first=list(dict.fromkeys(runnable(test_id) for test_id in first
                                                    if (root / _file_of(test_id)).is_file())))
-    if not sources and not touched_tests and not last_failures:
+    if not sources and not touched_tests and not gone and not last_failures:
         selection.tests = list(dict.fromkeys(selection.first))
         selection.alone = _kept(alone, selection.tests)
         return selection
     if imports is None:
-        imports = import_map(root, files, tuple(sources), scope)
+        imports = import_map(root, files, tuple(sources) + tuple(gone), scope)
     hub_set = hubs(imports)
     structural = sorted(test for test, modules in imports.items() if not modules)
-    changed = set(sources)
-    selection.hubs_changed = sorted(changed & hub_set)
+    changed = set(sources) | set(gone)
+    selection.hubs_changed = sorted(set(sources) & hub_set)
     if selection.hubs_changed:
         whole_engine = sorted((test for test, modules in imports.items()
                                if modules and hub_set <= modules),
