@@ -337,7 +337,7 @@ def test_the_worst_case_ends_in_the_build_loop_stop_not_the_iteration_limit(tmp_
                                                           render({"tool.py": f"VERSION = {10 + n}\n"}))]
     model = FakeModel(_answers(*emits))
     run = tmp_path / "run"
-    result = _design(run, model, repo, _mode(check_attempts=3, self_check_fixups=2))
+    result = _design(run, model, repo, _mode(check_attempts=3, self_check_fixups=2, fix_rounds=10))
     # The check limit stops the build; its attempts applied, so it ends as a draft marked
     # check failing (b45a), not at a gate's iteration limit.
     assert result.exit_ok, result.error
@@ -1265,7 +1265,7 @@ def test_the_full_check_still_runs_and_binds_after_a_self_check_cut_at_the_limit
     fixed = render({"tests/test_z_pin.py": "import tool\n\n\ndef test_z():\n    assert tool.VERSION == 3\n"})
     model = FakeModel(_answers(BREAKS, still_broken, fixed))
     run = tmp_path / "run"
-    result = _design(run, model, repo, _mode(self_check_timeout_s=10, check_timeout_s=60))
+    result = _design(run, model, repo, _mode(self_check_timeout_s=10, check_timeout_s=60, fix_rounds=10))
     assert result.exit_ok, result.error
     records = _records(run)
     # The first attempt now runs in chunks (like a fix-up): the slow file gets cut.
@@ -1497,7 +1497,7 @@ def test_the_worst_case_at_the_knobs_bounds_still_ends_in_the_stop(tmp_path, mon
                                                           render({"tool.py": f"VERSION = {10 + n}\n"}))]
     model = FakeModel(_answers(*emits))
     run = tmp_path / "run"
-    result = _design(run, model, repo, _mode(check_attempts=5, self_check_fixups=5))
+    result = _design(run, model, repo, _mode(check_attempts=5, self_check_fixups=5, fix_rounds=10))
     # The check limit stops the build; its attempts applied, so it ends as a draft marked
     # check failing (b45a), not at a gate's iteration limit.
     assert result.exit_ok, result.error

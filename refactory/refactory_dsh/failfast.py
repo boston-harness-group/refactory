@@ -1116,6 +1116,25 @@ def classify_empty_emission(
     )
 
 
+def _matches_inherited(tid: str, inherited: set[str]) -> bool:
+    """Whether ``tid`` matches any id in ``inherited``, tolerating short-name runners.
+
+    Runner test_ids are normally full (``tests/test_x.py::test_y``), but
+    ``check_digest._parse_pytest`` falls back to the short name from the failure
+    header when matching fails. The inherited set always holds full ids. A short
+    ``tid`` like ``test_y`` matches ``tests/test_x.py::test_y`` in inherited, and
+    a full ``tid`` matches a short inherited entry the same way.
+    """
+    if tid in inherited:
+        return True
+    tid_name = tid.split("::")[-1] if "::" in tid else tid
+    for entry in inherited:
+        entry_name = entry.split("::")[-1] if "::" in entry else entry
+        if tid_name == entry_name:
+            return True
+    return False
+
+
 def detect_stuck(
     prev_record: dict[str, Any],
     curr_runners: list[dict[str, Any]],
@@ -1157,12 +1176,13 @@ def detect_stuck(
     # Inherited set from previous record.
     inherited_set = set(prev_record.get("inherited", []))
 
-    # Compare only tests both checks ran.
+    # Compare only tests both checks ran, using full ids consistently.
     common_ids = set(prev_failures) & set(curr_failures)
     stuck_tests = [
         (tid, curr_failures[tid])
         for tid in sorted(common_ids)
-        if tid not in inherited_set and prev_failures[tid] == curr_failures[tid]
+        if not _matches_inherited(tid, inherited_set)
+        and prev_failures[tid] == curr_failures[tid]
     ]
 
     if not stuck_tests:

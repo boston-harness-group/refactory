@@ -126,6 +126,8 @@ def _advisories(ctx: Any) -> list[str]:
 
 def _repair(ctx: Any, findings: list[str], *, kind: str = "check",
             early_stop: bool = False) -> str:
+    from refactory_dsh import finish
+
     used = int(ctx.facts.get("repairs_used", 0))
     limit = int(ctx.knob("repair_attempts", 1))
     feedback = "\n".join(findings)
@@ -168,12 +170,13 @@ def _repair(ctx: Any, findings: list[str], *, kind: str = "check",
                     if (current
                             and current < previous
                             and current <= all_prior
-                            and blocker is None):
+                            and blocker is None
+                            and finish.allows_round(ctx)):
                         ctx.set_fact("convergence_extras_used", extras_used + 1)
                         ctx.set_fact("convergence_granted", True)
                         ctx.set_fact("repairs_used", used + 1)
                         ctx.write_json("fast-report.json", _report(ctx, "repairing", findings))
-                        return Verdict("reloop", feedback)
+                        return finish.sent_back(ctx, Verdict("reloop", feedback))
                 if cap > limit and kind_used >= cap:
                     ctx.write_json("fast-report.json", _report(ctx, "unresolved", findings))
                     raise BuildLoopStop(
@@ -195,9 +198,14 @@ def _repair(ctx: Any, findings: list[str], *, kind: str = "check",
             f"focused QA/admission unresolved after {used} repair(s) "
             f"({label} failure): {feedback}"
         )
+    if not finish.allows_round(ctx):
+        ctx.write_json("fast-report.json", _report(ctx, "unresolved", findings))
+        raise BuildLoopStop(
+            f"{finish.round_spent_reason(ctx)}: {feedback}"
+        )
     ctx.set_fact("repairs_used", used + 1)
     ctx.write_json("fast-report.json", _report(ctx, "repairing", findings))
-    return Verdict("reloop", feedback)
+    return finish.sent_back(ctx, Verdict("reloop", feedback))
 
 
 def gate_emit(ctx: Any) -> str:

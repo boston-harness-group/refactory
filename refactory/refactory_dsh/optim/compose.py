@@ -10,14 +10,10 @@ sampler, or any :class:`~refactory_dsh.optim.base.Optimizer`:
 Selection stays inside an optimizer, as issue #32 settled: the pair *is* one
 optimizer, and the loop hands it the evaluated population as it hands any other.
 
-One parent per optimizer step. The loop asks :meth:`PickedParent.choose_parent`
-before it builds the request, so "The pipeline you may edit", the knobs (a
-structural child's own included) and the trajectories are the picked candidate's,
-and every proposal of the step -- a retry after a refusal included -- is applied to
-it. A model proposer describes one pipeline per request, so picking several parents
-per step would mean several requests; across steps the picker still moves between
-niches, islands or tournament winners. The picker's reason reaches the request as
-part of the round's decision (``ProposalContext.strategy["parent_picker"]``).
+One parent per proposal call. With ``batch_size`` *N* > 1 and a model proposer, the
+loop makes *N* sequential calls each with its own picker-chosen parent and per-parent
+context, so each slot explores a different niche.  ``choose_parent`` is called per
+slot; the picker's reason reaches each call's request.
 """
 
 from __future__ import annotations

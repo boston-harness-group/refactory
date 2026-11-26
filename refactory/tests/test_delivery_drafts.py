@@ -195,7 +195,7 @@ def test_a_review_limit_at_gate_qa_with_a_passing_attempt_delivers_a_draft(githu
     result, model = _limited(run, _attempt(BUILT, judge=redo),
                              _attempt(render({"tool.py": "print('built!')\n"}), judge=redo,
                                       overwatch=overwatch_judgment("pass")),
-                             review_attempts=2)
+                             review_attempts=2, fix_rounds=10)
     assert result.exit_ok, result.error
     assert result.facts["draft_delivery"] == {
         "reason": "review reloop limit reached after 2 review cycle(s)",
@@ -400,7 +400,7 @@ def test_the_overall_limit_on_a_review_send_back_drafts_through_the_overwatch(gi
                              _attempt(BUILT, judge=qa_judgment("redo", must_fix=[QA_HELD])),
                              _attempt(rebuilt, judge=qa_judgment("redo", must_fix=[QA_HELD]),
                                       overwatch=overwatch_judgment("pass")),
-                             check_attempts=2, review_attempts=3, check_attempt_cap=0)
+                             check_attempts=2, review_attempts=3, check_attempt_cap=0, fix_rounds=10)
     assert result.exit_ok, result.error
     fact = result.facts["draft_delivery"]
     assert fact["reason"] == "authoring unresolved after 2 attempt(s)" and "check_failing" not in fact
@@ -679,8 +679,11 @@ def test_draft_existing_pr_converted_to_draft(new_run):
     pulls = _pulls(github, slug)
     updated_pull = next(p for p in pulls if p["number"] == pull_before["number"])
     assert updated_pull["body"].startswith(f"{delivery.DRAFT_MADE}\n{delivery.DRAFT_HEADING}\n"), updated_pull["body"][:200]
-    # The old body is preserved after the preamble.
-    assert updated_pull["body"].endswith(old_body), "old body should be preserved"
+    # The old body sections are preserved; Open items may appear inside the delivery markers.
+    old_sections = old_body.replace(delivery.BODY_END + "\n", "").rstrip()
+    assert old_sections in updated_pull["body"], "old body sections should be preserved"
+    assert updated_pull["body"].endswith(delivery.BODY_END + "\n")
+    assert "<!-- refactory:open-items -->" in updated_pull["body"]
     assert updated_pull.get("draft") is True
 
 
@@ -920,7 +923,9 @@ def test_delivering_a_draft_again_replaces_its_unresolved_section(new_run):
     assert pull["body"].count(delivery.DRAFT_HEADING) == 1
     assert "overall attempts limit reached" in pull["body"] and DRAFT_FACT["reason"] not in pull["body"]
     assert _draft_items(pull["body"]) == ["- Still flaky (source: review) (rounds: 4)"]
-    assert pull["body"].endswith(first["body"])
+    first_sections = first["body"].replace(delivery.BODY_END + "\n", "").rstrip()
+    assert first_sections in pull["body"], "first body sections should be preserved"
+    assert pull["body"].endswith(delivery.BODY_END + "\n")
 
 
 def test_a_draft_refinement_turns_the_refined_pull_request_into_a_draft(opened_pull, tmp_path):

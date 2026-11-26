@@ -1344,8 +1344,6 @@ def _describe(ctx: Any, url: str, draft_delivery: dict[str, Any] | None) -> str:
 
     finishing = finish.fact(ctx)
     if finishing is not None:
-        # A finish brings the description's Open items up to this run, markers or not: each
-        # item it worked on or re-checked is resolved or still open, with the evidence.
         body = finish.update_body(body, finishing, finish.results(ctx, finishing, draft=draft_delivery))
     if legacy:
         kept = ("its text is kept as written, with the draft's section put above it"
@@ -2601,13 +2599,10 @@ def evaluate_delivery_conflicts(ctx: Any) -> "Verdict | str":
 
 def _conflict_reloops_allowed(ctx: Any) -> int:
     """How many times a conflict with the base goes back to the builder: ``check_attempts``,
-    and on a finish run one more than it has gone back only while the run's one fix round
-    is unspent (`finish.allows_round`)."""
+    bounded by the fix-round budget (`finish.allows_round`)."""
     from refactory_dsh import finish
 
     allowed = int(ctx.knob("check_attempts", 3))
-    if finish.fact(ctx) is None:
-        return allowed
     used = int(ctx.facts.get("delivery_conflict_reloops", 0) or 0)
     return min(allowed, used + (1 if finish.allows_round(ctx) else 0))
 
@@ -2811,11 +2806,89 @@ def _prepend_draft_preamble(ctx: Any, draft_delivery: dict[str, Any]) -> None:
     body_path.write_text(_with_draft_section(existing_body, draft_delivery))
 
 
+_FILE_LINE = re.compile(r"[\w./-]+(?:\.py|\.ts|\.tsx|\.js|\.jsx|\.rs|\.go|\.rb):\d+")
+_TEST_ID_RE = re.compile(r"[\w./-]+\.py::[\w\[\]./:-]+|[\w./-]+\.(?:test|spec)\.[jt]sx?")
+
+
+def _collect_open_items(ctx: Any, draft_delivery: dict[str, Any] | None) -> list:
+    """Build open items from the run's records for the PR description.
+
+    On a draft: items from the check failure and each unresolved finding.
+    On a ready PR: items from advisory follow-ups and excused (inherited) failures.
+    Returns an empty list when there is nothing to list; the caller decides whether
+    to render.
+    """
+    from refactory_dsh import open_items as open_items_mod
+
+    items: list[open_items_mod.OpenItem] = []
+    counter: dict[str, int] = {}
+
+    def _id(prefix: str) -> str:
+        counter[prefix] = counter.get(prefix, 0) + 1
+        return f"{prefix}-{counter[prefix]}"
+
+    if draft_delivery:
+        if draft_delivery.get("check_failing"):
+            failure_text = str(draft_delivery.get("check_failure") or "the check failed")
+            test_ids = _TEST_ID_RE.findall(failure_text)
+            for tid in test_ids:
+                items.append(open_items_mod.OpenItem(
+                    id=_id("cf"), kind="change_failure",
+                    summary=f"test fails: {tid.split('::')[-1] if '::' in tid else tid}",
+                    evidence=(tid,)))
+            if not test_ids:
+                items.append(open_items_mod.OpenItem(
+                    id=_id("cf"), kind="change_failure",
+                    summary=_flat(failure_text)[:200]))
+        for entry in draft_delivery.get("unresolved", []):
+            if not isinstance(entry, dict):
+                continue
+            text = str(entry.get("text") or "").strip()
+            source = str(entry.get("source") or "")
+            if not text:
+                continue
+            kind = "unfinished_ask" if "not built" in text.lower() else "qa_finding"
+            evidence: list[str] = []
+            match = _FILE_LINE.search(text)
+            if match:
+                evidence.append(match.group(0))
+            items.append(open_items_mod.OpenItem(
+                id=_id(kind[:2]), kind=kind,
+                summary=_flat(text)[:300], evidence=tuple(evidence)))
+
+    record = ctx.read_json("check-record.json", {}) if ctx.exists("check-record.json") else {}
+    record_status = str(record.get("status") or "")
+    if record_status in ("check_timeout", "stopped"):
+        reason = str(record.get("validation") or record_status)
+        items.append(open_items_mod.OpenItem(
+            id=_id("env"), kind="environment",
+            summary=_flat(reason)[:200],
+            evidence=(f"log: {_flat(reason)[:300]}",)))
+
+    inherited = ctx.facts.get("inherited_failures") or []
+    if inherited:
+        for tid in inherited:
+            items.append(open_items_mod.OpenItem(
+                id=_id("jc"), kind="judgment_call",
+                summary="failure excused: the base has this failure too",
+                evidence=(str(tid),)))
+
+    return items
+
+
 def _write_pr_text(ctx: Any, found: worktree.Worktree, *,
                    draft_delivery: dict[str, Any] | None = None) -> str:
     """Write ``pull-request.md`` once and return the title.  The single call site."""
+    from refactory_dsh import finish as _finish_mod
+    from refactory_dsh import open_items as open_items_mod
+
     title = _title(ctx, draft_delivery=draft_delivery)
-    ctx.write_text(BODY, _body(ctx, found))
+    body = _body(ctx, found)
+    if _finish_mod.fact(ctx) is None:
+        items = _collect_open_items(ctx, draft_delivery)
+        if items:
+            body = body.replace(BODY_END, "\n" + open_items_mod.render(items) + "\n" + BODY_END)
+    ctx.write_text(BODY, body)
     if draft_delivery:
         _prepend_draft_preamble(ctx, draft_delivery)
     return title

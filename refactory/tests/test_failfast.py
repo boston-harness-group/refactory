@@ -272,6 +272,62 @@ class TestDetectStuck:
         result = detect_stuck(prev, curr_runners, "", None, "aaa", "bbb")
         assert result is None  # inherited → not stuck
 
+    def test_inherited_excluded_short_name_runner(self):
+        """A runner whose test_id is a short name must still match inherited full ids."""
+        prev = _fail_record(
+            test_ids=["test_bar"],
+            inherited=["tests/test_foo.py::test_bar"],
+            commit="aaa",
+            runners=[{
+                "name": "pytest", "passed": False,
+                "failures": [{"test_id": "test_bar",
+                              "assertion": "> assert 1 == 2", "traceback": ""}],
+            }],
+        )
+        curr_runners = [{
+            "name": "pytest", "passed": False,
+            "failures": [{"test_id": "test_bar",
+                          "assertion": "> assert 1 == 2", "traceback": ""}],
+        }]
+        result = detect_stuck(prev, curr_runners, "", None, "aaa", "bbb")
+        assert result is None  # short name matches inherited full id → not stuck
+
+    def test_inherited_excluded_full_id_vs_short_inherited(self):
+        """A full runner id must match a short inherited entry."""
+        prev = _fail_record(
+            test_ids=["tests/test_foo.py::test_bar"],
+            inherited=["test_bar"],
+            commit="aaa",
+        )
+        curr_runners = [{
+            "name": "pytest", "passed": False,
+            "failures": [{"test_id": "tests/test_foo.py::test_bar",
+                          "assertion": "> assert 1 == 2", "traceback": ""}],
+        }]
+        result = detect_stuck(prev, curr_runners, "", None, "aaa", "bbb")
+        assert result is None  # full id matches inherited short name → not stuck
+
+    def test_non_inherited_short_name_still_stuck(self):
+        """A short-name runner that is NOT inherited should still be detected as stuck."""
+        prev = _fail_record(
+            test_ids=["test_bar"],
+            inherited=[],
+            commit="aaa",
+            runners=[{
+                "name": "pytest", "passed": False,
+                "failures": [{"test_id": "test_bar",
+                              "assertion": "> assert 1 == 2", "traceback": ""}],
+            }],
+        )
+        curr_runners = [{
+            "name": "pytest", "passed": False,
+            "failures": [{"test_id": "test_bar",
+                          "assertion": "> assert 1 == 2", "traceback": ""}],
+        }]
+        result = detect_stuck(prev, curr_runners, "", None, "aaa", "bbb")
+        assert result is not None
+        assert "Stuck" in result
+
 
 # ── record_check_history unit tests ──────────────────────────────────────
 
