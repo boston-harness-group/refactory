@@ -545,7 +545,7 @@ def test_the_available_table_fits_its_limit_on_a_large_graph():
     text = "\n".join(lines)
     assert len(text) <= base.AVAILABLE_SECTION_CHARS
     assert "more)" in text and "not listed" in text
-    assert "the files it lists in `reads`, pasted in after the prompt" in lines[0]
+    assert "the files in its `sees`" in lines[0]
     small = "\n".join(base._available_section({"a": {"facts": ["f"], "files": ["x.txt"]}}))
     assert "| a | f@run | x.txt@run |" in small
 
