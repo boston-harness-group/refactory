@@ -2047,6 +2047,12 @@ def composition_section(catalogue: Sequence[dict[str, Any]], node_states: Sequen
             "`set_knob` patches or rewrites.",
         ]
         if sealed_imports:
+            sealed_io = (
+                " Its declared `reads` are present as files in the working directory, so "
+                "it can `open()` them directly (including binary files such as .xlsx that "
+                "`inp[\"files\"]` does not carry). It may also write its declared `writes` "
+                "to the working directory; those files are copied back to the run directory "
+                "after a successful run, so downstream steps read them.")
             if has_packages:
                 importable = "; ".join(sealed_imports)
                 lines.append(
@@ -2055,7 +2061,8 @@ def composition_section(catalogue: Sequence[dict[str, Any]], node_states: Sequen
                     f"installed in that environment, including {importable}; there is no "
                     f"import allowlist (the seal is the boundary). Up to "
                     f"{snippet.SEALED_WALL_S} s and {snippet.SEALED_MEMORY_MB} MB. It must "
-                    "still define `main(inp)` and parse. "
+                    "still define `main(inp)` and parse."
+                    f"{sealed_io} "
                     "Without `\"sealed\": true` a code step imports only the standard "
                     "library.")
             else:
@@ -2065,7 +2072,8 @@ def composition_section(catalogue: Sequence[dict[str, Any]], node_states: Sequen
                     f"that environment provides ({'; '.join(sealed_imports)}), with no import "
                     f"allowlist (the seal is the boundary), up to {snippet.SEALED_WALL_S} s "
                     f"and {snippet.SEALED_MEMORY_MB} MB. It must still define `main(inp)` "
-                    "and parse. "
+                    "and parse."
+                    f"{sealed_io} "
                     "Without `\"sealed\": true` a code step imports only the standard "
                     "library.")
     lines += [

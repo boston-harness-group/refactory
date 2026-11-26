@@ -785,10 +785,64 @@ SEALED_PAYLOAD = ".refactory-sealed-payload.json"
 SEALED_WALL_S = 300
 #: Its memory cap, in megabytes.
 SEALED_MEMORY_MB = 2048
+#: The most bytes a single output file (or directory) a sealed code step writes may hold.
+SEALED_OUTPUT_MAX_BYTES = 50 << 20
+
+
+def _collect_sealed_writes(ws: Path, workdir: Path, writes: Sequence[str],
+                           node_id: str) -> list[str]:
+    """Copy declared output files from a sealed workspace back to the run directory.
+
+    Only declared ``writes`` are copied. Symlinks, paths that escape the workspace,
+    the payload file and files over :data:`SEALED_OUTPUT_MAX_BYTES` are refused.
+    Returns the names that were copied."""
+    from refactory_dsh.items import detach_read_through
+
+    copied: list[str] = []
+    ws_real = os.path.realpath(ws)
+    for name in writes:
+        if name == SEALED_PAYLOAD:
+            continue
+        relative = Path(name)
+        if relative.is_absolute() or ".." in relative.parts:
+            raise SnippetError(f"sealed script {node_id!r}: output {name!r} is not a "
+                               "relative path inside the workspace")
+        src = ws / name
+        if not src.exists() or src.is_symlink():
+            continue
+        src_real = os.path.realpath(src)
+        if not src_real.startswith(ws_real.rstrip("/") + "/"):
+            raise SnippetError(f"sealed script {node_id!r}: output {name!r} escapes the "
+                               "workspace")
+        if src.is_file():
+            size = src.stat().st_size
+            if size > SEALED_OUTPUT_MAX_BYTES:
+                raise SnippetError(
+                    f"sealed script {node_id!r}: output {name!r} is {size} bytes, over "
+                    f"the {SEALED_OUTPUT_MAX_BYTES} byte limit for a code step's output")
+            detach_read_through(workdir, name)
+            dst = workdir / name
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(src, dst)
+            copied.append(name)
+        elif src.is_dir():
+            total = sum(f.stat().st_size for f in src.rglob("*") if f.is_file()
+                        and not f.is_symlink())
+            if total > SEALED_OUTPUT_MAX_BYTES:
+                raise SnippetError(
+                    f"sealed script {node_id!r}: output directory {name!r} holds {total} "
+                    f"bytes, over the {SEALED_OUTPUT_MAX_BYTES} byte limit")
+            detach_read_through(workdir, name)
+            dst = workdir / name
+            if dst.exists():
+                shutil.rmtree(dst)
+            shutil.copytree(src, dst, symlinks=False)
+            copied.append(name)
+    return copied
 
 
 def sealed_execute(code: str, inp: Any, *, workdir: Path, node_id: str,
-                   reads: Sequence[str] = (),
+                   reads: Sequence[str] = (), writes: Sequence[str] = (),
                    timeout_s: float = SEALED_WALL_S) -> Any:
     """``main(inp)`` of ``code``, run in the Task's sealed environment: the Task's Python
     interpreter, its extra commands, the node's declared ``reads`` visible read-only, no
@@ -796,7 +850,13 @@ def sealed_execute(code: str, inp: Any, *, workdir: Path, node_id: str,
 
     ``workdir`` is the item's run directory. A temporary workspace is created under it,
     populated with the declared reads, and the Task's tool environment (`task.
-    pass_tool_environment`) provides the interpreter and commands."""
+    pass_tool_environment`) provides the interpreter and commands.
+
+    ``writes`` names the node's declared output files. After a successful run, each
+    declared write the code left in the workspace is copied back to ``workdir``, so a
+    sealed code step can produce binary files (xlsx, images) that downstream steps read.
+    Only declared names are copied, symlinks are refused, and each file is bounded by
+    :data:`SEALED_OUTPUT_MAX_BYTES`."""
     import tempfile
 
     from refactory_dsh import seal
@@ -833,6 +893,7 @@ def sealed_execute(code: str, inp: Any, *, workdir: Path, node_id: str,
     root = Path(tempfile.mkdtemp(dir=ws_parent, prefix=f"{node_id}-sealed-"))
     ws = root / "workspace"
     bin_dir = root / "tool-bin"
+    collected: list[str] = []
     try:
         ws.mkdir()
         for name in reads:
@@ -853,6 +914,8 @@ def sealed_execute(code: str, inp: Any, *, workdir: Path, node_id: str,
         argv = [*runner, "--", "python3", "-I", "-c", _SEALED_DRIVER]
         result = subprocess.run(argv, cwd=os.path.realpath(ws), capture_output=True,
                                 text=True, timeout=timeout_s)
+        if writes and result.returncode == 0:
+            collected = _collect_sealed_writes(ws, workdir, writes, node_id)
     except subprocess.TimeoutExpired as exc:
         raise SnippetTimeout(f"the sealed script ran over its {timeout_s:g} s limit") from exc
     except seal.SealError as exc:
@@ -875,7 +938,10 @@ def sealed_execute(code: str, inp: Any, *, workdir: Path, node_id: str,
     if not isinstance(reply, dict) or not reply.get("ok"):
         raise SnippetError(f"the sealed script raised "
                            f"{str((reply or {}).get('error', 'an error'))[:2000]}")
-    return reply.get("result")
+    json_result = reply.get("result")
+    if collected and isinstance(json_result, dict):
+        json_result.setdefault("_sealed_files", collected)
+    return json_result
 
 
 # ── what a node declares ──────────────────────────────────────────────────
@@ -1030,7 +1096,8 @@ def _execute_code(ctx: Any, found: dict[str, Any]) -> Any:
     inp = _input(ctx, found)
     if found.get("sealed_script"):
         return sealed_execute(code, inp, workdir=ctx.workdir, node_id=ctx.node_id,
-                              reads=list(ctx.declared_reads))
+                              reads=list(ctx.declared_reads),
+                              writes=list(ctx._declared))  # noqa: SLF001
     return execute(code, inp, hide=_hide(ctx))
 
 
@@ -1039,10 +1106,15 @@ def run(ctx: Any) -> dict[str, Any]:
     returns (each a declared write) and return the facts it returns (each declared)."""
     found = _spec(ctx)
     result = _renamed_result(_execute_code(ctx, found), found.get("renames") or {})
+    sealed_files = set()
+    if isinstance(result, dict):
+        sealed_files = set(result.pop("_sealed_files", ()))
     facts, files = checked_result(ctx.node_id, result, ctx._declared,  # noqa: SLF001
                                   ctx._declared_facts)  # noqa: SLF001
     for name, text in files.items():
         ctx.write_text(name, text)
+    for name in sealed_files:
+        ctx._note_write(name)
     return facts
 
 
