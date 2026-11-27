@@ -101,6 +101,8 @@ def describe(identifier: str, project: Path, *, timeout_s: int = DESCRIBE_TIMEOU
         "print(json.dumps({\n"
         "    'knobs': sorted(knobs.keys()),\n"
         "    'values': {name: (entry or {}).get('value') for name, entry in knobs.items()},\n"
+        "    'required': sorted(name for name, entry in knobs.items()\n"
+        "                       if (entry or {}).get('spec', {}).get('required')),\n"
         "    'data_nodes': [{'node': n.id, 'task_ref': n.task_ref, 'source_path': n.source_path,\n"
         "                    'source_format': n.source_format}\n"
         "                   for n in graph.nodes.values() if n.kind == 'data'],\n"
@@ -164,6 +166,60 @@ def _looks_like_input(path: Path, *, project: Path, run_root: Path) -> bool:
 
 def _normal(value: Any) -> str:
     return str(value).strip().rstrip("/").removeprefix("./")
+
+
+def infer_inputs(
+    described: dict[str, Any],
+    *, project: Path, run_root: Path,
+) -> list[str]:
+    """Knob names that are inputs, inferred from the mode's structure as a last resort.
+
+    Called only when neither ``--input`` nor the plan declared any inputs.  A
+    ``required=True`` knob is inferred only when its value is empty or blank, or
+    when its effective value is an existing input-like path (`_looks_like_input`).
+    A required knob with a non-empty default that is not a path into the project is
+    a *setting* (``model_name``, ``api_endpoint``), never an input.  A knob whose
+    value only looks like a path is left for ``plan()``'s ``undeclared`` list, which
+    is inconclusive and never emptied.
+
+    Data-node sources are handled separately by `plan`.
+
+    Returns the inferred names in sorted order, or an empty list when nothing qualifies.
+    """
+    writes = {_normal(w) for w in described.get("writes", ()) if _normal(w)}
+    values = dict(described.get("values") or {})
+    required = set(described.get("required") or ())
+    inputs: list[str] = []
+    for name in sorted(described.get("knobs") or ()):
+        value = values.get(name)
+        if name in writes or (isinstance(value, str) and _normal(value) in writes):
+            continue
+        if name in required:
+            default_blank = not str(value or "").strip()
+            if default_blank:
+                inputs.append(name)
+                continue
+            real = _as_path(value, project)
+            if real is not None and _looks_like_input(
+                    real, project=project, run_root=run_root):
+                inputs.append(name)
+    return inputs
+
+
+def _infer_reasons(
+    names: list[str], described: dict[str, Any],
+    *, project: Path, run_root: Path,
+) -> list[str]:
+    """Why each inferred name qualified, for the run warning."""
+    values = dict(described.get("values") or {})
+    reasons: list[str] = []
+    for name in names:
+        value = values.get(name)
+        if not str(value or "").strip():
+            reasons.append(f"{name} (required, default empty)")
+        else:
+            reasons.append(f"{name} (required, default is an input-like path)")
+    return reasons
 
 
 def plan(
@@ -307,6 +363,8 @@ def run(
     from refactory_dsh import sandbox
     from refactory_dsh.items import write_source
 
+    from refactory_dsh import target_guard
+
     workdir = Path(workdir)
     receipt: dict[str, Any] = {"mode": identifier, "workdir": str(workdir.resolve()),
                                "declared": list(declared), "timeout_s": int(timeout_s)}
@@ -319,14 +377,26 @@ def run(
         return {**receipt, "status": "inconclusive",
                 "reason": f"the mode could not be described, so the empty-input run did "
                           f"not start: {type(exc).__name__}: {exc}"}
+    if not declared:
+        inferred_list = infer_inputs(described, project=project,
+                                     run_root=run_root or workdir)
+        if inferred_list:
+            declared = tuple(inferred_list)
+            receipt["declared"] = list(declared)
+            reasons = _infer_reasons(inferred_list, described, project=project,
+                                     run_root=run_root or workdir)
+            target_guard.warn(
+                "the empty-input check inferred these inputs from the mode's structure "
+                f"(neither --input nor the plan declared any): {', '.join(reasons)}"
+            )
     planned = plan(described, samples, declared, empty_root=workdir / EMPTY_ROOT,
                    project=project, run_root=run_root or workdir)
     receipt.update({key: planned[key] for key in ("inputs", "kept", "undeclared")})
     if not planned["knobs"] and not planned["sources"]:
         return {**receipt, "status": "not_applicable",
                 "reason": "the mode declares no input the check can empty: no declared "
-                          "input (--input) is a knob of the mode, and no data node reads "
-                          "a source_path"}
+                          "input (--input or required knob) is a knob of the mode, and "
+                          "no data node reads a source_path"}
     if planned["undeclared"]:
         return {**receipt, "status": "inconclusive",
                 "reason": "not run: these knobs are not declared inputs but default to an "
