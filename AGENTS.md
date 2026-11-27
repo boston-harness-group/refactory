@@ -19,5 +19,8 @@ working in this repository.
   `FinalEvaluation`, the strategy trace, budgets). Do not write private copies; a
   genuinely new general piece goes in core once and the method imports it.
 - Review checks this: a duplicated helper is a finding.
+- A module has one job. Before adding to a module, check that what you add is that
+  job; if it is a different job, it goes in its own module (see
+  [contributing.md § What not to do](refactory/docs/contributing.md#what-not-to-do)).
 
 More guides (benchmark packages, edit operations, node kinds and judges) will follow.

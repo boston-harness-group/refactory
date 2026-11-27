@@ -10,10 +10,9 @@
 #
 # Scope: the TypeScript suite (`pnpm test`), the whole-profile acceptance run and
 # the Python suite under `refactory/tests/` (in four shards) all run here, with a
-# fast-checks job beside them. The IR parity tests
-# (`test_ir_parity.py`) compare refactory's IR against the reference graph language
-# in the v1 subtree at `v1/`; the code is part of this repo so
-# these tests run on every pull request. The Python suite was red for pre-existing reasons (issue #272)
+# fast-checks job beside them. The IR parity tests (`test_ir_parity.py`) check
+# every shipped mode's IR for validity, round-trip fidelity and field-set stability.
+# The Python suite was red for pre-existing reasons (issue #272)
 # and is now gated: a failing test fails the job. A test that needs an external tool
 # or a model credential is marked (`toolchain` plus a `needs_*` skip) and the
 # terminal summary names every one that did not run, so a green suite cannot hide a
