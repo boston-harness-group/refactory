@@ -308,16 +308,80 @@ def test_the_spine_refuses_a_worktree_run_whose_check_cannot_run(tmp_path, monke
     assert "The check must run on the repository as it is today" in done.stderr
 
 
+# ── no-worktree runs: a probe warning is advisory, not a refusal ─────────────
+
+#: A missing program whose probe always warns, independent of the environment.
+MISSING_PROGRAM = "no-such-program-xyz --flag"
+
+
+def test_the_walker_goes_on_without_a_worktree_despite_a_probe_warning(tmp_path, monkeypatch):
+    monkeypatch.setenv("REFACTORY_HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("REFACTORY_PROJECT", str(tmp_path / "project"))
+    mode = DesignMode()
+    state = mode.state_dict()
+    state["knobs"]["pr"]["value"] = False
+    state["knobs"]["worktree"]["value"] = False
+    mode.load_state_dict(state)
+    model = FakeModel([])
+    result = mode.run(tmp_path / "run", model=model,
+                      task={"name": "probe_tool", "brief": BRIEF, "check": MISSING_PROGRAM})
+    assert model.prompts, "the run reached research despite the warning"
+    warning = result.facts.get("check_probe_warning", "")
+    assert warning.startswith("Check may not run in the artifact's directory: ")
+    assert "`no-such-program-xyz` is not installed" in warning
+    from refactory_dsh.design_ops import design_review_status
+
+    status = design_review_status({**result.facts, "design_review_attempts_used": 1,
+                                   "design_review_findings": ""})
+    assert "no-such-program-xyz" in status and "(advisory)" in status
+
+
 @pytest.mark.usefixtures("configured_model_home")
 def test_the_spine_goes_on_without_a_worktree(tmp_path, monkeypatch):
     monkeypatch.setenv("REFACTORY_HOME", str(tmp_path / "home"))
     monkeypatch.chdir(tmp_path)
-    done, run = _spine_prepare(tmp_path, {"check": "python -m pytest -p tests.plugin tests",
-                                          "worktree": False})
-    # Whether this probe warns depends on the pytest on PATH; either way the run goes on.
+    done, run = _spine_prepare(tmp_path, {"check": MISSING_PROGRAM, "worktree": False})
     assert done.returncode == 0, done.stderr[-3000:]
     warning = json.loads((run / "facts.json").read_text())["check_probe_warning"]
-    assert warning == "" or warning.startswith("Check may not run in the artifact's directory: ")
+    assert warning.startswith("Check may not run in the artifact's directory: ")
+    assert "`no-such-program-xyz` is not installed" in warning
+
+
+# ── design_fast: the probe gate applies through prepare_artifact ──────────────
+
+def test_design_fast_refuses_a_worktree_run_whose_check_cannot_run(tmp_path, monkeypatch):
+    from refactory_dsh.fast import DesignFastMode
+
+    monkeypatch.setenv("REFACTORY_HOME", str(tmp_path / "home"))
+    repo = _target(tmp_path / "repo")
+    mode = DesignFastMode()
+    model = FakeModel([])
+    result = mode.run(tmp_path / "run", model=model,
+                      task={"name": "probe_tool", "brief": BRIEF,
+                            "check": MISSING_PROGRAM, "target": str(repo)})
+    assert not result.exit_ok, "the run should fail at prepare"
+    assert "`no-such-program-xyz` is not installed" in (result.error or "")
+    assert "The check must run on the repository as it is today" in (result.error or "")
+    assert not model.prompts, "the run did not reach the strategist"
+
+
+def test_design_fast_goes_on_with_source_project_despite_a_probe_warning(tmp_path, monkeypatch):
+    from refactory_dsh.fast import DesignFastMode
+
+    monkeypatch.setenv("REFACTORY_HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("REFACTORY_PROJECT", str(tmp_path / "project"))
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "app.py").write_text("print('one')\n")
+    mode = DesignFastMode()
+    model = FakeModel([])
+    result = mode.run(tmp_path / "run", model=model,
+                      task={"name": "probe_tool", "brief": BRIEF,
+                            "check": MISSING_PROGRAM, "source_project": str(source)})
+    assert model.prompts, "the run reached the strategist despite the warning"
+    warning = result.facts.get("check_probe_warning", "")
+    assert warning.startswith("Check may not run in the artifact's directory: ")
+    assert "`no-such-program-xyz` is not installed" in warning
 
 
 # ── a self-check that ran nothing shows pytest's own error ────────────────────
