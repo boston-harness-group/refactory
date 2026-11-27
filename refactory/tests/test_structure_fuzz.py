@@ -12,6 +12,16 @@
   every accepted combined state keeps every invariant, and each bundle keeps the
   ``compound`` invariant (applied in order, all edits recorded, a refusal naming the
   edit that failed). ``STRUCTURE_FUZZ_COMPOUND`` sets the long tier's share.
+- **Refusal invariants** (quick tier every run, and in the long tier): every refused
+  edit is checked against three invariants — ``refusal_raises`` (no crash),
+  ``refusal_names`` (every name a refusal asserts exists does exist and every fact
+  about it is true in the parent state), and ``refusal_suggestion`` (a suggested
+  placement works). The generator draws ``sees``-probe edits from a separate stream
+  so the refusal invariants are reached often enough without disturbing the existing
+  random walks.
+- **Fixed-seed decision record** (every run): one fixed seed's edits regenerated and
+  diffed against ``fixtures/structure_fuzz_record.json``. Set
+  ``STRUCTURE_FUZZ_REGEN_RECORD=1`` to regenerate the fixture.
 - **Regression corpus** (every run): each minimal case the harness ever found
   (``fixtures/structure_fuzz``) replays clean: refused, or accepted and sound.
 - **Mutation checks**: each invariant's protection is switched off in turn, and the
@@ -946,3 +956,125 @@ def test_v19_does_not_count_a_code_op_as_a_certain_overwrite():
     code = sf.nn.Node("again", "op", call="refactory_dsh.snippet:run", writes=("x.txt",),
                       code="def main(inp):\n    return {'files': {}}\n")
     assert _v19([sf.fg.agent("first", "One", writes="x.txt"), code], [("first", "again")]) == []
+
+
+# ── refusal invariants ───────────────────────────────────────────────────
+
+
+def test_quick_tier_refusal_invariants_are_checked():
+    """Every refused edit's refusal message is checked for name claims and placement
+    suggestions; the new invariants are reached often enough to matter."""
+    stats = sf.Fuzzer(QUICK_SEED, walker=False).run(QUICK_EDITS)
+    hits = stats.refusal_hits
+    assert hits["refusal_names_checked"] > 100, dict(hits)
+    assert hits["refusal_suggestion_checked"] >= 5, dict(hits)
+    assert not stats.findings, _report(stats)
+
+
+def test_mutation_refusal_raises_catches_a_crash_in_the_attempt_path(monkeypatch):
+    """With an operator raising a plain exception, the harness finds a ``refusal_raises``
+    violation instead of letting it pass as an ordinary refusal."""
+    from refactory_dsh.nn import edits as edits_m
+
+    original = edits_m.precheck
+
+    def crash_on_insert(edit, state):
+        if isinstance(edit, dict) and edit.get("op") == "insert":
+            raise KeyError("sabotaged")
+        return original(edit, state)
+
+    monkeypatch.setattr(edits_m, "precheck", crash_on_insert)
+    _finds("refusal_raises", seeds=("fuzz_dataflow", "fuzz_skip_path"))
+
+
+def test_mutation_refusal_names_catches_a_false_producer(monkeypatch):
+    """When a refusal message names a non-existent node as a producer, the
+    ``refusal_names`` invariant catches it."""
+    from refactory_dsh.nn import core_ops
+
+    original = core_ops._producers_of
+
+    def wrong_producers(graph, name):
+        real = original(graph, name)
+        return [*real, "ghost_node_that_does_not_exist"] if real else real
+
+    monkeypatch.setattr(core_ops, "_producers_of", wrong_producers)
+    _finds("refusal_names", seeds=("fuzz_skip_path", "fuzz_gates", "fuzz_fork_join"))
+
+
+def test_mutation_refusal_suggestion_catches_a_bad_anchor(monkeypatch):
+    """When a placement suggestion lists an anchor that does not fix the refusal,
+    the ``refusal_suggestion`` invariant catches it."""
+    from refactory_dsh.nn import core_ops
+
+    original = core_ops._placement_anchors
+
+    def wrong_anchors(graph, name, kind=None, *, keys=None):
+        real = original(graph, name, kind, keys=keys)
+        if real:
+            return [graph.start]
+        return real
+
+    monkeypatch.setattr(core_ops, "_placement_anchors", wrong_anchors)
+    _finds("refusal_suggestion", seeds=("fuzz_skip_path", "fuzz_gates"))
+
+
+# ── fixed-seed decision record ───────────────────────────────────────────
+
+
+def test_the_decision_record_matches_the_fixture():
+    """Regenerate the decision record with the fixed seed and compare it against the
+    committed fixture.  Any change in an edit's decision, reason code, or refusal
+    message is a readable per-edit diff.
+
+    To regenerate on purpose: ``STRUCTURE_FUZZ_REGEN_RECORD=1``.  The quick tier must
+    still pass after regeneration. The long tier (``--run-structure-fuzz-long``) also
+    runs the refusal invariants.
+    """
+    if os.environ.get("STRUCTURE_FUZZ_REGEN_RECORD"):
+        decisions = sf.generate_record()
+        sf.save_record(decisions)
+        pytest.skip("record regenerated")
+    assert sf.RECORD_PATH.exists(), (f"fixture not found at {sf.RECORD_PATH}; "
+                                     "run with STRUCTURE_FUZZ_REGEN_RECORD=1 to generate it")
+    old = sf.load_record()
+    new = sf.generate_record()
+    diffs = sf.diff_records(old, new)
+    assert not diffs, f"{len(diffs)} decision(s) changed:\n" + "\n\n".join(diffs[:10])
+
+
+def test_the_decision_record_is_deterministic_across_processes():
+    """The same seed produces the same record in a separate process."""
+    import subprocess
+    import sys
+
+    script = ("import structure_fuzz as sf, json, hashlib; "
+              "d = sf.generate_record(); "
+              "print(hashlib.sha256(json.dumps(d, sort_keys=True, default=str).encode()).hexdigest())")
+    env = {**os.environ, "PYTHONPATH": str(sf.HERE.parent) + ":" + str(sf.HERE),
+           "REFACTORY_WORKSPACE_SANDBOX": os.environ.get("REFACTORY_WORKSPACE_SANDBOX", "")}
+    runs = []
+    for _ in range(2):
+        result = subprocess.run(
+            [sys.executable, "-c", script],
+            capture_output=True, text=True, cwd=str(sf.HERE), env=env, timeout=120)
+        assert result.returncode == 0, result.stderr
+        runs.append(result.stdout.strip())
+    assert runs[0] == runs[1], f"not deterministic: {runs}"
+
+
+def test_the_decision_record_fails_on_a_changed_message(monkeypatch):
+    """When one refusal message changes by one word, the decision record test catches it."""
+    from refactory_dsh.nn import core_ops
+
+    original_hint = core_ops._not_on_every_path_hint
+
+    def tweaked_hint(graph, name, kind=None, *, keys=None):
+        hint = original_hint(graph, name, kind, keys=keys)
+        return hint.replace("missing on the", "absent on the") if hint else hint
+
+    monkeypatch.setattr(core_ops, "_not_on_every_path_hint", tweaked_hint)
+    old = sf.load_record()
+    new = sf.generate_record()
+    diffs = sf.diff_records(old, new)
+    assert diffs, "the record should have detected the message change"

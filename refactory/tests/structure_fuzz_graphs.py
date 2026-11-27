@@ -416,5 +416,24 @@ class FileOutput(nn.Mode):
         ], [("intake", "plot"), ("plot", "describe"), ("describe", "ship")])
 
 
+class SkipPath(nn.Mode):
+    """A gate whose skip verdict bypasses a producer: steps placed after the gate that
+    'sees' the producer's output trigger 'not on every path' refusals with placement
+    suggestions."""
+
+    name = "fuzz_skip_path"
+
+    def build(self) -> nn.Graph:
+        return _graph([
+            op("start", writes=("brief.txt",), produces=("brief",)),
+            gate("has_case", "fn", reads=("brief.txt",)),
+            op("process", reads=("brief.txt",), writes=("result.txt",), produces=("result",)),
+            op("finalize", writes=("answer.txt",), produces=("finished",)),
+        ], [("start", "has_case"),
+            ("has_case", "process", "proceed"),
+            ("has_case", "finalize", "skip"),
+            ("process", "finalize")])
+
+
 SYNTHETIC = (ForkJoin, NestedFork, Gates, GateLoop, DataPass, Dataflow, MultiTerminal,
-             DraftReview, ToolStep, FileOutput)
+             DraftReview, ToolStep, FileOutput, SkipPath)
