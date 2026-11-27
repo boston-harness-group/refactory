@@ -352,7 +352,14 @@ def prepare(ctx: Any) -> dict[str, Any]:
             "reading a file under that name from the run directory. A mode that "
             "hardcodes a fixture instead of accepting the input is refused by "
             "validation."
-        ) if inputs else "(the brief named no inputs this mode must accept)",
+        ) if inputs else (
+            "No specific inputs were named. If this mode takes input data (a file, "
+            "folder, text, or other data to process rather than a setting to "
+            "configure), declare each such knob with `required=True` so the "
+            "empty-input validation can verify the mode stops when its input is "
+            "missing. A knob for a configuration file, reference database, or "
+            "output location should not be required."
+        ),
     }
 
 
@@ -2211,6 +2218,9 @@ def check_empty_input(ctx: Any) -> dict[str, Any]:
         declared=declared, model=bool(_agent_nodes(name)), timeout_s=timeout_s,
         model_context=context, smoke_items=int(ctx.knob("smoke_items", 3)), split=split,
     )
+    if receipt.get("inferred") and receipt.get("declared"):
+        brief["requires_input"] = receipt["declared"]
+        ctx.write_json("brief.json", brief)
     ctx.write_json(empty_input.RECEIPT, receipt)
     if receipt["status"] == "finding":
         package = Path(str(ctx.facts.get("package_path") or ""))

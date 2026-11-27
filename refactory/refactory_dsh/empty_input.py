@@ -101,6 +101,8 @@ def describe(identifier: str, project: Path, *, timeout_s: int = DESCRIBE_TIMEOU
         "print(json.dumps({\n"
         "    'knobs': sorted(knobs.keys()),\n"
         "    'values': {name: (entry or {}).get('value') for name, entry in knobs.items()},\n"
+        "    'required': sorted(name for name, entry in knobs.items()\n"
+        "                       if (entry or {}).get('spec', {}).get('required')),\n"
         "    'data_nodes': [{'node': n.id, 'task_ref': n.task_ref, 'source_path': n.source_path,\n"
         "                    'source_format': n.source_format}\n"
         "                   for n in graph.nodes.values() if n.kind == 'data'],\n"
@@ -164,6 +166,37 @@ def _looks_like_input(path: Path, *, project: Path, run_root: Path) -> bool:
 
 def _normal(value: Any) -> str:
     return str(value).strip().rstrip("/").removeprefix("./")
+
+
+def infer_inputs(
+    described: dict[str, Any], samples: dict[str, str],
+    *, project: Path, run_root: Path,
+) -> list[str]:
+    """Knob names that are inputs, inferred from the mode when ``--input`` is not given.
+
+    A ``required=True`` knob explicitly needs a user-provided value: the mode refuses
+    to start without one, which is what an input knob should do. A knob whose sample
+    or default is an existing path that looks like input data (`_looks_like_input`) is
+    input too. Data-node sources are handled separately by `plan`.
+
+    Returns the inferred names in sorted order, or an empty list when nothing qualifies.
+    """
+    writes = {_normal(w) for w in described.get("writes", ()) if _normal(w)}
+    values = dict(described.get("values") or {})
+    required = set(described.get("required") or ())
+    inputs: list[str] = []
+    for name in sorted(described.get("knobs") or ()):
+        value = values.get(name)
+        if name in writes or (isinstance(value, str) and _normal(value) in writes):
+            continue
+        if name in required:
+            inputs.append(name)
+            continue
+        check_value = samples.get(name, value)
+        real = _as_path(check_value, project)
+        if real is not None and _looks_like_input(real, project=project, run_root=run_root):
+            inputs.append(name)
+    return inputs
 
 
 def plan(
@@ -308,6 +341,7 @@ def run(
     from refactory_dsh.items import write_source
 
     workdir = Path(workdir)
+    inferred = False
     receipt: dict[str, Any] = {"mode": identifier, "workdir": str(workdir.resolve()),
                                "declared": list(declared), "timeout_s": int(timeout_s)}
     backstop = sandbox.smoke_backstop_s(int(timeout_s))
@@ -319,14 +353,22 @@ def run(
         return {**receipt, "status": "inconclusive",
                 "reason": f"the mode could not be described, so the empty-input run did "
                           f"not start: {type(exc).__name__}: {exc}"}
+    if not declared:
+        inferred_list = infer_inputs(described, samples, project=project,
+                                     run_root=run_root or workdir)
+        if inferred_list:
+            declared = tuple(inferred_list)
+            inferred = True
+            receipt["declared"] = list(declared)
+    receipt["inferred"] = inferred
     planned = plan(described, samples, declared, empty_root=workdir / EMPTY_ROOT,
                    project=project, run_root=run_root or workdir)
     receipt.update({key: planned[key] for key in ("inputs", "kept", "undeclared")})
     if not planned["knobs"] and not planned["sources"]:
         return {**receipt, "status": "not_applicable",
                 "reason": "the mode declares no input the check can empty: no declared "
-                          "input (--input) is a knob of the mode, and no data node reads "
-                          "a source_path"}
+                          "input (--input or required knob) is a knob of the mode, and "
+                          "no data node reads a source_path"}
     if planned["undeclared"]:
         return {**receipt, "status": "inconclusive",
                 "reason": "not run: these knobs are not declared inputs but default to an "
