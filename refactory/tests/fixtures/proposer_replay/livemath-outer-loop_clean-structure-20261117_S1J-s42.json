@@ -1,0 +1,666 @@
+{
+  "edit_preset": "broad",
+  "frozen": [],
+  "mode": "livemath/solver",
+  "refusals": [
+    {
+      "edit": {
+        "edits": [
+          {
+            "name": "skill",
+            "op": "set_knob",
+            "value": "# Live Mathematical MCQ Heuristics\n\n## Option Comparison\n- Compare all options before committing. The correct choice is often the strongest statement justified by the question, while nearby distractors are weaker, overstrong, or miss an equality case.\n- Track exact quantifiers such as \"there exists\", \"for every\", \"if and only if\", and \"exactly when\".\n- \"Strongest\" means the option that logically implies the most others, not the most detailed or quantitatively precise. Build an implication order before choosing.\n- Do not cite a named theorem unless you can state its full hypotheses. If uncertain, derive the result from scratch.\n\n## Theorem-Level Precision\n- Check whether an option weakens the conclusion by dropping a characterization, equality clause, or full equivalence.\n- Check whether an option overstates the theorem by upgrading regularity, removing scale restrictions, or changing an existential statement into a universal one.\n\n## Hypotheses\n- Verify the hypotheses and domain carefully. Distractors often keep the theorem shape but alter the required assumptions.\n- Pay close attention to equality cases, extremal conditions, and whether a result applies to the full family or only a restricted subfamily.\n\n## Final Answer\n- Output the final answer as the single option label only.\n"
+          },
+          {
+            "name": "solve_check_judge__task",
+            "op": "set_knob",
+            "value": "Review the solver's answer. Default to proceed — only say reloop if you are certain the solver made a definitive mathematical error.\n\nTo say reloop, ALL of the following must hold:\n1. You can point to a specific step in the solver's reasoning that is mathematically wrong.\n2. The error is definitive, not merely debatable or a matter of alternative approach.\n3. Your refutation applies in the EXACT setting of the problem (same hypotheses, same objects, same dimensions). Do not reason by analogy from simpler or toy examples that may not transfer.\n\nIf uncertain, say proceed. If you have an alternative argument but cannot definitively refute the solver's, say proceed.\n\n## Solver prompt\n{{solver_prompt}}\n\n## Files from earlier steps (solve_check_judge_inputs)\n{{solve_check_judge_inputs}}\n\nStart your answer with one word, proceed or reloop, alone or followed by why; nothing before it."
+          }
+        ]
+      },
+      "expected": {
+        "accepted": false,
+        "codes": [
+          "E-knob"
+        ],
+        "reasons": [
+          "E-knob: knob 'solve_check_judge__task': template slot(s) ['skill_section'] required by node 'solve_check_judge''s prompt_template are missing from the new value [edit 2 of 2: set_knob]"
+        ]
+      },
+      "parent_state_ref": "453f234e859577e3",
+      "recorded_codes": [
+        "E-knob"
+      ],
+      "recorded_reasons": [
+        "E-knob: knob 'solve_check_judge__task': template slot(s) ['skill_section'] required by node 'solve_check_judge''s prompt_template are missing from the new value [edit 2 of 2: set_knob]"
+      ]
+    },
+    {
+      "edit": {
+        "edits": [
+          {
+            "keep": "proceed",
+            "op": "remove",
+            "step": "solve_check"
+          },
+          {
+            "op": "remove",
+            "step": "solve_check_judge"
+          },
+          {
+            "op": "remove",
+            "step": "solve_check_judge_inputs"
+          },
+          {
+            "name": "skill",
+            "op": "set_knob",
+            "patch": [
+              {
+                "content": "- After identifying your preferred option, explicitly verify every additional claim it makes beyond the next-weaker option. If you cannot supply a rigorous proof sketch for each extra claim, downgrade to the weaker option.\n- When two options differ by a single extra claim (a sharp constant, an endpoint inclusion, a precise threshold), and you cannot rigorously justify that claim, prefer the weaker option.",
+                "kind": "replace",
+                "target": "- Prefer the strongest option whose every claim you can justify over one with an unjustified extra clause."
+              },
+              {
+                "kind": "delete",
+                "target": "## Hypotheses\n- Verify the hypotheses and domain carefully. Distractors often keep the theorem shape but alter the required assumptions.\n- Pay close attention to equality cases, extremal conditions, and whether a result applies to the full family or only a restricted subfamily."
+              },
+              {
+                "content": "- When you invoke a named theorem, state its exact hypotheses and verify each against the problem. If you cannot recall the precise statement, reason from first principles instead of asserting the result applies.\n- Before finalizing, re-examine any dismissed option: check whether its dismissal rested on a fabricated counterexample, a superficial objection, or an unsupported impossibility claim.",
+                "kind": "replace",
+                "target": "- When you invoke a named theorem or known result, state its precise hypotheses and check they match the problem's setup (orientability, compactness, boundary conditions, dimension). If you cannot recall the exact statement, flag this uncertainty and reason from first principles instead of assuming the result applies.\n- Before finalizing, re-examine any option you dismissed: check whether the dismissal rested on a superficial objection such as a notation mismatch, a missing constant, or an unsupported impossibility claim."
+              }
+            ]
+          }
+        ]
+      },
+      "expected": {
+        "accepted": false,
+        "codes": [
+          "E-precondition"
+        ],
+        "reasons": [
+          "E-precondition: no step 'solve_check_judge'; existing steps: data, finish, format_prompt, solve, solve_done [edit 2 of 4: remove]"
+        ]
+      },
+      "parent_state_ref": "453f234e859577e3",
+      "recorded_codes": [
+        "E-precondition"
+      ],
+      "recorded_reasons": [
+        "E-precondition: no step 'solve_check_judge'; existing steps: data, finish, format_prompt, solve, solve_done [edit 2 of 4: remove]"
+      ]
+    }
+  ],
+  "sections": [
+    {
+      "sections": {
+        "composition": "### How nodes compose\nThe pipeline is made of four kinds of step, and any of them may be put anywhere the validator's rules (listed below) allow:\n- **agent**: one model call. Its prompt fills each `{{name}}` from a fact (or knob) produced upstream; its reply is written to its first `writes` file and, when it declares `produces`, also becomes that fact. A new agent without `tools` sees only its prompt and the files it names in `sees` (they become its declared reads, pasted in after the prompt): hand it anything else as `{{facts}}`. A file's text becomes a fact through an op that reads the file and `produces` the fact, or when the agent that writes the file declares `produces`.\n- **where `{{fact}}` is filled in**: only in an agent's `prompt_template` (its `<id>__task` knob) and its system prompt (its `<id>__system_prompt` knob). Any other knob is read as written, so a `{{fact}}` there would never arrive and is refused (V20).\n- **tools**: every existing step keeps its own tool rules, and in this run a new step has no tools.\n- **gate**: routes by a verdict, to the out-edge whose `condition` is that verdict. Give each out-edge a single-word condition (`proceed`, `reloop`, `revise` ...). Any declared upstream output can be the verdict: with `\"evaluator\": \"refactory_dsh.snippet:verdict\"` the gate reads the verdict from its first `required_reads` file (or, with none, its first `inputs` fact) -- whatever an agent or a code op upstream wrote there: its first word, or else its last line when that is the word alone or the word then `:`, `—`, `–`, `-` or `.` and more (leading markdown or quotes are skipped; a list item or a code fence is not read) -- and the rest of the text is the reason. The word must be one of the conditions (any case) or `halt`, which ends the whole run. Anything else fails that item's run, and so does a first word and a last line that name different verdicts, so tell the writer to start with the word or put it alone on the last line.\n- **loop**: a gate's out-edge back to an earlier step. The `loop` operation makes one around a step (step -> gate; gate -> step on `reloop`, gate -> the step's old successor on `proceed`); a reloop hands the gate's reason to the step it goes back to as feedback, and the gate's `max_iterations` bounds how often it may. When a gate would reloop once more than that, its `on_exhausted` decides: `continue` (the default inside the per-item pass) goes on along `proceed` with the last attempt, which is graded as it stands; `fail_item` fails that item only; `halt` ends the whole run (no later item runs). A gate with no forward `proceed` edge defaults to `fail_item`. The last step of the pass can be looped too: the loop then adds a step after the gate to end the pass.\n- **running out of output**: a model call that uses its whole output allowance without answering is the model failing that question. It is not retried unless the step opts in (retry.on): the step has no answer, and the item goes on without it (a gate after it sees no answer and may reloop; a fork's join sees that branch without one; a code op's `inp['files']` holds only the files that exist; an item left with nothing to grade scores 0).\n- **running out of turns**: an agent that uses its whole turn cap without finishing is the model failing that question, like running out of output. It is not retried unless the step opts in (retry.on): the step has no answer, and the item goes on without it, as above.\n- **crashes**: when the worker or product fails (not the model's own output or turn cap), an agent step in the per-item pass that is safe to rerun (no tools, its own report files only, or a workspace) is run again in a fresh session, up to 2 more times; if every session crashes it has no answer, as above. An item that times out is a harness timeout: not caused by the pipeline's design; not a target.\n- **fork**: steps run at once between a fork and a join; branches write distinct files and facts. `parallelize` and `branch` wire what the branches make into the step after the join; the written-out `parallel` operation leaves that to you.\n\nOne example of each composition shape, with this graph's ids (how to write it; none is preferred):\n- a new agent step: {\"edits\": [{\"op\": \"insert\", \"before\": \"solve\", \"kind\": \"agent\", \"text\": \"<what the new step does>\", \"id\": \"solve_prep\"}, {\"op\": \"rewire\", \"step\": \"solve\", \"sees\": [\"skill_section\", \"solver_prompt\", \"solve_prep\"]}]}\n- a parallel fork and join: {\"op\": \"parallelize\", \"after\": \"format_prompt\", \"new\": [{\"kind\": \"agent\", \"text\": \"<what one branch does>\", \"to\": \"solve\"}, {\"kind\": \"agent\", \"text\": \"<what another branch does>\", \"to\": \"solve\"}]}\n- a verdict loop (a judge that can send a step back): {\"op\": \"loop\", \"step\": \"solve\", \"judge\": \"agent\", \"text\": \"<what to check>\"}\n- a route (a judge choosing the next step): {\"op\": \"route\", \"after\": \"format_prompt\", \"judge\": \"agent\", \"text\": \"<how to choose>\", \"to\": {\"proceed\": \"solve\", \"revise\": {\"kind\": \"agent\", \"text\": \"<what the new step does>\", \"to\": \"solve\"}}}\n",
+        "operator_lines": "\nThe structural operators, each one line: what kind of step (`agent`, `op` or `code`), where (a step id), and its text (a prompt, or code). The system does the wiring, as each operator's line below says. Ids, files and facts are generated; each text goes into a knob of its own (`<id>__task`, `<id>__code`) for a later `set_knob`; the candidate says what was wired. Every text has a default (the neighbour's, or a neutral line), and each operator counts as one change. The written-out operations in the table above stay for what these do not express.\n- `insert` (after, before, kind, text, system, sees, to, id, call, reads, tools, takes_over, sealed, produces, writes): a new step after (or before) a step; 'before' puts it on every edge into that step, so 'sees' must name only what every path carries there: 'kind' agent (text = its prompt; 'system' its system prompt), code (text = Python) or op (with 'call' and 'reads'); it sees what that step sees plus its outputs; its output goes into the nearest prompt after it that can take it -- an agent's own prompt knob, or the one text knob an op fills facts into -- or where 'to' says (a prompt knob, or a step: an agent whose prompt is no knob gets a section for it); with neither, refused unless a step reads it; 'tools' (an agent): e.g. [\"bash\"]; a new step may have them though the steps beside it have none or refuse theirs (an existing step keeps its own tool rules); it runs sealed: only the files it sees (in the per-item part, without 'sees', the item's input files too), no network, no grader files; 'sealed' true on a code step: its code runs in the Task's tool environment (its Python interpreter, its extra commands) sealed -- the files it sees read-only, no network, no grader files -- so it may import any package the Task provides (openpyxl, pandas, numpy) and read item files; the import allowlist does not apply; the Task must declare a tool environment; 'takes_over' an earlier step: the new step writes that step's outputs, so what read them reads the new step's (a choice among attempts reaching what is scored), and that step's own go under new names; 'takes_over' as [step, output, ...] takes only those outputs (the new step writes them and its own; the rest pass through unchanged, so downstream steps keep reading them from the original step). E.g. {\"op\": \"insert\", \"after\": \"<step>\", \"kind\": \"agent\", \"text\": \"<what the new step does>\"}\n- `remove` (step, keep): take a step out and reconnect around it (a fork branch too); on a gate, 'keep' names the verdict whose path stays. E.g. {\"op\": \"remove\", \"step\": \"<step>\"}\n- `parallelize` (steps, copies, after, new, sees): run consecutive 'steps' at once, or one step beside 'copies' of itself, or 'new' steps after 'after', between a fork and a join. E.g. {\"op\": \"parallelize\", \"steps\": [\"<step>\"], \"copies\": 2}\n- `serialize` (fork): run a fork's branches one after another, in their order. E.g. {\"op\": \"serialize\", \"fork\": \"<fork>\"}\n- `branch` (fork, kind, text, system, sees, optional, id, to, tools, sealed, produces, writes): a new step as another branch of a fork ('optional': true lets it fail without failing the item; 'sees' names its inputs: \"task\", step ids, or single fact or file names there before the fork; 'system' as insert's); its output goes into the nearest prompt after the join that can take it -- an agent's own prompt knob, or the one text knob an op fills facts into -- or where 'to' says (a prompt knob, or a step: an agent whose prompt is no knob gets a section for it); with neither, refused unless a step reads it; 'tools' as insert's (sealed); 'sealed' as insert's on a code step. E.g. {\"op\": \"branch\", \"fork\": \"<fork>\", \"kind\": \"agent\", \"text\": \"<what this branch does>\"}\n- `rewire` (step, sees, text): change what a step sees: \"task\" (the task's own input, once, as the model steps receive it: never a step's output or a knob's text (an op's output carries the knobs the op declares for it in `knob_outputs`, else every knob the op reads)), step ids (their outputs), or single fact or file names there before it (that input alone); 'text' gives an agent step new instructions too, in place: the same id, outputs and place in a fork or join (so a branch can work from the task alone); with 'text' and no 'sees' it keeps what it sees. E.g. {\"op\": \"rewire\", \"step\": \"<step>\", \"sees\": [\"task\"]}\n- `loop` (step, back_to, judge, text, sees, tools, max_iterations, id, sealed): a judge after a step that can send it back with its reason -- or, with 'back_to', send the work back to an earlier agent step, so every step from there to the judge runs again (a fork in between whole); 'back_to' is one every run passes before the step, in the same per-item pass and fork branch: 'judge' agent (text = what to check; its answer starts with proceed or reloop, then why), code (text = Python returning {'verdict': 'proceed' or 'reloop', 'reason': why}) or a callable. The judge is handed what the step read and wrote, unless 'sees' says otherwise, as text (a binary or very long file only named); with 'tools' (an agent judge, as insert's) it runs sealed instead, with the files it sees in its workspace, and its reply starts with the verdict; with 'sealed' true on a code judge, it runs in the Task's tool environment sealed, as insert's 'sealed' on a code step. The reason reaches the step sent back, with that step's own last output; it is sent back at most 'max_iterations' times, so it runs at most that many times plus one (default 2: up to 3 runs; 1 to 5; afterwards the knob <gate>__max_iterations, the gate being <step>_check unless 'id' names it), then the run goes on. E.g. {\"op\": \"loop\", \"step\": \"<step>\", \"judge\": \"agent\", \"text\": \"<what to check>\", \"max_iterations\": 2}\n- `route` (after, judge, text, to, sees, tools, id, sealed): a judge after a step chooses one labelled next step ('to': label -> step id or a new step, whose 'takes_over' rewrites an earlier step's outputs on that way); the branches rejoin; with no 'to', proceed or redo the step in place; 'tools' as loop's judge. E.g. {\"op\": \"route\", \"after\": \"<step>\", \"judge\": \"agent\", \"text\": \"<how to choose>\", \"to\": {\"proceed\": \"<next step>\", \"revise\": {\"kind\": \"agent\", \"text\": \"<what it does>\"}}}\n- `split` (step, into: one or two steps, each like {kind, text, sees}): replace a step by two new steps run in turn ('into' two), or by one ('into' one: replace); the last takes over its outputs. E.g. {\"op\": \"split\", \"step\": \"<step>\", \"into\": [{\"kind\": \"agent\", \"text\": \"<first part>\"}, {\"kind\": \"agent\", \"text\": \"<second part>\"}]}\n- `merge` (steps, kind, text, system, id, tools, sealed): two consecutive steps as one, with the first's inputs and the second's outputs; 'system' as insert's; 'tools' as insert's (sealed), else a sealed step's own come along; 'sealed' as insert's on a code step. E.g. {\"op\": \"merge\", \"steps\": [\"<step>\", \"<next step>\"], \"text\": \"<what the merged step does>\"}\n- `fallback` (step, kind, text, system, sees, id, call, reads, tools, sealed): a step run instead when 'step' (one run per item) fails -- it raises, crashes past its retries, hits its output limit, its turn cap, its prompt limit, or is still writing at the session time limit (backstop); never for a timeout (the harness's, a declared wall or the step's own) or a harness fault: it writes that step's outputs, so what reads them still gets an answer; 'kind' as in insert; it sees what 'step' sees; when the step writes more than one file, the fallback must be a code step or an agent with tools (a plain agent writes only its reply); 'sealed' as insert's on a code step. E.g. {\"op\": \"fallback\", \"step\": \"<step>\", \"kind\": \"agent\", \"text\": \"<a simpler way to the same output>\"}\n- `map` (after, over, text, system, sees, max, combine, id, to, tools): after a step, a new agent step run once per element of 'over' (a list there: a fact, a file or a step's output), one model call each, all at once: a JSON array gives its items, a bulleted, numbered or lettered list its items, other text its non-empty lines; at most 'max' run (default 4, up to 8; past it the first 'max', and the combine is told so); 'text' says what to do with one element; 'combine' (a step as in insert) sees every result and writes one output, placed as insert's is; 'system' as insert's, for each run; 'tools' as insert's: each run sealed; remove the elements step or the combine and the whole map goes. E.g. {\"op\": \"map\", \"after\": \"<step>\", \"over\": \"<step>\", \"text\": \"<what to do with one element>\", \"combine\": {\"kind\": \"agent\", \"text\": \"<how to combine the results>\"}}",
+        "pipeline_view": "The pipeline, one line per step, generated from the graph in the operators' own words: `sees` lists a step's inputs as `\"sees\"` names them, `name@maker` (`@run`: no step makes it); a plain op that only assembles a model step's input is folded in as `name (via op: its inputs)`; an agent with tools sees the run dir, its own workspace, or a sealed one (its inputs only); `told` is each knob whose text reaches the step, its opening words (`*` frozen; `?` read by an op with several outputs, for all of them), or a code step's code; `->` what it writes; a per-item block's `item files` are files the task lays into each item's pass, under the same name for every item, and the steps that read them: a new step reads one by naming it (or the data step) in 'sees'; `parallel fork { ... } -> join`; `loop(step, judge ..., max N -> N+1 runs)`; `loop(back_to … step, judge ..., max N -> N+1 runs)`; `route(after step, judge ..., {label: step})`; `fallback(step fails -> step)`; `map(step … step over list, max N)`; `per item (data -> its writes; item files: path seen by step, ...) { ... }`; `step agent on model=M effort=E max_completion_tokens=N`; a loop that does not go on with its last attempt past its cap says so: `past the cap: fail_item` (only that item fails) or `past the cap: halt` (the whole run stops); `[optional]`; `[protected]`.\n```text\nper item (data -> current_item.json) {\n  solve agent  sees skill_section (via format_prompt: current_item.json@data), solver_prompt (via format_prompt: current_item.json@data)  told solve__system_prompt* \"You are an expert mathematical reasoning agent …\"; skill \"# Live Mathematical MCQ Heuristics ## Option Co…\"  -> answer.txt\n}\nfinish op  -> result.json, finished\n```"
+      },
+      "state_ref": "8934a8b802e0b788"
+    },
+    {
+      "sections": {
+        "composition": "### How nodes compose\nThe pipeline is made of four kinds of step, and any of them may be put anywhere the validator's rules (listed below) allow:\n- **agent**: one model call. Its prompt fills each `{{name}}` from a fact (or knob) produced upstream; its reply is written to its first `writes` file and, when it declares `produces`, also becomes that fact. A new agent without `tools` sees only its prompt and the files it names in `sees` (they become its declared reads, pasted in after the prompt): hand it anything else as `{{facts}}`. A file's text becomes a fact through an op that reads the file and `produces` the fact, or when the agent that writes the file declares `produces`.\n- **where `{{fact}}` is filled in**: only in an agent's `prompt_template` (its `<id>__task` knob) and its system prompt (its `<id>__system_prompt` knob). Any other knob is read as written, so a `{{fact}}` there would never arrive and is refused (V20).\n- **tools**: every existing step keeps its own tool rules, and in this run a new step has no tools.\n- **gate**: routes by a verdict, to the out-edge whose `condition` is that verdict. Give each out-edge a single-word condition (`proceed`, `reloop`, `revise` ...). Any declared upstream output can be the verdict: with `\"evaluator\": \"refactory_dsh.snippet:verdict\"` the gate reads the verdict from its first `required_reads` file (or, with none, its first `inputs` fact) -- whatever an agent or a code op upstream wrote there: its first word, or else its last line when that is the word alone or the word then `:`, `—`, `–`, `-` or `.` and more (leading markdown or quotes are skipped; a list item or a code fence is not read) -- and the rest of the text is the reason. The word must be one of the conditions (any case) or `halt`, which ends the whole run. Anything else fails that item's run, and so does a first word and a last line that name different verdicts, so tell the writer to start with the word or put it alone on the last line.\n- **loop**: a gate's out-edge back to an earlier step. The `loop` operation makes one around a step (step -> gate; gate -> step on `reloop`, gate -> the step's old successor on `proceed`); a reloop hands the gate's reason to the step it goes back to as feedback, and the gate's `max_iterations` bounds how often it may. When a gate would reloop once more than that, its `on_exhausted` decides: `continue` (the default inside the per-item pass) goes on along `proceed` with the last attempt, which is graded as it stands; `fail_item` fails that item only; `halt` ends the whole run (no later item runs). A gate with no forward `proceed` edge defaults to `fail_item`. The last step of the pass can be looped too: the loop then adds a step after the gate to end the pass.\n- **running out of output**: a model call that uses its whole output allowance without answering is the model failing that question. It is not retried unless the step opts in (retry.on): the step has no answer, and the item goes on without it (a gate after it sees no answer and may reloop; a fork's join sees that branch without one; a code op's `inp['files']` holds only the files that exist; an item left with nothing to grade scores 0).\n- **running out of turns**: an agent that uses its whole turn cap without finishing is the model failing that question, like running out of output. It is not retried unless the step opts in (retry.on): the step has no answer, and the item goes on without it, as above.\n- **crashes**: when the worker or product fails (not the model's own output or turn cap), an agent step in the per-item pass that is safe to rerun (no tools, its own report files only, or a workspace) is run again in a fresh session, up to 2 more times; if every session crashes it has no answer, as above. An item that times out is a harness timeout: not caused by the pipeline's design; not a target.\n- **fork**: steps run at once between a fork and a join; branches write distinct files and facts. `parallelize` and `branch` wire what the branches make into the step after the join; the written-out `parallel` operation leaves that to you.\n\nOne example of each composition shape, with this graph's ids (how to write it; none is preferred):\n- a new agent step: {\"op\": \"insert\", \"before\": \"solve\", \"kind\": \"agent\", \"text\": \"<what the new step does>\"}\n- a parallel fork and join: {\"op\": \"parallelize\", \"after\": \"solve\", \"new\": [{\"kind\": \"agent\", \"text\": \"<what one branch does>\"}, {\"kind\": \"agent\", \"text\": \"<what another branch does>\"}]}\n- a verdict loop (a judge that can send a step back): {\"op\": \"loop\", \"step\": \"solve\", \"judge\": \"agent\", \"text\": \"<what to check>\"}\n- a route (a judge choosing the next step): {\"op\": \"route\", \"after\": \"solve\", \"judge\": \"agent\", \"text\": \"<how to choose>\"}\n",
+        "operator_lines": "\nThe structural operators, each one line: what kind of step (`agent`, `op` or `code`), where (a step id), and its text (a prompt, or code). The system does the wiring, as each operator's line below says. Ids, files and facts are generated; each text goes into a knob of its own (`<id>__task`, `<id>__code`) for a later `set_knob`; the candidate says what was wired. Every text has a default (the neighbour's, or a neutral line), and each operator counts as one change. The written-out operations in the table above stay for what these do not express.\n- `insert` (after, before, kind, text, system, sees, to, id, call, reads, tools, takes_over, sealed, produces, writes): a new step after (or before) a step; 'before' puts it on every edge into that step, so 'sees' must name only what every path carries there: 'kind' agent (text = its prompt; 'system' its system prompt), code (text = Python) or op (with 'call' and 'reads'); it sees what that step sees plus its outputs; its output goes into the nearest prompt after it that can take it -- an agent's own prompt knob, or the one text knob an op fills facts into -- or where 'to' says (a prompt knob, or a step: an agent whose prompt is no knob gets a section for it); with neither, refused unless a step reads it; 'tools' (an agent): e.g. [\"bash\"]; a new step may have them though the steps beside it have none or refuse theirs (an existing step keeps its own tool rules); it runs sealed: only the files it sees (in the per-item part, without 'sees', the item's input files too), no network, no grader files; 'sealed' true on a code step: its code runs in the Task's tool environment (its Python interpreter, its extra commands) sealed -- the files it sees read-only, no network, no grader files -- so it may import any package the Task provides (openpyxl, pandas, numpy) and read item files; the import allowlist does not apply; the Task must declare a tool environment; 'takes_over' an earlier step: the new step writes that step's outputs, so what read them reads the new step's (a choice among attempts reaching what is scored), and that step's own go under new names; 'takes_over' as [step, output, ...] takes only those outputs (the new step writes them and its own; the rest pass through unchanged, so downstream steps keep reading them from the original step). E.g. {\"op\": \"insert\", \"after\": \"solve\", \"kind\": \"agent\", \"text\": \"<what the new step does>\"}\n- `remove` (step, keep): take a step out and reconnect around it (a fork branch too); on a gate, 'keep' names the verdict whose path stays. E.g. {\"op\": \"remove\", \"step\": \"<step>\"}\n- `parallelize` (steps, copies, after, new, sees): run consecutive 'steps' at once, or one step beside 'copies' of itself, or 'new' steps after 'after', between a fork and a join. E.g. {\"op\": \"parallelize\", \"steps\": [\"<step>\"], \"copies\": 2}\n- `serialize` (fork): run a fork's branches one after another, in their order. E.g. {\"op\": \"serialize\", \"fork\": \"<fork>\"}\n- `branch` (fork, kind, text, system, sees, optional, id, to, tools, sealed, produces, writes): a new step as another branch of a fork ('optional': true lets it fail without failing the item; 'sees' names its inputs: \"task\", step ids, or single fact or file names there before the fork; 'system' as insert's); its output goes into the nearest prompt after the join that can take it -- an agent's own prompt knob, or the one text knob an op fills facts into -- or where 'to' says (a prompt knob, or a step: an agent whose prompt is no knob gets a section for it); with neither, refused unless a step reads it; 'tools' as insert's (sealed); 'sealed' as insert's on a code step. E.g. {\"op\": \"branch\", \"fork\": \"<fork>\", \"kind\": \"agent\", \"text\": \"<what this branch does>\"}\n- `rewire` (step, sees, text): change what a step sees: \"task\" (the task's own input, once, as the model steps receive it: never a step's output or a knob's text (an op's output carries the knobs the op declares for it in `knob_outputs`, else every knob the op reads)), step ids (their outputs), or single fact or file names there before it (that input alone); 'text' gives an agent step new instructions too, in place: the same id, outputs and place in a fork or join (so a branch can work from the task alone); with 'text' and no 'sees' it keeps what it sees. E.g. {\"op\": \"rewire\", \"step\": \"solve\", \"sees\": [\"task\"]}\n- `loop` (step, back_to, judge, text, sees, tools, max_iterations, id, sealed): a judge after a step that can send it back with its reason -- or, with 'back_to', send the work back to an earlier agent step, so every step from there to the judge runs again (a fork in between whole); 'back_to' is one every run passes before the step, in the same per-item pass and fork branch: 'judge' agent (text = what to check; its answer starts with proceed or reloop, then why), code (text = Python returning {'verdict': 'proceed' or 'reloop', 'reason': why}) or a callable. The judge is handed what the step read and wrote, unless 'sees' says otherwise, as text (a binary or very long file only named); with 'tools' (an agent judge, as insert's) it runs sealed instead, with the files it sees in its workspace, and its reply starts with the verdict; with 'sealed' true on a code judge, it runs in the Task's tool environment sealed, as insert's 'sealed' on a code step. The reason reaches the step sent back, with that step's own last output; it is sent back at most 'max_iterations' times, so it runs at most that many times plus one (default 2: up to 3 runs; 1 to 5; afterwards the knob <gate>__max_iterations, the gate being <step>_check unless 'id' names it), then the run goes on. E.g. {\"op\": \"loop\", \"step\": \"solve\", \"judge\": \"agent\", \"text\": \"<what to check>\", \"max_iterations\": 2}\n- `route` (after, judge, text, to, sees, tools, id, sealed): a judge after a step chooses one labelled next step ('to': label -> step id or a new step, whose 'takes_over' rewrites an earlier step's outputs on that way); the branches rejoin; with no 'to', proceed or redo the step in place; 'tools' as loop's judge. E.g. {\"op\": \"route\", \"after\": \"solve\", \"judge\": \"agent\", \"text\": \"<how to choose>\", \"to\": {\"proceed\": \"solve_check_judge_inputs\", \"revise\": {\"kind\": \"agent\", \"text\": \"<what it does>\"}}}\n- `split` (step, into: one or two steps, each like {kind, text, sees}): replace a step by two new steps run in turn ('into' two), or by one ('into' one: replace); the last takes over its outputs. E.g. {\"op\": \"split\", \"step\": \"solve\", \"into\": [{\"kind\": \"agent\", \"text\": \"<first part>\"}, {\"kind\": \"agent\", \"text\": \"<second part>\"}]}\n- `merge` (steps, kind, text, system, id, tools, sealed): two consecutive steps as one, with the first's inputs and the second's outputs; 'system' as insert's; 'tools' as insert's (sealed), else a sealed step's own come along; 'sealed' as insert's on a code step. E.g. {\"op\": \"merge\", \"steps\": [\"<step>\", \"<next step>\"], \"text\": \"<what the merged step does>\"}\n- `fallback` (step, kind, text, system, sees, id, call, reads, tools, sealed): a step run instead when 'step' (one run per item) fails -- it raises, crashes past its retries, hits its output limit, its turn cap, its prompt limit, or is still writing at the session time limit (backstop); never for a timeout (the harness's, a declared wall or the step's own) or a harness fault: it writes that step's outputs, so what reads them still gets an answer; 'kind' as in insert; it sees what 'step' sees; when the step writes more than one file, the fallback must be a code step or an agent with tools (a plain agent writes only its reply); 'sealed' as insert's on a code step. E.g. {\"op\": \"fallback\", \"step\": \"solve\", \"kind\": \"agent\", \"text\": \"<a simpler way to the same output>\"}\n- `map` (after, over, text, system, sees, max, combine, id, to, tools): after a step, a new agent step run once per element of 'over' (a list there: a fact, a file or a step's output), one model call each, all at once: a JSON array gives its items, a bulleted, numbered or lettered list its items, other text its non-empty lines; at most 'max' run (default 4, up to 8; past it the first 'max', and the combine is told so); 'text' says what to do with one element; 'combine' (a step as in insert) sees every result and writes one output, placed as insert's is; 'system' as insert's, for each run; 'tools' as insert's: each run sealed; remove the elements step or the combine and the whole map goes. E.g. {\"op\": \"map\", \"after\": \"solve\", \"over\": \"solve\", \"text\": \"<what to do with one element>\", \"combine\": {\"kind\": \"agent\", \"text\": \"<how to combine the results>\"}}",
+        "pipeline_view": "The pipeline, one line per step, generated from the graph in the operators' own words: `sees` lists a step's inputs as `\"sees\"` names them, `name@maker` (`@run`: no step makes it); a plain op that only assembles a model step's input is folded in as `name (via op: its inputs)`; an agent with tools sees the run dir, its own workspace, or a sealed one (its inputs only); `told` is each knob whose text reaches the step, its opening words (`*` frozen; `?` read by an op with several outputs, for all of them), or a code step's code; `->` what it writes; a per-item block's `item files` are files the task lays into each item's pass, under the same name for every item, and the steps that read them: a new step reads one by naming it (or the data step) in 'sees'; `parallel fork { ... } -> join`; `loop(step, judge ..., max N -> N+1 runs)`; `loop(back_to … step, judge ..., max N -> N+1 runs)`; `route(after step, judge ..., {label: step})`; `fallback(step fails -> step)`; `map(step … step over list, max N)`; `per item (data -> its writes; item files: path seen by step, ...) { ... }`; `step agent on model=M effort=E max_completion_tokens=N`; a loop that does not go on with its last attempt past its cap says so: `past the cap: fail_item` (only that item fails) or `past the cap: halt` (the whole run stops); `[optional]`; `[protected]`.\n```text\nper item (data -> current_item.json) {\n  solve agent  sees skill_section (via format_prompt: current_item.json@data), solver_prompt (via format_prompt: current_item.json@data)  told solve__system_prompt* \"You are an expert mathematical reasoning agent …\"; skill \"# Live Mathematical MCQ Heuristics ## Option Co…\"  -> answer.txt\n  loop(solve, judge solve_check_judge (sees skill_section (via format_prompt: current_item.json@data), solve_check_judge_inputs (via solve_check_judge_inputs: answer.txt@solve), solver_prompt (via format_prompt: current_item.json@data)  told solve_check_judge__system_prompt \"You are one step of a pipeline.\"; solve_check_judge__task \"Review the solver's reasoning for the following…\" + appended by the system: \"Start your answer with one word, proceed or reloop, alone or followed by why; nothing before it.\"; skill \"# Live Mathematical MCQ Heuristics ## Option Co…\"  -> solve_check_judge.txt), max 1 -> 2 runs, knob solve_check__max_iterations)\n}\nfinish op  -> result.json, finished\n```"
+      },
+      "state_ref": "453f234e859577e3"
+    }
+  ],
+  "seed_state_digest": "8934a8b802e0b788",
+  "skipped": [],
+  "states": {
+    "453f234e859577e3": {
+      "graph": {
+        "edges": [
+          {
+            "condition": null,
+            "source": "data",
+            "target": "finish"
+          },
+          {
+            "condition": null,
+            "source": "format_prompt",
+            "target": "solve"
+          },
+          {
+            "condition": null,
+            "source": "solve",
+            "target": "solve_check_judge_inputs"
+          },
+          {
+            "condition": "reloop",
+            "source": "solve_check",
+            "target": "solve"
+          },
+          {
+            "condition": "proceed",
+            "source": "solve_check",
+            "target": "solve_done"
+          },
+          {
+            "condition": null,
+            "source": "solve_check_judge",
+            "target": "solve_check"
+          },
+          {
+            "condition": null,
+            "source": "solve_check_judge_inputs",
+            "target": "solve_check_judge"
+          }
+        ],
+        "nodes": {
+          "data": {
+            "blocking": true,
+            "call": "",
+            "evaluator": "",
+            "id": "data",
+            "kind": "data",
+            "knobs": [
+              "data_parallelism"
+            ],
+            "max_iterations": 1,
+            "notes": "",
+            "parallelism_knob": "data_parallelism",
+            "produces": [
+              "item_scores"
+            ],
+            "prompt_template": "",
+            "reads": [],
+            "role": "ceo",
+            "score_effect": "affects",
+            "subgraph_entry": "format_prompt",
+            "subgraph_exit": "solve_done",
+            "task_ref": "refactory_packages.livemath.tasks:LiveMathTask",
+            "tools": [],
+            "writes": [
+              "current_item.json"
+            ]
+          },
+          "finish": {
+            "blocking": true,
+            "call": "refactory_packages.livemath.ops:finish",
+            "evaluator": "",
+            "id": "finish",
+            "kind": "op",
+            "knobs": [],
+            "max_iterations": 1,
+            "notes": "",
+            "produces": [
+              "finished"
+            ],
+            "prompt_template": "",
+            "reads": [],
+            "role": "ceo",
+            "score_effect": "affects",
+            "tools": [],
+            "writes": [
+              "result.json"
+            ]
+          },
+          "format_prompt": {
+            "blocking": true,
+            "call": "refactory_packages.livemath.ops:format_prompt",
+            "evaluator": "",
+            "id": "format_prompt",
+            "kind": "op",
+            "knob_outputs": {
+              "skill_section": [
+                "skill"
+              ],
+              "solver_prompt": [],
+              "user_prompt": []
+            },
+            "knobs": [
+              "skill"
+            ],
+            "max_iterations": 1,
+            "notes": "",
+            "produces": [
+              "user_prompt",
+              "solver_prompt",
+              "skill_section"
+            ],
+            "prompt_template": "",
+            "reads": [
+              "current_item.json"
+            ],
+            "role": "ceo",
+            "score_effect": "affects",
+            "tools": [],
+            "writes": []
+          },
+          "solve": {
+            "blocking": true,
+            "call": "",
+            "evaluator": "",
+            "field_bindings": [
+              [
+                "system_prompt_template",
+                "solve__system_prompt"
+              ]
+            ],
+            "id": "solve",
+            "kind": "agent",
+            "knobs": [
+              "max_completion_tokens",
+              "solve__system_prompt"
+            ],
+            "max_iterations": 1,
+            "notes": "",
+            "produces": [],
+            "prompt_template": "{{solver_prompt}}",
+            "reads": [],
+            "role": "solver",
+            "score_effect": "affects",
+            "system_prompt_template": "You are an expert mathematical reasoning agent solving multiple-choice questions.\n\n{{skill_section}}## Task Format\nYou will receive one mathematics multiple-choice question and its answer choices.\nReason carefully about quantifiers, hypotheses, extremal wording, and exact equality conditions.\n\n## Answer Format\nThink step by step, then provide your final answer inside <answer>...</answer> tags.\nInside the tags, output only the single choice label, such as A or C.\n\nExample:\n<answer>B</answer>\n",
+            "tool_policy": "none",
+            "tools": [],
+            "writes": [
+              "answer.txt"
+            ]
+          },
+          "solve_check": {
+            "blocking": true,
+            "call": "",
+            "evaluator": "refactory_dsh.snippet:verdict",
+            "field_bindings": [
+              [
+                "max_iterations",
+                "solve_check__max_iterations"
+              ]
+            ],
+            "id": "solve_check",
+            "kind": "gate",
+            "knobs": [
+              "solve_check__max_iterations"
+            ],
+            "max_iterations": 1,
+            "notes": "",
+            "on_exhausted": "continue",
+            "produces": [],
+            "prompt_template": "",
+            "reads": [
+              "solve_check_judge.txt"
+            ],
+            "required_reads": [
+              "solve_check_judge.txt"
+            ],
+            "role": "ceo",
+            "score_effect": "affects",
+            "tools": [],
+            "writes": []
+          },
+          "solve_check_judge": {
+            "blocking": true,
+            "call": "",
+            "evaluator": "",
+            "field_bindings": [
+              [
+                "system_prompt_template",
+                "solve_check_judge__system_prompt"
+              ],
+              [
+                "prompt_template",
+                "solve_check_judge__task"
+              ]
+            ],
+            "id": "solve_check_judge",
+            "kind": "agent",
+            "knobs": [
+              "solve_check_judge__system_prompt",
+              "solve_check_judge__task"
+            ],
+            "max_iterations": 1,
+            "notes": "",
+            "produces": [],
+            "prompt_template": "Review the solver's reasoning for the following errors:\n1. Does any cited theorem or classical result actually apply here? Check that its hypotheses (orientability, compactness, boundary type, dimension) match the problem.\n2. Are the implication directions between options correct? If the solver claims A⇒B, verify the direction.\n3. Was any option dismissed on superficial grounds (notation mismatch, missing constant, unsupported impossibility)?\n4. Is the final answer consistent with the stated reasoning?\n\nIf you find a concrete error, start your answer with 'reloop' and explain the specific mistake.\nIf the reasoning is sound, start your answer with 'proceed'.\n\n## Skill section\n{{skill_section}}\n\n## Solver prompt\n{{solver_prompt}}\n\n## Files from earlier steps (solve_check_judge_inputs)\n{{solve_check_judge_inputs}}\n\nStart your answer with one word, proceed or reloop, alone or followed by why; nothing before it.",
+            "reads": [],
+            "role": "solver",
+            "score_effect": "affects",
+            "system_prompt_template": "You are one step of a pipeline.",
+            "tool_policy": "none",
+            "tools": [],
+            "writes": [
+              "solve_check_judge.txt"
+            ]
+          },
+          "solve_check_judge_inputs": {
+            "blocking": true,
+            "call": "refactory_dsh.nn.operators:collect",
+            "evaluator": "",
+            "id": "solve_check_judge_inputs",
+            "kind": "op",
+            "knobs": [],
+            "max_iterations": 1,
+            "notes": "Hands solve_check_judge the files it sees.",
+            "produces": [
+              "solve_check_judge_inputs"
+            ],
+            "prompt_template": "",
+            "reads": [
+              "answer.txt"
+            ],
+            "role": "ceo",
+            "score_effect": "none",
+            "tools": [],
+            "writes": []
+          },
+          "solve_done": {
+            "blocking": true,
+            "call": "refactory_dsh.nn.loops:loop_end",
+            "evaluator": "",
+            "id": "solve_done",
+            "kind": "op",
+            "knobs": [],
+            "max_iterations": 1,
+            "notes": "Ends what 'solve' ended, after the loop's gate 'solve_check'.",
+            "produces": [],
+            "prompt_template": "",
+            "reads": [],
+            "role": "ceo",
+            "score_effect": "none",
+            "tools": [],
+            "writes": []
+          }
+        },
+        "start": "data"
+      },
+      "knobs": {
+        "data_parallelism": {
+          "spec": {
+            "default": 1,
+            "description": "concurrent data-node items",
+            "enum": [],
+            "frozen": true,
+            "hi": 64,
+            "kind": "int",
+            "lo": 1,
+            "required": false,
+            "values": []
+          },
+          "value": 12
+        },
+        "max_completion_tokens": {
+          "spec": {
+            "default": 0,
+            "description": "output-token cap on each solve-node model call; 0 = no cap",
+            "enum": [],
+            "frozen": true,
+            "hi": null,
+            "kind": "int",
+            "lo": 0,
+            "required": false,
+            "values": []
+          },
+          "value": 0
+        },
+        "skill": {
+          "spec": {
+            "default": "",
+            "description": "skill prompt injected into the system message",
+            "enum": [],
+            "frozen": false,
+            "hi": null,
+            "kind": "str",
+            "lo": null,
+            "required": false,
+            "values": []
+          },
+          "value": "# Live Mathematical MCQ Heuristics\n\n## Option Comparison\n- Compare all options before committing. The correct choice is often the strongest statement justified by the question, while nearby distractors are weaker, overstrong, or miss an equality case.\n- Track exact quantifiers such as \"there exists\", \"for every\", \"if and only if\", and \"exactly when\".\n\n\n## Implication Ordering\n- Before selecting an answer, determine which options logically imply which others to build a partial order. For each additional clause in a stronger option (e.g. a local isometry, a full equivalence, an extra characterization), treat it as suspicious unless you can supply a concrete proof sketch.\n- Prefer the strongest option whose every claim you can justify over one with an unjustified extra clause.\n\n## Theorem-Level Precision\n- Check whether an option weakens the conclusion by dropping a characterization, equality clause, or full equivalence.\n- Check whether an option overstates the theorem by upgrading regularity, removing scale restrictions, or changing an existential statement into a universal one.\n\n## Hypotheses\n- Verify the hypotheses and domain carefully. Distractors often keep the theorem shape but alter the required assumptions.\n- Pay close attention to equality cases, extremal conditions, and whether a result applies to the full family or only a restricted subfamily.\n\n\n## Citing Results\n- When you invoke a named theorem or known result, state its precise hypotheses and check they match the problem's setup (orientability, compactness, boundary conditions, dimension). If you cannot recall the exact statement, flag this uncertainty and reason from first principles instead of assuming the result applies.\n- Before finalizing, re-examine any option you dismissed: check whether the dismissal rested on a superficial objection such as a notation mismatch, a missing constant, or an unsupported impossibility claim.\n\n## Final Answer\n- Output the final answer as the single option label only.\n"
+        },
+        "solve__system_prompt": {
+          "spec": {
+            "default": "You are an expert mathematical reasoning agent solving multiple-choice questions.\n\n{{skill_section}}## Task Format\nYou will receive one mathematics multiple-choice question and its answer choices.\nReason carefully about quantifiers, hypotheses, extremal wording, and exact equality conditions.\n\n## Answer Format\nThink step by step, then provide your final answer inside <answer>...</answer> tags.\nInside the tags, output only the single choice label, such as A or C.\n\nExample:\n<answer>B</answer>\n",
+            "description": "system prompt for solve (frozen; use the skill knob)",
+            "enum": [],
+            "frozen": true,
+            "hi": null,
+            "kind": "str",
+            "lo": null,
+            "required": false,
+            "values": []
+          },
+          "value": "You are an expert mathematical reasoning agent solving multiple-choice questions.\n\n{{skill_section}}## Task Format\nYou will receive one mathematics multiple-choice question and its answer choices.\nReason carefully about quantifiers, hypotheses, extremal wording, and exact equality conditions.\n\n## Answer Format\nThink step by step, then provide your final answer inside <answer>...</answer> tags.\nInside the tags, output only the single choice label, such as A or C.\n\nExample:\n<answer>B</answer>\n"
+        },
+        "solve_check__max_iterations": {
+          "spec": {
+            "default": 1,
+            "description": "how often solve_check may send the work back",
+            "enum": [],
+            "frozen": false,
+            "hi": 5,
+            "kind": "int",
+            "lo": 1,
+            "required": false,
+            "values": []
+          },
+          "value": 1
+        },
+        "solve_check_judge__system_prompt": {
+          "spec": {
+            "default": "You are one step of a pipeline.",
+            "description": "system prompt for solve_check_judge",
+            "enum": [],
+            "frozen": false,
+            "hi": null,
+            "kind": "str",
+            "lo": null,
+            "required": false,
+            "values": []
+          },
+          "value": "You are one step of a pipeline."
+        },
+        "solve_check_judge__task": {
+          "spec": {
+            "default": "Review the solver's reasoning for the following errors:\n1. Does any cited theorem or classical result actually apply here? Check that its hypotheses (orientability, compactness, boundary type, dimension) match the problem.\n2. Are the implication directions between options correct? If the solver claims A⇒B, verify the direction.\n3. Was any option dismissed on superficial grounds (notation mismatch, missing constant, unsupported impossibility)?\n4. Is the final answer consistent with the stated reasoning?\n\nIf you find a concrete error, start your answer with 'reloop' and explain the specific mistake.\nIf the reasoning is sound, start your answer with 'proceed'.\n\n## Skill section\n{{skill_section}}\n\n## Solver prompt\n{{solver_prompt}}\n\n## Files from earlier steps (solve_check_judge_inputs)\n{{solve_check_judge_inputs}}\n\nStart your answer with one word, proceed or reloop, alone or followed by why; nothing before it.",
+            "description": "task text (prompt) for solve_check_judge",
+            "enum": [],
+            "frozen": false,
+            "hi": null,
+            "kind": "str",
+            "lo": null,
+            "required": false,
+            "values": []
+          },
+          "value": "Review the solver's reasoning for the following errors:\n1. Does any cited theorem or classical result actually apply here? Check that its hypotheses (orientability, compactness, boundary type, dimension) match the problem.\n2. Are the implication directions between options correct? If the solver claims A⇒B, verify the direction.\n3. Was any option dismissed on superficial grounds (notation mismatch, missing constant, unsupported impossibility)?\n4. Is the final answer consistent with the stated reasoning?\n\nIf you find a concrete error, start your answer with 'reloop' and explain the specific mistake.\nIf the reasoning is sound, start your answer with 'proceed'.\n\n## Skill section\n{{skill_section}}\n\n## Solver prompt\n{{solver_prompt}}\n\n## Files from earlier steps (solve_check_judge_inputs)\n{{solve_check_judge_inputs}}\n\nStart your answer with one word, proceed or reloop, alone or followed by why; nothing before it."
+        }
+      },
+      "memory": [],
+      "ports": [],
+      "version": 1
+    },
+    "8934a8b802e0b788": {
+      "graph": {
+        "edges": [
+          {
+            "condition": null,
+            "source": "data",
+            "target": "finish"
+          },
+          {
+            "condition": null,
+            "source": "format_prompt",
+            "target": "solve"
+          }
+        ],
+        "nodes": {
+          "data": {
+            "blocking": true,
+            "call": "",
+            "evaluator": "",
+            "id": "data",
+            "kind": "data",
+            "knobs": [
+              "data_parallelism"
+            ],
+            "max_iterations": 1,
+            "notes": "",
+            "parallelism_knob": "data_parallelism",
+            "produces": [
+              "item_scores"
+            ],
+            "prompt_template": "",
+            "reads": [],
+            "role": "ceo",
+            "score_effect": "affects",
+            "subgraph_entry": "format_prompt",
+            "subgraph_exit": "solve",
+            "task_ref": "refactory_packages.livemath.tasks:LiveMathTask",
+            "tools": [],
+            "writes": [
+              "current_item.json"
+            ]
+          },
+          "finish": {
+            "blocking": true,
+            "call": "refactory_packages.livemath.ops:finish",
+            "evaluator": "",
+            "id": "finish",
+            "kind": "op",
+            "knobs": [],
+            "max_iterations": 1,
+            "notes": "",
+            "produces": [
+              "finished"
+            ],
+            "prompt_template": "",
+            "reads": [],
+            "role": "ceo",
+            "score_effect": "affects",
+            "tools": [],
+            "writes": [
+              "result.json"
+            ]
+          },
+          "format_prompt": {
+            "blocking": true,
+            "call": "refactory_packages.livemath.ops:format_prompt",
+            "evaluator": "",
+            "id": "format_prompt",
+            "kind": "op",
+            "knob_outputs": {
+              "skill_section": [
+                "skill"
+              ],
+              "solver_prompt": [],
+              "user_prompt": []
+            },
+            "knobs": [
+              "skill"
+            ],
+            "max_iterations": 1,
+            "notes": "",
+            "produces": [
+              "user_prompt",
+              "solver_prompt",
+              "skill_section"
+            ],
+            "prompt_template": "",
+            "reads": [
+              "current_item.json"
+            ],
+            "role": "ceo",
+            "score_effect": "affects",
+            "tools": [],
+            "writes": []
+          },
+          "solve": {
+            "blocking": true,
+            "call": "",
+            "evaluator": "",
+            "field_bindings": [
+              [
+                "system_prompt_template",
+                "solve__system_prompt"
+              ]
+            ],
+            "id": "solve",
+            "kind": "agent",
+            "knobs": [
+              "max_completion_tokens",
+              "solve__system_prompt"
+            ],
+            "max_iterations": 1,
+            "notes": "",
+            "produces": [],
+            "prompt_template": "{{solver_prompt}}",
+            "reads": [],
+            "role": "solver",
+            "score_effect": "affects",
+            "system_prompt_template": "You are an expert mathematical reasoning agent solving multiple-choice questions.\n\n{{skill_section}}## Task Format\nYou will receive one mathematics multiple-choice question and its answer choices.\nReason carefully about quantifiers, hypotheses, extremal wording, and exact equality conditions.\n\n## Answer Format\nThink step by step, then provide your final answer inside <answer>...</answer> tags.\nInside the tags, output only the single choice label, such as A or C.\n\nExample:\n<answer>B</answer>\n",
+            "tool_policy": "none",
+            "tools": [],
+            "writes": [
+              "answer.txt"
+            ]
+          }
+        },
+        "start": "data"
+      },
+      "knobs": {
+        "data_parallelism": {
+          "spec": {
+            "default": 1,
+            "description": "concurrent data-node items",
+            "enum": [],
+            "frozen": true,
+            "hi": 64,
+            "kind": "int",
+            "lo": 1,
+            "required": false,
+            "values": []
+          },
+          "value": 12
+        },
+        "max_completion_tokens": {
+          "spec": {
+            "default": 0,
+            "description": "output-token cap on each solve-node model call; 0 = no cap",
+            "enum": [],
+            "frozen": true,
+            "hi": null,
+            "kind": "int",
+            "lo": 0,
+            "required": false,
+            "values": []
+          },
+          "value": 0
+        },
+        "skill": {
+          "spec": {
+            "default": "",
+            "description": "skill prompt injected into the system message",
+            "enum": [],
+            "frozen": false,
+            "hi": null,
+            "kind": "str",
+            "lo": null,
+            "required": false,
+            "values": []
+          },
+          "value": "# Live Mathematical MCQ Heuristics\n\n## Option Comparison\n- Compare all options before committing. The correct choice is often the strongest statement justified by the question, while nearby distractors are weaker, overstrong, or miss an equality case.\n- Track exact quantifiers such as \"there exists\", \"for every\", \"if and only if\", and \"exactly when\".\n\n## Theorem-Level Precision\n- Check whether an option weakens the conclusion by dropping a characterization, equality clause, or full equivalence.\n- Check whether an option overstates the theorem by upgrading regularity, removing scale restrictions, or changing an existential statement into a universal one.\n\n## Hypotheses\n- Verify the hypotheses and domain carefully. Distractors often keep the theorem shape but alter the required assumptions.\n- Pay close attention to equality cases, extremal conditions, and whether a result applies to the full family or only a restricted subfamily.\n\n## Final Answer\n- Output the final answer as the single option label only.\n"
+        },
+        "solve__system_prompt": {
+          "spec": {
+            "default": "You are an expert mathematical reasoning agent solving multiple-choice questions.\n\n{{skill_section}}## Task Format\nYou will receive one mathematics multiple-choice question and its answer choices.\nReason carefully about quantifiers, hypotheses, extremal wording, and exact equality conditions.\n\n## Answer Format\nThink step by step, then provide your final answer inside <answer>...</answer> tags.\nInside the tags, output only the single choice label, such as A or C.\n\nExample:\n<answer>B</answer>\n",
+            "description": "system prompt for solve (frozen; use the skill knob)",
+            "enum": [],
+            "frozen": true,
+            "hi": null,
+            "kind": "str",
+            "lo": null,
+            "required": false,
+            "values": []
+          },
+          "value": "You are an expert mathematical reasoning agent solving multiple-choice questions.\n\n{{skill_section}}## Task Format\nYou will receive one mathematics multiple-choice question and its answer choices.\nReason carefully about quantifiers, hypotheses, extremal wording, and exact equality conditions.\n\n## Answer Format\nThink step by step, then provide your final answer inside <answer>...</answer> tags.\nInside the tags, output only the single choice label, such as A or C.\n\nExample:\n<answer>B</answer>\n"
+        }
+      },
+      "memory": [],
+      "ports": [],
+      "version": 1
+    }
+  }
+}

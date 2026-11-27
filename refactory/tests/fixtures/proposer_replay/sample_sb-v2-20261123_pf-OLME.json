@@ -1,0 +1,937 @@
+{
+  "edit_preset": "broad",
+  "frozen": [],
+  "mode": "spreadsheetbench_v2/steps",
+  "refusals": [
+    {
+      "edit": {
+        "edits": [
+          {
+            "after": "implement",
+            "id": "diff_check",
+            "kind": "code",
+            "op": "insert",
+            "produces": [
+              "regression_check"
+            ],
+            "reads": [
+              "input.xlsx",
+              "output.xlsx"
+            ],
+            "sealed": true,
+            "text": "def main(inp):\n    import openpyxl\n    from openpyxl.utils import get_column_letter as g\n    w1 = openpyxl.load_workbook('input.xlsx')\n    w2 = openpyxl.load_workbook('output.xlsx')\n    d = []\n    for s in w1.sheetnames:\n        if s not in w2.sheetnames: continue\n        a, b = w1[s], w2[s]\n        mr = max(a.max_row or 0, b.max_row or 0)\n        mc = max(a.max_column or 0, b.max_column or 0)\n        for r in range(1, mr + 1):\n            for c in range(1, mc + 1):\n                v1 = a.cell(r, c).value\n                v2 = b.cell(r, c).value\n                if v1 != v2:\n                    d.append(f'{s}!{g(c)}{r}: {repr(v1)[:60]} -> {repr(v2)[:60]}')\n    t = f'Cells directly modified: {len(d)}\\n' + '\\n'.join(d[:200])\n    if len(d) > 200: t += f'\\n... and {len(d)-200} more'\n    return {'facts': {'regression_check': t}, 'files': {}}\n"
+          },
+          {
+            "name": "verify__task",
+            "op": "set_knob",
+            "patch": [
+              {
+                "content": "## Automated Diff Report (input.xlsx vs output.xlsx)\nBelow is an automated cell-by-cell comparison showing every cell whose formula or value was directly modified:\n\n{{regression_check}}\n\nREQUIRED: Review each changed cell above carefully:\n1. Verify the change is justified by the task instruction\n2. If a value's sign was flipped (negative to positive or vice versa), the original sign is almost certainly correct — financial models use intentional sign conventions (negative tax rates = tax expense, negative capex = cash outflow). Do NOT flip signs unless the instruction explicitly says to.\n3. If a formula was changed, compare with neighboring cells in the same row/column to verify the new formula follows the same pattern\n4. REVERT any unjustified change by copying the original value/formula from input.xlsx back into output.xlsx using openpyxl\n5. After reverting, recalculate with LibreOffice to verify no errors remain\n\n",
+                "kind": "insert_before",
+                "target": "## This Step"
+              }
+            ]
+          }
+        ]
+      },
+      "expected": {
+        "accepted": false,
+        "codes": [
+          "E-precondition"
+        ],
+        "reasons": [
+          "E-precondition: 'reads' lists an op step's files (with 'call'); an agent or code step gets a file by naming it in 'sees', so 'reads' would be ignored [edit 1 of 2: insert]"
+        ]
+      },
+      "parent_state_ref": "25e43119808a51b7",
+      "recorded_codes": [
+        "E-precondition"
+      ],
+      "recorded_reasons": [
+        "E-precondition: 'reads' lists an op step's files (with 'call'); an agent or code step gets a file by naming it in 'sees', so 'reads' would be ignored [edit 1 of 2: insert]"
+      ]
+    },
+    {
+      "edit": {
+        "after": "verify",
+        "id": "revert_regressions",
+        "kind": "code",
+        "op": "insert",
+        "sealed": true,
+        "takes_over": [
+          "verify",
+          "output.xlsx"
+        ],
+        "text": "def main(inp):\n    import openpyxl\n    w1 = openpyxl.load_workbook('input.xlsx')\n    w2 = openpyxl.load_workbook('output.xlsx')\n    for s in w2.sheetnames:\n        if s not in w1.sheetnames:\n            continue\n        a, b = w1[s], w2[s]\n        for row in b.iter_rows():\n            for cell in row:\n                v2 = cell.value\n                if v2 is None:\n                    continue\n                v1 = a.cell(cell.row, cell.column).value\n                if v1 == v2:\n                    continue\n                revert = False\n                if v1 is None and not (isinstance(v2, str) and v2.startswith('=')):\n                    revert = True\n                elif v1 is not None:\n                    try:\n                        f1, f2 = float(v1), float(v2)\n                        if f1 != 0 and f2 != 0 and abs(f1 + f2) / max(abs(f1), abs(f2)) < 1e-6:\n                            revert = True\n                    except (TypeError, ValueError):\n                        pass\n                if revert:\n                    cell.value = v1\n    w2.save('output.xlsx')\n    return {'facts': {}, 'files': {}}\n"
+      },
+      "expected": {
+        "accepted": true,
+        "candidate_digest": "e19110af43e75477",
+        "candidate_id": "d90392aa792f"
+      },
+      "parent_state_ref": "25e43119808a51b7",
+      "recorded_codes": [
+        "E-precondition"
+      ],
+      "recorded_reasons": [
+        "E-precondition: 'verify' would run without output.xlsx (made by revert_regressions) on a path this edit adds: no step on that path makes it before it, so the step would fail or answer without it on every item that takes the path. Route to a step that needs none of what the skipped steps make, or give the path its own step making it"
+      ]
+    },
+    {
+      "edit": {
+        "after": "verify",
+        "id": "error_only_filter",
+        "kind": "code",
+        "op": "insert",
+        "sealed": true,
+        "takes_over": [
+          "verify",
+          "output.xlsx"
+        ],
+        "text": "def main(inp):\n    import openpyxl\n    w1 = openpyxl.load_workbook('input.xlsx')\n    w2 = openpyxl.load_workbook('output.xlsx')\n    err = ('#ref!', '#div/0!', '#name?', '#value!', '#n/a', '#null!')\n    ec = set()\n    for sn in w1.sheetnames:\n        ws = w1[sn]\n        for row in ws.iter_rows():\n            for cell in row:\n                v = cell.value\n                if isinstance(v, str) and any(e in v.lower() for e in err):\n                    ec.add((sn, cell.row, cell.column))\n    for sn in w2.sheetnames:\n        if sn not in w1.sheetnames:\n            continue\n        ws1, ws2 = w1[sn], w2[sn]\n        mr = max(ws1.max_row or 0, ws2.max_row or 0)\n        mc = max(ws1.max_column or 0, ws2.max_column or 0)\n        for r in range(1, mr + 1):\n            for c in range(1, mc + 1):\n                v1 = ws1.cell(r, c).value\n                v2 = ws2.cell(r, c).value\n                if v1 != v2 and (sn, r, c) not in ec:\n                    ws2.cell(r, c).value = v1\n    w2.save('output.xlsx')\n    return {'facts': {}, 'files': {}}\n"
+      },
+      "expected": {
+        "accepted": true,
+        "candidate_digest": "236cf219168ad695",
+        "candidate_id": "819bd489e568"
+      },
+      "parent_state_ref": "25e43119808a51b7",
+      "recorded_codes": [
+        "E-precondition"
+      ],
+      "recorded_reasons": [
+        "E-precondition: 'verify' would run without output.xlsx (made by error_only_filter) on a path this edit adds: no step on that path makes it before it, so the step would fail or answer without it on every item that takes the path. Route to a step that needs none of what the skipped steps make, or give the path its own step making it"
+      ]
+    },
+    {
+      "edit": {
+        "after": "implement",
+        "id": "sanitize",
+        "kind": "code",
+        "op": "insert",
+        "sealed": true,
+        "takes_over": [
+          "implement",
+          "output.xlsx"
+        ],
+        "text": "def main(inp):\n    import openpyxl\n    w1 = openpyxl.load_workbook('input.xlsx')\n    w2 = openpyxl.load_workbook('output.xlsx')\n    for sn in w2.sheetnames:\n        if sn not in w1.sheetnames:\n            continue\n        s1, s2 = w1[sn], w2[sn]\n        mr = max(s1.max_row or 0, s2.max_row or 0)\n        mc = max(s1.max_column or 0, s2.max_column or 0)\n        for r in range(1, mr + 1):\n            for c in range(1, mc + 1):\n                v1 = s1.cell(r, c).value\n                v2 = s2.cell(r, c).value\n                if v1 == v2:\n                    continue\n                revert = False\n                if v1 is None and v2 is not None and not (isinstance(v2, str) and v2.startswith('=')):\n                    revert = True\n                elif isinstance(v1, (int, float)) and isinstance(v2, (int, float)):\n                    if v1 == 0 and v2 != 0:\n                        revert = True\n                    elif v1 != 0 and v2 != 0 and (v1 > 0) != (v2 > 0):\n                        revert = True\n                if revert:\n                    s2.cell(r, c).value = v1\n    w2.save('output.xlsx')\n    return {'facts': {}, 'files': {}}\n"
+      },
+      "expected": {
+        "accepted": true,
+        "candidate_digest": "24a3dc528911dbce",
+        "candidate_id": "f2787c675c07"
+      },
+      "parent_state_ref": "25e43119808a51b7",
+      "recorded_codes": [
+        "E-integrity"
+      ],
+      "recorded_reasons": [
+        "E-integrity: an integrity review judged what this change adds suspect: it may rely on how the data, grader or environment happen to be built (train_overfit): The three revert rules (zero→nonzero, sign flips, None→literal) are conservative heuristics that have some general validity as regression prevention, but their specific selection appears fitted to patterns observed in the 8 training items (the optimizer explicitly names cells like C36=0→70.248, C90=-0.3→0.3, Cover!D8). On new items where a zero genuinely needs correcting or a sign genuinely needs… -- it quoted \"if v1 == 0 and v2 != 0: revert = True\". A change whose benefit may depend on how the data, grader or environment happen to be built is refused in this run; propose a change that does the task better and holds in general"
+      ]
+    },
+    {
+      "edit": {
+        "edits": [
+          {
+            "after": "inspect",
+            "id": "scan_errors",
+            "kind": "code",
+            "op": "insert",
+            "produces": [
+              "error_scan"
+            ],
+            "reads": [
+              "input.xlsx"
+            ],
+            "sealed": true,
+            "text": "def main(inp):\n    import openpyxl\n    wb = openpyxl.load_workbook('input.xlsx')\n    et = ('#ref!', '#div/0!', '#name?', '#value!', '#n/a', '#null!')\n    errs = []\n    for sn in wb.sheetnames:\n        ws = wb[sn]\n        for row in ws.iter_rows():\n            for c in row:\n                v = c.value\n                if isinstance(v, str) and any(e in v.lower() for e in et):\n                    errs.append(f\"{sn}!{c.coordinate}: {v}\")\n    r = f\"VERIFIED ERROR CELLS ({len(errs)} cells with error tokens in formulas):\\n\"\n    for e in errs[:500]:\n        r += f\"- {e}\\n\"\n    if len(errs) > 500:\n        r += f\"({len(errs)-500} more not listed)\\n\"\n    if not errs:\n        r = \"VERIFIED ERROR CELLS: No error tokens found in any formula.\\n\"\n    return {'facts': {'error_scan': r}, 'files': {}}\n"
+          },
+          {
+            "name": "plan__task",
+            "op": "set_knob",
+            "patch": [
+              {
+                "content": "## Verified Error Cells (Automated Scan)\n{{error_scan}}\n\nCRITICAL: The automated scan above lists EVERY cell with an error token (#REF!, #DIV/0!, etc.) in the spreadsheet. Plan fixes ONLY for cells listed above. The inspect notes may contain false positives — cells flagged as errors that are actually correct (e.g. negative tax rates, D&A values of zero, intentional sign conventions). Do NOT plan fixes for cells the scan did not flag unless you open the cell with view_xlsx and confirm it displays an error value. A wrong fix causes regression errors that are scored worse than a missed fix.\n\n",
+                "kind": "insert_before",
+                "target": "## This Step"
+              }
+            ]
+          },
+          {
+            "name": "implement__task",
+            "op": "set_knob",
+            "patch": [
+              {
+                "content": "## Verified Error Cells (Automated Scan)\n{{error_scan}}\n\nCRITICAL: Only modify cells that appear in the automated error scan above AND in plan.md. Do NOT fix anything not in the scan — the inspect notes often contain false positives. Start by copying input.xlsx to output.xlsx with shutil.copy2, then modify only the planned error-token cells. Never flip the sign of a value or fill an empty/zero cell unless the scan confirms it has an error token.\n\n",
+                "kind": "insert_before",
+                "target": "## This Step"
+              }
+            ]
+          }
+        ]
+      },
+      "expected": {
+        "accepted": false,
+        "codes": [
+          "E-precondition"
+        ],
+        "reasons": [
+          "E-precondition: 'reads' lists an op step's files (with 'call'); an agent or code step gets a file by naming it in 'sees', so 'reads' would be ignored [edit 1 of 3: insert]"
+        ]
+      },
+      "parent_state_ref": "25e43119808a51b7",
+      "recorded_codes": [
+        "E-precondition"
+      ],
+      "recorded_reasons": [
+        "E-precondition: 'reads' lists an op step's files (with 'call'); an agent or code step gets a file by naming it in 'sees', so 'reads' would be ignored [edit 1 of 3: insert]"
+      ]
+    },
+    {
+      "edit": {
+        "edits": [
+          {
+            "after": "inspect",
+            "id": "error_scan",
+            "kind": "code",
+            "op": "insert",
+            "produces": [
+              "error_scan"
+            ],
+            "sealed": true,
+            "sees": [
+              "input.xlsx"
+            ],
+            "text": "def main(inp):\n    import openpyxl,subprocess,os\n    et=('#ref!','#div/0!','#name?','#value!','#n/a','#null!')\n    seen,errs=set(),[]\n    try:\n        wb=openpyxl.load_workbook('input.xlsx')\n        for sn in wb.sheetnames:\n            for row in wb[sn].iter_rows():\n                for c in row:\n                    v=c.value\n                    if isinstance(v,str) and any(e in v.lower() for e in et):\n                        a=f'{sn}!{c.coordinate}'\n                        if a not in seen:\n                            seen.add(a)\n                            errs.append(f'{a}: {v[:80]}')\n    except:pass\n    try:\n        os.makedirs('/tmp/lo',exist_ok=True)\n        subprocess.run(['libreoffice','--headless','--calc','--convert-to','xlsx','input.xlsx','--outdir','/tmp/lo/'],capture_output=True,timeout=120)\n        if os.path.exists('/tmp/lo/input.xlsx'):\n            wb2=openpyxl.load_workbook('/tmp/lo/input.xlsx',data_only=True)\n            for sn in wb2.sheetnames:\n                for row in wb2[sn].iter_rows():\n                    for c in row:\n                        v=c.value\n                        if isinstance(v,str) and any(e in v.lower() for e in et):\n                            a=f'{sn}!{c.coordinate}'\n                            if a not in seen:\n                                seen.add(a)\n                                errs.append(f'{a}: val={v[:60]}')\n    except:pass\n    r=f'AUTOMATED ERROR SCAN ({len(errs)} cells with error tokens):\\n'\n    for e in errs[:200]:r+=f'- {e}\\n'\n    if len(errs)>200:r+=f'({len(errs)-200} more)\\n'\n    if not errs:r='AUTOMATED ERROR SCAN: No error tokens found.\\n'\n    return {'facts':{'error_scan':r},'files':{}}\n"
+          },
+          {
+            "name": "plan__task",
+            "op": "set_knob",
+            "patch": [
+              {
+                "content": "## Automated Error Scan Results\n{{error_scan}}\n\nCRITICAL: The scan above lists cells with actual Excel error tokens (#REF!, #DIV/0!, etc.) found by automated scanning of both source formulas and LibreOffice-recalculated values. The inspect notes may contain false positives — cells flagged as errors that actually hold correct values. For EVERY issue in inspect_notes.md, check if the cell appears in the automated scan. If a cell has a valid computed value (including negative numbers, zeros, hardcoded constants), it is almost certainly intentional and must NOT be changed. Only plan fixes for cells where the error is confirmed by the scan OR by your own reading of the actual cell with view_xlsx.\n\n",
+                "kind": "insert_before",
+                "target": "## This Step"
+              }
+            ]
+          },
+          {
+            "name": "implement__task",
+            "op": "set_knob",
+            "patch": [
+              {
+                "content": "## Automated Error Scan Results\n{{error_scan}}\n\nCRITICAL: Only modify cells that appear in the automated error scan above OR are explicitly justified in plan.md with concrete evidence from the spreadsheet. Do not change cells with valid computed values — the scan confirms which cells have actual errors. Copy input.xlsx to output.xlsx first (shutil.copy2), then apply only planned fixes.\n\n",
+                "kind": "insert_before",
+                "target": "## This Step"
+              }
+            ]
+          }
+        ]
+      },
+      "expected": {
+        "accepted": true,
+        "candidate_digest": "7a1e60ab81b1408b",
+        "candidate_id": "707ed59b55a0"
+      },
+      "parent_state_ref": "25e43119808a51b7",
+      "recorded_codes": [
+        "E-code-run"
+      ],
+      "recorded_reasons": [
+        "E-code-run: code node 'error_scan' failed when run on the parent's recorded inputs for item 'sb2-3888b863b508_5': the code is refused (rule V18): imports 'openpyxl'; allowed: re, json, math, collections, itertools, statistics, fractions, unicodedata, string; imports 'os'; allowed: re, json, math, collections, itertools, statistics, fractions, unicodedata, string; imports 'subprocess'; allowed: re, json, math, collections, itertools, statistics, fractions, unicodedata, string; uses the attribute 'coordinate', which is not among the methods of str, bytes, list, dict, set, tuple, int, float and the allowed modules' public names (string formatting is refused); uses the attribute 'exists', which is not among the methods of str, bytes, list, dict, set, tuple, int, float and the allowed modules' public names (string formatting is refused); uses the attribute 'iter_rows', which is not among the methods of str, bytes, list, dict, set, tuple, int, float and the allowed modules' public names (string formatting is refused); uses the attribute 'load_workbook', which is not among the methods of str, bytes, list, dict, set, tuple, int, float and the allowed modules' public names (string formatting is refused); uses the attribute 'makedirs', which is not among the methods of str, bytes, list, dict, set, tuple, int, float and the allowed modules' public names (string formatting is refused); uses the attribute 'path', which is not among the methods of str, bytes, list, dict, set, tuple, int, float and the allowed modules' public names (string formatting is refused); uses the attribute 'run', which is not . Its inputs there: files [], facts []; read each one's shape before using it"
+      ]
+    },
+    {
+      "edit": {
+        "edits": [
+          {
+            "after": "implement",
+            "id": "cell_diff",
+            "kind": "code",
+            "op": "insert",
+            "produces": [
+              "cell_diff"
+            ],
+            "sealed": true,
+            "sees": [
+              "input.xlsx",
+              "output.xlsx"
+            ],
+            "text": "def main(inp):\n    import openpyxl\n    from openpyxl.utils import get_column_letter\n    wb1 = openpyxl.load_workbook('input.xlsx')\n    wb2 = openpyxl.load_workbook('output.xlsx')\n    diffs = []\n    for sn in wb2.sheetnames:\n        if sn not in wb1.sheetnames:\n            continue\n        s1, s2 = wb1[sn], wb2[sn]\n        mr = max(s1.max_row or 0, s2.max_row or 0)\n        mc = max(s1.max_column or 0, s2.max_column or 0)\n        for r in range(1, mr + 1):\n            for c in range(1, mc + 1):\n                v1 = s1.cell(r, c).value\n                v2 = s2.cell(r, c).value\n                if v1 != v2:\n                    addr = f\"{get_column_letter(c)}{r}\"\n                    diffs.append(f\"{sn}!{addr}: {repr(v1)} -> {repr(v2)}\")\n    report = f\"CELL DIFF REPORT: {len(diffs)} cells changed\\n\"\n    for d in diffs[:300]:\n        report += f\"- {d}\\n\"\n    if len(diffs) > 300:\n        report += f\"({len(diffs)-300} more not listed)\\n\"\n    if not diffs:\n        report = \"CELL DIFF REPORT: No cells changed.\\n\"\n    return {'facts': {'cell_diff': report}, 'files': {}}\n"
+          },
+          {
+            "name": "verify__task",
+            "op": "set_knob",
+            "patch": [
+              {
+                "content": "## Automated Cell Diff Report\n{{cell_diff}}\n\nCRITICAL: The diff above lists EVERY cell the implement step changed. You MUST systematically review each changed cell against the instruction and plan.md. For each change, open the cell in input.xlsx with view_xlsx to see its original value/formula, then check if the change was required. REVERT any change that:\n- Was not required by the instruction or justified in plan.md\n- Fills a previously empty/zero cell with a computed value not required by the instruction\n- Changes a cell's formula when the original formula was not broken (no #REF!, #DIV/0!, etc.)\nTo revert: use openpyxl to copy the original value/formula from input.xlsx to output.xlsx for that cell. After all reverts, recalculate with LibreOffice.\n\n",
+                "kind": "insert_before",
+                "target": "## This Step"
+              }
+            ]
+          }
+        ]
+      },
+      "expected": {
+        "accepted": true,
+        "candidate_digest": "59190bc61508c269",
+        "candidate_id": "478013e51040"
+      },
+      "parent_state_ref": "25e43119808a51b7",
+      "recorded_codes": [
+        "E-code-run"
+      ],
+      "recorded_reasons": [
+        "E-code-run: code node 'cell_diff' failed when run on the parent's recorded inputs for item 'sb2-3888b863b508_5': the code is refused (rule V18): imports 'openpyxl'; allowed: re, json, math, collections, itertools, statistics, fractions, unicodedata, string; imports from 'openpyxl.utils'; allowed: re, json, math, collections, itertools, statistics, fractions, unicodedata, string; uses the attribute 'cell', which is not among the methods of str, bytes, list, dict, set, tuple, int, float and the allowed modules' public names (string formatting is refused); uses the attribute 'load_workbook', which is not among the methods of str, bytes, list, dict, set, tuple, int, float and the allowed modules' public names (string formatting is refused); uses the attribute 'max_column', which is not among the methods of str, bytes, list, dict, set, tuple, int, float and the allowed modules' public names (string formatting is refused); uses the attribute 'max_row', which is not among the methods of str, bytes, list, dict, set, tuple, int, float and the allowed modules' public names (string formatting is refused); uses the attribute 'sheetnames', which is not among the methods of str, bytes, list, dict, set, tuple, int, float and the allowed modules' public names (string formatting is refused); uses the attribute 'value', which is not among the methods of str, bytes, list, dict, set, tuple, int, float and the allowed modules' public names (string formatting is refused). Its inputs there: files [], facts []; read each one's shape before using it"
+      ]
+    }
+  ],
+  "sections": [
+    {
+      "sections": {
+        "composition": "### How nodes compose\nThe pipeline is made of four kinds of step, and any of them may be put anywhere the validator's rules (listed below) allow:\n- **agent**: one model call. Its prompt fills each `{{name}}` from a fact (or knob) produced upstream; its reply is written to its first `writes` file and, when it declares `produces`, also becomes that fact. A new agent without `tools` sees only its prompt and the files it names in `sees` (they become its declared reads, pasted in after the prompt): hand it anything else as `{{facts}}`. A file's text becomes a fact through an op that reads the file and `produces` the fact, or when the agent that writes the file declares `produces`.\n- **where `{{fact}}` is filled in**: only in an agent's `prompt_template` (its `<id>__task` knob) and its system prompt (its `<id>__system_prompt` knob). Any other knob is read as written, so a `{{fact}}` there would never arrive and is refused (V20).\n- **tools**: every existing step keeps its own tool rules, and in this run a new step has no tools.\n- **gate**: routes by a verdict, to the out-edge whose `condition` is that verdict. Give each out-edge a single-word condition (`proceed`, `reloop`, `revise` ...). Any declared upstream output can be the verdict: with `\"evaluator\": \"refactory_dsh.snippet:verdict\"` the gate reads the verdict from its first `required_reads` file (or, with none, its first `inputs` fact) -- whatever an agent or a code op upstream wrote there: its first word, or else its last line when that is the word alone or the word then `:`, `—`, `–`, `-` or `.` and more (leading markdown or quotes are skipped; a list item or a code fence is not read) -- and the rest of the text is the reason. The word must be one of the conditions (any case) or `halt`, which ends the whole run. Anything else fails that item's run, and so does a first word and a last line that name different verdicts, so tell the writer to start with the word or put it alone on the last line.\n- **loop**: a gate's out-edge back to an earlier step. The `loop` operation makes one around a step (step -> gate; gate -> step on `reloop`, gate -> the step's old successor on `proceed`); a reloop hands the gate's reason to the step it goes back to as feedback, and the gate's `max_iterations` bounds how often it may. When a gate would reloop once more than that, its `on_exhausted` decides: `continue` (the default inside the per-item pass) goes on along `proceed` with the last attempt, which is graded as it stands; `fail_item` fails that item only; `halt` ends the whole run (no later item runs). A gate with no forward `proceed` edge defaults to `fail_item`. The last step of the pass can be looped too: the loop then adds a step after the gate to end the pass.\n- **running out of output**: a model call that uses its whole output allowance without answering is the model failing that question. It is not retried unless the step opts in (retry.on): the step has no answer, and the item goes on without it (a gate after it sees no answer and may reloop; a fork's join sees that branch without one; a code op's `inp['files']` holds only the files that exist; an item left with nothing to grade scores 0).\n- **running out of turns**: an agent that uses its whole turn cap without finishing is the model failing that question, like running out of output. It is not retried unless the step opts in (retry.on): the step has no answer, and the item goes on without it, as above.\n- **crashes**: when the worker or product fails (not the model's own output or turn cap), an agent step in the per-item pass that is safe to rerun (no tools, its own report files only, or a workspace) is run again in a fresh session, up to 2 more times; if every session crashes it has no answer, as above. An item that times out is a harness timeout: not caused by the pipeline's design; not a target.\n- **fork**: steps run at once between a fork and a join; branches write distinct files and facts. `parallelize` and `branch` wire what the branches make into the step after the join; the written-out `parallel` operation leaves that to you.\n\nOne example of each composition shape, with this graph's ids (how to write it; none is preferred):\n- a new agent step: {\"op\": \"insert\", \"before\": \"implement\", \"kind\": \"agent\", \"text\": \"<what the new step does>\"}\n- a parallel fork and join: {\"op\": \"parallelize\", \"after\": \"implement\", \"new\": [{\"kind\": \"agent\", \"text\": \"<what one branch does>\"}, {\"kind\": \"agent\", \"text\": \"<what another branch does>\"}]}\n- a verdict loop (a judge that can send a step back): {\"op\": \"loop\", \"step\": \"implement\", \"judge\": \"agent\", \"text\": \"<what to check>\"}\n- a route (a judge choosing the next step): {\"op\": \"route\", \"after\": \"implement\", \"judge\": \"agent\", \"text\": \"<how to choose>\"}\n",
+        "operator_lines": "\nThe structural operators, each one line: what kind of step (`agent`, `op` or `code`), where (a step id), and its text (a prompt, or code). The system does the wiring, as each operator's line below says. Ids, files and facts are generated; each text goes into a knob of its own (`<id>__task`, `<id>__code`) for a later `set_knob`; the candidate says what was wired. Every text has a default (the neighbour's, or a neutral line), and each operator counts as one change. The written-out operations in the table above stay for what these do not express.\n- `insert` (after, before, kind, text, system, sees, to, id, call, reads, tools, takes_over, sealed, produces, writes): a new step after (or before) a step; 'before' puts it on every edge into that step, so 'sees' must name only what every path carries there: 'kind' agent (text = its prompt; 'system' its system prompt), code (text = Python) or op (with 'call' and 'reads'); it sees what that step sees plus its outputs; its output goes into the nearest prompt after it that can take it -- an agent's own prompt knob, or the one text knob an op fills facts into -- or where 'to' says (a prompt knob, or a step: an agent whose prompt is no knob gets a section for it); with neither, refused unless a step reads it; 'tools' (an agent): e.g. [\"bash\"]; a new step may have them though the steps beside it have none or refuse theirs (an existing step keeps its own tool rules); it runs sealed: only the files it sees (in the per-item part, without 'sees', the item's input files too), no network, no grader files; 'sealed' true on a code step: its code runs in the Task's tool environment (its Python interpreter, its extra commands) sealed -- the files it sees read-only, no network, no grader files -- so it may import any package the Task provides (openpyxl, pandas, numpy) and read item files; the import allowlist does not apply; the Task must declare a tool environment; 'takes_over' an earlier step: the new step writes that step's outputs, so what read them reads the new step's (a choice among attempts reaching what is scored), and that step's own go under new names; 'takes_over' as [step, output, ...] takes only those outputs (the new step writes them and its own; the rest pass through unchanged, so downstream steps keep reading them from the original step). E.g. {\"op\": \"insert\", \"after\": \"implement\", \"kind\": \"agent\", \"text\": \"<what the new step does>\"}\n- `remove` (step, keep): take a step out and reconnect around it (a fork branch too); on a gate, 'keep' names the verdict whose path stays. E.g. {\"op\": \"remove\", \"step\": \"<step>\"}\n- `parallelize` (steps, copies, after, new, sees): run consecutive 'steps' at once, or one step beside 'copies' of itself, or 'new' steps after 'after', between a fork and a join. E.g. {\"op\": \"parallelize\", \"steps\": [\"implement\"], \"copies\": 2}\n- `serialize` (fork): run a fork's branches one after another, in their order. E.g. {\"op\": \"serialize\", \"fork\": \"<fork>\"}\n- `branch` (fork, kind, text, system, sees, optional, id, to, tools, sealed, produces, writes): a new step as another branch of a fork ('optional': true lets it fail without failing the item; 'sees' names its inputs: \"task\", step ids, or single fact or file names there before the fork; 'system' as insert's); its output goes into the nearest prompt after the join that can take it -- an agent's own prompt knob, or the one text knob an op fills facts into -- or where 'to' says (a prompt knob, or a step: an agent whose prompt is no knob gets a section for it); with neither, refused unless a step reads it; 'tools' as insert's (sealed); 'sealed' as insert's on a code step. E.g. {\"op\": \"branch\", \"fork\": \"<fork>\", \"kind\": \"agent\", \"text\": \"<what this branch does>\"}\n- `rewire` (step, sees, text): change what a step sees: \"task\" (the task's own input, once, as the model steps receive it: never a step's output or a knob's text (an op's output carries the knobs the op declares for it in `knob_outputs`, else every knob the op reads)), step ids (their outputs), or single fact or file names there before it (that input alone); 'text' gives an agent step new instructions too, in place: the same id, outputs and place in a fork or join (so a branch can work from the task alone); with 'text' and no 'sees' it keeps what it sees. E.g. {\"op\": \"rewire\", \"step\": \"implement\", \"sees\": [\"task\"]}\n- `loop` (step, back_to, judge, text, sees, tools, max_iterations, id, sealed): a judge after a step that can send it back with its reason -- or, with 'back_to', send the work back to an earlier agent step, so every step from there to the judge runs again (a fork in between whole); 'back_to' is one every run passes before the step, in the same per-item pass and fork branch: 'judge' agent (text = what to check; its answer starts with proceed or reloop, then why), code (text = Python returning {'verdict': 'proceed' or 'reloop', 'reason': why}) or a callable. The judge is handed what the step read and wrote, unless 'sees' says otherwise, as text (a binary or very long file only named); with 'tools' (an agent judge, as insert's) it runs sealed instead, with the files it sees in its workspace, and its reply starts with the verdict; with 'sealed' true on a code judge, it runs in the Task's tool environment sealed, as insert's 'sealed' on a code step. The reason reaches the step sent back, with that step's own last output; it is sent back at most 'max_iterations' times, so it runs at most that many times plus one (default 2: up to 3 runs; 1 to 5; afterwards the knob <gate>__max_iterations, the gate being <step>_check unless 'id' names it), then the run goes on. E.g. {\"op\": \"loop\", \"step\": \"implement\", \"judge\": \"agent\", \"text\": \"<what to check>\", \"max_iterations\": 2}\n- `route` (after, judge, text, to, sees, tools, id, sealed): a judge after a step chooses one labelled next step ('to': label -> step id or a new step, whose 'takes_over' rewrites an earlier step's outputs on that way); the branches rejoin; with no 'to', proceed or redo the step in place; 'tools' as loop's judge. E.g. {\"op\": \"route\", \"after\": \"implement\", \"judge\": \"agent\", \"text\": \"<how to choose>\", \"to\": {\"proceed\": \"verify\", \"revise\": {\"kind\": \"agent\", \"text\": \"<what it does>\"}}}\n- `split` (step, into: one or two steps, each like {kind, text, sees}): replace a step by two new steps run in turn ('into' two), or by one ('into' one: replace); the last takes over its outputs. E.g. {\"op\": \"split\", \"step\": \"<step>\", \"into\": [{\"kind\": \"agent\", \"text\": \"<first part>\"}, {\"kind\": \"agent\", \"text\": \"<second part>\"}]}\n- `merge` (steps, kind, text, system, id, tools, sealed): two consecutive steps as one, with the first's inputs and the second's outputs; 'system' as insert's; 'tools' as insert's (sealed), else a sealed step's own come along; 'sealed' as insert's on a code step. E.g. {\"op\": \"merge\", \"steps\": [\"<step>\", \"<next step>\"], \"text\": \"<what the merged step does>\"}\n- `fallback` (step, kind, text, system, sees, id, call, reads, tools, sealed): a step run instead when 'step' (one run per item) fails -- it raises, crashes past its retries, hits its output limit, its turn cap, its prompt limit, or is still writing at the session time limit (backstop); never for a timeout (the harness's, a declared wall or the step's own) or a harness fault: it writes that step's outputs, so what reads them still gets an answer; 'kind' as in insert; it sees what 'step' sees; when the step writes more than one file, the fallback must be a code step or an agent with tools (a plain agent writes only its reply); 'sealed' as insert's on a code step. E.g. {\"op\": \"fallback\", \"step\": \"<step>\", \"kind\": \"agent\", \"text\": \"<a simpler way to the same output>\"}\n- `map` (after, over, text, system, sees, max, combine, id, to, tools): after a step, a new agent step run once per element of 'over' (a list there: a fact, a file or a step's output), one model call each, all at once: a JSON array gives its items, a bulleted, numbered or lettered list its items, other text its non-empty lines; at most 'max' run (default 4, up to 8; past it the first 'max', and the combine is told so); 'text' says what to do with one element; 'combine' (a step as in insert) sees every result and writes one output, placed as insert's is; 'system' as insert's, for each run; 'tools' as insert's: each run sealed; remove the elements step or the combine and the whole map goes. E.g. {\"op\": \"map\", \"after\": \"implement\", \"over\": \"implement\", \"text\": \"<what to do with one element>\", \"combine\": {\"kind\": \"agent\", \"text\": \"<how to combine the results>\"}}\n- in the per-item part `data`, a step with `tools` runs its commands with python3 (and python) = Python 3.12 with openpyxl 3.1.5, pandas 2.3.3, numpy 2.5.4; view_xlsx (SpreadsheetBench 2's workbook viewer); soffice and libreoffice (LibreOffice, headless); a writable /tmp of the step's own",
+        "pipeline_view": "The pipeline, one line per step, generated from the graph in the operators' own words: `sees` lists a step's inputs as `\"sees\"` names them, `name@maker` (`@run`: no step makes it); a plain op that only assembles a model step's input is folded in as `name (via op: its inputs)`; an agent with tools sees the run dir, its own workspace, or a sealed one (its inputs only); `told` is each knob whose text reaches the step, its opening words (`*` frozen; `?` read by an op with several outputs, for all of them), or a code step's code; `->` what it writes; a per-item block's `item files` are files the task lays into each item's pass, under the same name for every item, and the steps that read them: a new step reads one by naming it (or the data step) in 'sees'; `parallel fork { ... } -> join`; `loop(step, judge ..., max N -> N+1 runs)`; `loop(back_to … step, judge ..., max N -> N+1 runs)`; `route(after step, judge ..., {label: step})`; `fallback(step fails -> step)`; `map(step … step over list, max N)`; `per item (data -> its writes; item files: path seen by step, ...) { ... }`; `step agent on model=M effort=E max_completion_tokens=N`; a loop that does not go on with its last attempt past its cap says so: `past the cap: fail_item` (only that item fails) or `past the cap: halt` (the whole run stops); `[optional]`; `[protected]`.\n```text\nper item (data -> current_item.json, item/input.xlsx; item files: item/input.xlsx seen by prepare) {\n  prepare op  sees current_item.json@data, item/input.xlsx@data  -> input.xlsx, SKILL.md, turn.json, spreadsheet_preview.txt, instruction, spreadsheet_path, output_path, skill_section, has_case\n  route(after prepare, judge refactory_packages.spreadsheetbench.ops:has_case, {skip: finalize, proceed: inspect})\n    on proceed:\n      inspect agent  sees sealed workspace (tools: Bash), instruction@prepare, output_path@prepare, skill_section@prepare, spreadsheet_path@prepare, SKILL.md@prepare, input.xlsx@prepare  told inspect__system_prompt \"You are a helpful Spreadsheet Automation Engine…\"; inspect__task \"<task_context> ## Important - When completing s…\"  -> inspect_reply.txt, inspect_notes.md, inspect/.refactory-session.json\n      plan agent  sees sealed workspace (tools: Bash), instruction@prepare, output_path@prepare, skill_section@prepare, spreadsheet_path@prepare, SKILL.md@prepare, input.xlsx@prepare, inspect_notes.md@inspect  told plan__system_prompt \"You are a helpful Spreadsheet Automation Engine…\"; plan__task \"<task_context> ## Important - When completing s…\"  -> plan_reply.txt, plan.md, plan/.refactory-session.json\n      implement agent  sees sealed workspace (tools: Bash), instruction@prepare, output_path@prepare, skill_section@prepare, spreadsheet_path@prepare, SKILL.md@prepare, input.xlsx@prepare, inspect_notes.md@inspect, plan.md@plan  told implement__system_prompt \"You are a helpful Spreadsheet Automation Engine…\"; implement__task \"<task_context> ## Important - When completing s…\"  -> implement_reply.txt, output.xlsx, implement/.refactory-session.json\n      verify agent  sees sealed workspace (tools: Bash), instruction@prepare, output_path@prepare, skill_section@prepare, spreadsheet_path@prepare, SKILL.md@prepare, input.xlsx@prepare, inspect_notes.md@inspect, output.xlsx@implement,verify, plan.md@plan  told verify__system_prompt \"You are a helpful Spreadsheet Automation Engine…\"; verify__task \"<task_context> ## Important - When completing s…\"  -> verify_reply.txt, verify_report.md, output.xlsx, verify/.refactory-session.json\n  [protected] finalize op  sees implement/.refactory-session.json@implement, implement_reply.txt@implement, inspect/.refactory-session.json@inspect, inspect_reply.txt@inspect, output.xlsx@implement,verify, plan/.refactory-session.json@plan, plan_reply.txt@plan, turn.json@prepare, verify/.refactory-session.json@verify, verify_reply.txt@verify  -> final.json, conversation.json, pred.xlsx, raw.txt, tool_calls.json, finished\n}\n```"
+      },
+      "state_ref": "25e43119808a51b7"
+    }
+  ],
+  "seed_state_digest": "25e43119808a51b7",
+  "skipped": [],
+  "states": {
+    "25e43119808a51b7": {
+      "graph": {
+        "edges": [
+          {
+            "condition": "skip",
+            "source": "has_case",
+            "target": "finalize"
+          },
+          {
+            "condition": "proceed",
+            "source": "has_case",
+            "target": "inspect"
+          },
+          {
+            "condition": null,
+            "source": "implement",
+            "target": "verify"
+          },
+          {
+            "condition": null,
+            "source": "inspect",
+            "target": "plan"
+          },
+          {
+            "condition": null,
+            "source": "plan",
+            "target": "implement"
+          },
+          {
+            "condition": null,
+            "source": "prepare",
+            "target": "has_case"
+          },
+          {
+            "condition": null,
+            "source": "verify",
+            "target": "finalize"
+          }
+        ],
+        "nodes": {
+          "data": {
+            "blocking": true,
+            "call": "",
+            "evaluator": "",
+            "id": "data",
+            "kind": "data",
+            "knobs": [
+              "data_parallelism"
+            ],
+            "max_iterations": 1,
+            "notes": "",
+            "parallelism_knob": "data_parallelism",
+            "produces": [
+              "item_scores"
+            ],
+            "prompt_template": "",
+            "reads": [],
+            "role": "ceo",
+            "score_effect": "affects",
+            "subgraph_entry": "prepare",
+            "subgraph_exit": "finalize",
+            "task_ref": "refactory_packages.spreadsheetbench_v2.tasks:SpreadsheetBenchV2StepsTask",
+            "tools": [],
+            "writes": [
+              "current_item.json",
+              "item/input.xlsx"
+            ]
+          },
+          "finalize": {
+            "blocking": true,
+            "call": "refactory_packages.spreadsheetbench_v2.steps_ops:finalize",
+            "evaluator": "",
+            "id": "finalize",
+            "kind": "op",
+            "knobs": [],
+            "max_iterations": 1,
+            "notes": "take the last step's output.xlsx as the item's output",
+            "produces": [
+              "finished"
+            ],
+            "prompt_template": "",
+            "reads": [
+              "turn.json",
+              "output.xlsx",
+              "inspect_reply.txt",
+              "inspect/.refactory-session.json",
+              "plan_reply.txt",
+              "plan/.refactory-session.json",
+              "implement_reply.txt",
+              "implement/.refactory-session.json",
+              "verify_reply.txt",
+              "verify/.refactory-session.json"
+            ],
+            "role": "ceo",
+            "score_effect": "affects",
+            "tools": [],
+            "writes": [
+              "final.json",
+              "conversation.json",
+              "pred.xlsx",
+              "raw.txt",
+              "tool_calls.json"
+            ]
+          },
+          "has_case": {
+            "blocking": true,
+            "call": "",
+            "evaluator": "refactory_packages.spreadsheetbench.ops:has_case",
+            "id": "has_case",
+            "inputs": [
+              "has_case"
+            ],
+            "kind": "gate",
+            "knobs": [],
+            "max_iterations": 1,
+            "notes": "an item with no test case skips the steps",
+            "produces": [],
+            "prompt_template": "",
+            "reads": [],
+            "role": "ceo",
+            "score_effect": "affects",
+            "tools": [],
+            "writes": []
+          },
+          "implement": {
+            "blocking": true,
+            "call": "",
+            "evaluator": "",
+            "field_bindings": [
+              [
+                "prompt_template",
+                "implement__task"
+              ],
+              [
+                "system_prompt_template",
+                "implement__system_prompt"
+              ],
+              [
+                "route.max_turns",
+                "max_turns"
+              ],
+              [
+                "route.bash_timeout_ms",
+                "bash_timeout_ms"
+              ],
+              [
+                "route.bash_output_chars",
+                "bash_output_chars"
+              ]
+            ],
+            "id": "implement",
+            "kind": "agent",
+            "knobs": [
+              "implement__task",
+              "implement__system_prompt",
+              "max_turns",
+              "bash_timeout_ms",
+              "bash_output_chars"
+            ],
+            "max_iterations": 1,
+            "notes": "a sealed Claude Code session (Bash): the implement step, writes output.xlsx",
+            "produces": [],
+            "prompt_template": "<task_context>\n\n## Important\n- When completing spreadsheet tasks, strictly avoid altering any cells that already contain values unless explicitly instructed. Modify only the cells that are required for the task.\n- You need to complete the instructions and ensure that the original formatting is preserved as much as possible.\n\n## Tools\nYou are provided with four tools: `Bash`, `view_xlsx` and `submit`. You must use these tools to complete the target task.\n**Important: You can only call ONE tool at a time per response.**\n- `Bash`: run shell commands (e.g., file operations, calling Python scripts with `python3`)\n- `view_xlsx`: inspect `.xlsx` files (list sheets, view sheet contents, see original formulas and values); a command on your PATH: run it with `Bash`\n- `submit`: finalize and submit your solution after verification; to submit, end your turn with a short final reply (there is no `submit` command)\n\n## Environment\nYou can complete the corresponding spreadsheet tasks using the following Python environment:\n`Pandas`, `openpyxl`, `numpy` and `LibreOffice`\nYou can use these environments to manipulate the spreadsheet data.\n\n## Recommended Workflow\n3. **Implement**: Create a python script (e.g., `process_data.py`) that performs the edit.\n   - You can use `Bash` tool to write Python code directly, e.g., cat > /tmp/script.py << 'EOF' ... EOF), which can then be used to verify syntax correctness.\n\n4. **Execute**: Run the python script using `python3 /tmp/script.py`\n\n## This Step\nThis is step 3 of 4 (Implement and Execute). Read `inspect_notes.md` (the Inspect step's notes) and `plan.md` (the Plan step's plan), then write {{output_path}} from {{spreadsheet_path}} as planned. The next step verifies it. When {{output_path}} is written, end your turn with a short final reply.\n\n{{skill_section}}</task_context>\n\n<instructions>\n\n## Task instructions\nYou need to process a spreadsheet file based on specific instructions.\n**Instruction:** {{instruction}}\n\n## Input and Output\nYou are provided with an input spreadsheet file and you need to generate an output spreadsheet file based on the output_path.\n**Input File:** {{spreadsheet_path}}\n**Output Path:** {{output_path}}\n\n</instructions>",
+            "reads": [
+              "input.xlsx",
+              "SKILL.md",
+              "inspect_notes.md",
+              "plan.md"
+            ],
+            "retry": {
+              "on": [
+                "crash"
+              ],
+              "timeout_factor": 2,
+              "times": 1
+            },
+            "role": "solver",
+            "score_effect": "affects",
+            "system_prompt_template": "You are a helpful Spreadsheet Automation Engineer that interacts with a computer shell to solve data tasks.\nYou operate in a REPL (Read-Eval-Print Loop) environment where you must issue exactly ONE command at a time.",
+            "tools": [
+              "Bash"
+            ],
+            "workspace": {
+              "collect": "files",
+              "kind": "scratch"
+            },
+            "writes": [
+              "implement_reply.txt",
+              "output.xlsx",
+              "implement/.refactory-session.json"
+            ]
+          },
+          "inspect": {
+            "blocking": true,
+            "call": "",
+            "evaluator": "",
+            "field_bindings": [
+              [
+                "prompt_template",
+                "inspect__task"
+              ],
+              [
+                "system_prompt_template",
+                "inspect__system_prompt"
+              ],
+              [
+                "route.max_turns",
+                "max_turns"
+              ],
+              [
+                "route.bash_timeout_ms",
+                "bash_timeout_ms"
+              ],
+              [
+                "route.bash_output_chars",
+                "bash_output_chars"
+              ]
+            ],
+            "id": "inspect",
+            "kind": "agent",
+            "knobs": [
+              "inspect__task",
+              "inspect__system_prompt",
+              "max_turns",
+              "bash_timeout_ms",
+              "bash_output_chars"
+            ],
+            "max_iterations": 1,
+            "notes": "a sealed Claude Code session (Bash): the inspect step, writes inspect_notes.md",
+            "produces": [],
+            "prompt_template": "<task_context>\n\n## Important\n- When completing spreadsheet tasks, strictly avoid altering any cells that already contain values unless explicitly instructed. Modify only the cells that are required for the task.\n- You need to complete the instructions and ensure that the original formatting is preserved as much as possible.\n\n## Tools\nYou are provided with four tools: `Bash`, `view_xlsx` and `submit`. You must use these tools to complete the target task.\n**Important: You can only call ONE tool at a time per response.**\n- `Bash`: run shell commands (e.g., file operations, calling Python scripts with `python3`)\n- `view_xlsx`: inspect `.xlsx` files (list sheets, view sheet contents, see original formulas and values); a command on your PATH: run it with `Bash`\n- `submit`: finalize and submit your solution after verification; to submit, end your turn with a short final reply (there is no `submit` command)\n\n## Environment\nYou can complete the corresponding spreadsheet tasks using the following Python environment:\n`Pandas`, `openpyxl`, `numpy` and `LibreOffice`\nYou can use these environments to manipulate the spreadsheet data.\n\n## Recommended Workflow\n1. **Inspect**: Use `view_xlsx` to inspect the data. This will allow you to understand the structure and contents of the spreadsheet.\n   - You must choose mode `list` or `content` to inspect the data.\n   - List all sheets: `view_xlsx {{spreadsheet_path}} list`\n   - View specific sheet: `view_xlsx {{spreadsheet_path}} content \"Sheet1\"`\n   - View row range: `view_xlsx {{spreadsheet_path}} content \"Sheet1\" 1 50`\n\n## This Step\nThis is step 1 of 4 (Inspect). Later steps plan, implement and verify the edit, each in a new session that starts from the files named here. Inspect the input and write your notes to `inspect_notes.md` in the working directory: the workbook's structure, the sheets and cells relevant to the instruction, and the conventions you see (formulas, formats, layout). Do not write {{output_path}}: a later step does. When the notes are written, end your turn with a short final reply.\n\n{{skill_section}}</task_context>\n\n<instructions>\n\n## Task instructions\nYou need to process a spreadsheet file based on specific instructions.\n**Instruction:** {{instruction}}\n\n## Input and Output\nYou are provided with an input spreadsheet file and you need to generate an output spreadsheet file based on the output_path.\n**Input File:** {{spreadsheet_path}}\n**Output Path:** {{output_path}}\n\n</instructions>",
+            "reads": [
+              "input.xlsx",
+              "SKILL.md"
+            ],
+            "retry": {
+              "on": [
+                "crash"
+              ],
+              "timeout_factor": 2,
+              "times": 1
+            },
+            "role": "solver",
+            "score_effect": "affects",
+            "system_prompt_template": "You are a helpful Spreadsheet Automation Engineer that interacts with a computer shell to solve data tasks.\nYou operate in a REPL (Read-Eval-Print Loop) environment where you must issue exactly ONE command at a time.",
+            "tools": [
+              "Bash"
+            ],
+            "workspace": {
+              "collect": "files",
+              "kind": "scratch"
+            },
+            "writes": [
+              "inspect_reply.txt",
+              "inspect_notes.md",
+              "inspect/.refactory-session.json"
+            ]
+          },
+          "plan": {
+            "blocking": true,
+            "call": "",
+            "evaluator": "",
+            "field_bindings": [
+              [
+                "prompt_template",
+                "plan__task"
+              ],
+              [
+                "system_prompt_template",
+                "plan__system_prompt"
+              ],
+              [
+                "route.max_turns",
+                "max_turns"
+              ],
+              [
+                "route.bash_timeout_ms",
+                "bash_timeout_ms"
+              ],
+              [
+                "route.bash_output_chars",
+                "bash_output_chars"
+              ]
+            ],
+            "id": "plan",
+            "kind": "agent",
+            "knobs": [
+              "plan__task",
+              "plan__system_prompt",
+              "max_turns",
+              "bash_timeout_ms",
+              "bash_output_chars"
+            ],
+            "max_iterations": 1,
+            "notes": "a sealed Claude Code session (Bash): the plan step, writes plan.md",
+            "produces": [],
+            "prompt_template": "<task_context>\n\n## Important\n- When completing spreadsheet tasks, strictly avoid altering any cells that already contain values unless explicitly instructed. Modify only the cells that are required for the task.\n- You need to complete the instructions and ensure that the original formatting is preserved as much as possible.\n\n## Tools\nYou are provided with four tools: `Bash`, `view_xlsx` and `submit`. You must use these tools to complete the target task.\n**Important: You can only call ONE tool at a time per response.**\n- `Bash`: run shell commands (e.g., file operations, calling Python scripts with `python3`)\n- `view_xlsx`: inspect `.xlsx` files (list sheets, view sheet contents, see original formulas and values); a command on your PATH: run it with `Bash`\n- `submit`: finalize and submit your solution after verification; to submit, end your turn with a short final reply (there is no `submit` command)\n\n## Environment\nYou can complete the corresponding spreadsheet tasks using the following Python environment:\n`Pandas`, `openpyxl`, `numpy` and `LibreOffice`\nYou can use these environments to manipulate the spreadsheet data.\n\n## Recommended Workflow\n2. **Plan**: Decide how to manipulate the data using `openpyxl` or `LibreOffice`.\n\n## This Step\nThis is step 2 of 4 (Plan). The Inspect step's notes are in `inspect_notes.md`: read them first (you may also view {{spreadsheet_path}}). Write your plan to `plan.md` in the working directory: which cells to change and how. Do not write {{output_path}}: the next step implements your plan. When the plan is written, end your turn with a short final reply.\n\n{{skill_section}}</task_context>\n\n<instructions>\n\n## Task instructions\nYou need to process a spreadsheet file based on specific instructions.\n**Instruction:** {{instruction}}\n\n## Input and Output\nYou are provided with an input spreadsheet file and you need to generate an output spreadsheet file based on the output_path.\n**Input File:** {{spreadsheet_path}}\n**Output Path:** {{output_path}}\n\n</instructions>",
+            "reads": [
+              "input.xlsx",
+              "SKILL.md",
+              "inspect_notes.md"
+            ],
+            "retry": {
+              "on": [
+                "crash"
+              ],
+              "timeout_factor": 2,
+              "times": 1
+            },
+            "role": "solver",
+            "score_effect": "affects",
+            "system_prompt_template": "You are a helpful Spreadsheet Automation Engineer that interacts with a computer shell to solve data tasks.\nYou operate in a REPL (Read-Eval-Print Loop) environment where you must issue exactly ONE command at a time.",
+            "tools": [
+              "Bash"
+            ],
+            "workspace": {
+              "collect": "files",
+              "kind": "scratch"
+            },
+            "writes": [
+              "plan_reply.txt",
+              "plan.md",
+              "plan/.refactory-session.json"
+            ]
+          },
+          "prepare": {
+            "blocking": true,
+            "call": "refactory_packages.spreadsheetbench_v2.steps_ops:prepare",
+            "evaluator": "",
+            "id": "prepare",
+            "kind": "op",
+            "knob_outputs": {
+              "SKILL.md": [
+                "skill"
+              ],
+              "has_case": [],
+              "input.xlsx": [],
+              "instruction": [],
+              "output_path": [],
+              "skill_section": [
+                "skill"
+              ],
+              "spreadsheet_path": [],
+              "spreadsheet_preview.txt": [],
+              "turn.json": []
+            },
+            "knobs": [
+              "skill"
+            ],
+            "max_iterations": 1,
+            "notes": "record the item's start and lay the steps' workspace files",
+            "produces": [
+              "instruction",
+              "spreadsheet_path",
+              "output_path",
+              "skill_section",
+              "has_case"
+            ],
+            "prompt_template": "",
+            "reads": [
+              "current_item.json",
+              "item/input.xlsx"
+            ],
+            "role": "ceo",
+            "score_effect": "affects",
+            "tools": [],
+            "writes": [
+              "input.xlsx",
+              "SKILL.md",
+              "turn.json",
+              "spreadsheet_preview.txt"
+            ]
+          },
+          "verify": {
+            "blocking": true,
+            "call": "",
+            "evaluator": "",
+            "field_bindings": [
+              [
+                "prompt_template",
+                "verify__task"
+              ],
+              [
+                "system_prompt_template",
+                "verify__system_prompt"
+              ],
+              [
+                "route.max_turns",
+                "max_turns"
+              ],
+              [
+                "route.bash_timeout_ms",
+                "bash_timeout_ms"
+              ],
+              [
+                "route.bash_output_chars",
+                "bash_output_chars"
+              ]
+            ],
+            "id": "verify",
+            "kind": "agent",
+            "knobs": [
+              "verify__task",
+              "verify__system_prompt",
+              "max_turns",
+              "bash_timeout_ms",
+              "bash_output_chars"
+            ],
+            "max_iterations": 1,
+            "notes": "a sealed Claude Code session (Bash): the verify step, writes verify_report.md, output.xlsx",
+            "produces": [],
+            "prompt_template": "<task_context>\n\n## Important\n- When completing spreadsheet tasks, strictly avoid altering any cells that already contain values unless explicitly instructed. Modify only the cells that are required for the task.\n- You need to complete the instructions and ensure that the original formatting is preserved as much as possible.\n\n## Tools\nYou are provided with four tools: `Bash`, `view_xlsx` and `submit`. You must use these tools to complete the target task.\n**Important: You can only call ONE tool at a time per response.**\n- `Bash`: run shell commands (e.g., file operations, calling Python scripts with `python3`)\n- `view_xlsx`: inspect `.xlsx` files (list sheets, view sheet contents, see original formulas and values); a command on your PATH: run it with `Bash`\n- `submit`: finalize and submit your solution after verification; to submit, end your turn with a short final reply (there is no `submit` command)\n\n## Environment\nYou can complete the corresponding spreadsheet tasks using the following Python environment:\n`Pandas`, `openpyxl`, `numpy` and `LibreOffice`\nYou can use these environments to manipulate the spreadsheet data.\n\n## Recommended Workflow\n5. **Verify**: Check the output file exists, ensure the answer is correct.\n   - Do NOT combine verify and submit commands (e.g., `python3 script.py && submit`). Run them separately to ensure verification is complete before submission.\n   - Ensure the existing structure, layout, and formatting of the model are preserved throughout the process.\n\n6. **Submit**: When verification is successful, submit: end your turn with a short final reply.\n\n## This Step\nThis is step 4 of 4 (Verify and Submit). {{output_path}} was written by the Implement step from `plan.md` (the Plan step's plan) and `inspect_notes.md` (the Inspect step's notes). Check it against the instruction and {{spreadsheet_path}}, recalculating with LibreOffice as needed, and correct {{output_path}} where it is wrong: it is graded as you leave it. Write what you checked and found to `verify_report.md` in the working directory, then submit.\n\n{{skill_section}}</task_context>\n\n<instructions>\n\n## Task instructions\nYou need to process a spreadsheet file based on specific instructions.\n**Instruction:** {{instruction}}\n\n## Input and Output\nYou are provided with an input spreadsheet file and you need to generate an output spreadsheet file based on the output_path.\n**Input File:** {{spreadsheet_path}}\n**Output Path:** {{output_path}}\n\n</instructions>",
+            "reads": [
+              "input.xlsx",
+              "SKILL.md",
+              "inspect_notes.md",
+              "plan.md",
+              "output.xlsx"
+            ],
+            "retry": {
+              "on": [
+                "crash"
+              ],
+              "timeout_factor": 2,
+              "times": 1
+            },
+            "role": "solver",
+            "score_effect": "affects",
+            "system_prompt_template": "You are a helpful Spreadsheet Automation Engineer that interacts with a computer shell to solve data tasks.\nYou operate in a REPL (Read-Eval-Print Loop) environment where you must issue exactly ONE command at a time.",
+            "tools": [
+              "Bash"
+            ],
+            "workspace": {
+              "collect": "files",
+              "kind": "scratch"
+            },
+            "writes": [
+              "verify_reply.txt",
+              "verify_report.md",
+              "output.xlsx",
+              "verify/.refactory-session.json"
+            ]
+          }
+        },
+        "start": "data"
+      },
+      "knobs": {
+        "bash_output_chars": {
+          "spec": {
+            "default": 10000,
+            "description": "the most of a command's output the model sees (V2's max_observation_length)",
+            "enum": [],
+            "frozen": true,
+            "hi": null,
+            "kind": "int",
+            "lo": 1,
+            "required": false,
+            "values": []
+          },
+          "value": 10000
+        },
+        "bash_timeout_ms": {
+          "spec": {
+            "default": 60000,
+            "description": "each Bash command's timeout in ms (V2's execution_timeout)",
+            "enum": [],
+            "frozen": true,
+            "hi": null,
+            "kind": "int",
+            "lo": 1,
+            "required": false,
+            "values": []
+          },
+          "value": 60000
+        },
+        "data_parallelism": {
+          "spec": {
+            "default": 8,
+            "description": "concurrent items",
+            "enum": [],
+            "frozen": true,
+            "hi": 64,
+            "kind": "int",
+            "lo": 1,
+            "required": false,
+            "values": []
+          },
+          "value": 32
+        },
+        "implement__system_prompt": {
+          "spec": {
+            "default": "You are a helpful Spreadsheet Automation Engineer that interacts with a computer shell to solve data tasks.\nYou operate in a REPL (Read-Eval-Print Loop) environment where you must issue exactly ONE command at a time.",
+            "description": "text appended to Claude Code's system prompt for the implement step: V2's system template",
+            "enum": [],
+            "frozen": false,
+            "hi": null,
+            "kind": "str",
+            "lo": null,
+            "required": false,
+            "values": []
+          },
+          "value": "You are a helpful Spreadsheet Automation Engineer that interacts with a computer shell to solve data tasks.\nYou operate in a REPL (Read-Eval-Print Loop) environment where you must issue exactly ONE command at a time."
+        },
+        "implement__task": {
+          "spec": {
+            "default": "<task_context>\n\n## Important\n- When completing spreadsheet tasks, strictly avoid altering any cells that already contain values unless explicitly instructed. Modify only the cells that are required for the task.\n- You need to complete the instructions and ensure that the original formatting is preserved as much as possible.\n\n## Tools\nYou are provided with four tools: `Bash`, `view_xlsx` and `submit`. You must use these tools to complete the target task.\n**Important: You can only call ONE tool at a time per response.**\n- `Bash`: run shell commands (e.g., file operations, calling Python scripts with `python3`)\n- `view_xlsx`: inspect `.xlsx` files (list sheets, view sheet contents, see original formulas and values); a command on your PATH: run it with `Bash`\n- `submit`: finalize and submit your solution after verification; to submit, end your turn with a short final reply (there is no `submit` command)\n\n## Environment\nYou can complete the corresponding spreadsheet tasks using the following Python environment:\n`Pandas`, `openpyxl`, `numpy` and `LibreOffice`\nYou can use these environments to manipulate the spreadsheet data.\n\n## Recommended Workflow\n3. **Implement**: Create a python script (e.g., `process_data.py`) that performs the edit.\n   - You can use `Bash` tool to write Python code directly, e.g., cat > /tmp/script.py << 'EOF' ... EOF), which can then be used to verify syntax correctness.\n\n4. **Execute**: Run the python script using `python3 /tmp/script.py`\n\n## This Step\nThis is step 3 of 4 (Implement and Execute). Read `inspect_notes.md` (the Inspect step's notes) and `plan.md` (the Plan step's plan), then write {{output_path}} from {{spreadsheet_path}} as planned. The next step verifies it. When {{output_path}} is written, end your turn with a short final reply.\n\n{{skill_section}}</task_context>\n\n<instructions>\n\n## Task instructions\nYou need to process a spreadsheet file based on specific instructions.\n**Instruction:** {{instruction}}\n\n## Input and Output\nYou are provided with an input spreadsheet file and you need to generate an output spreadsheet file based on the output_path.\n**Input File:** {{spreadsheet_path}}\n**Output Path:** {{output_path}}\n\n</instructions>",
+            "description": "the implement step's prompt: V2's instance template with its workflow cut to this step's stages",
+            "enum": [],
+            "frozen": false,
+            "hi": null,
+            "kind": "str",
+            "lo": null,
+            "required": false,
+            "values": []
+          },
+          "value": "<task_context>\n\n## Important\n- When completing spreadsheet tasks, strictly avoid altering any cells that already contain values unless explicitly instructed. Modify only the cells that are required for the task.\n- You need to complete the instructions and ensure that the original formatting is preserved as much as possible.\n\n## Tools\nYou are provided with four tools: `Bash`, `view_xlsx` and `submit`. You must use these tools to complete the target task.\n**Important: You can only call ONE tool at a time per response.**\n- `Bash`: run shell commands (e.g., file operations, calling Python scripts with `python3`)\n- `view_xlsx`: inspect `.xlsx` files (list sheets, view sheet contents, see original formulas and values); a command on your PATH: run it with `Bash`\n- `submit`: finalize and submit your solution after verification; to submit, end your turn with a short final reply (there is no `submit` command)\n\n## Environment\nYou can complete the corresponding spreadsheet tasks using the following Python environment:\n`Pandas`, `openpyxl`, `numpy` and `LibreOffice`\nYou can use these environments to manipulate the spreadsheet data.\n\n## Recommended Workflow\n3. **Implement**: Create a python script (e.g., `process_data.py`) that performs the edit.\n   - You can use `Bash` tool to write Python code directly, e.g., cat > /tmp/script.py << 'EOF' ... EOF), which can then be used to verify syntax correctness.\n\n4. **Execute**: Run the python script using `python3 /tmp/script.py`\n\n## This Step\nThis is step 3 of 4 (Implement and Execute). Read `inspect_notes.md` (the Inspect step's notes) and `plan.md` (the Plan step's plan), then write {{output_path}} from {{spreadsheet_path}} as planned. The next step verifies it. When {{output_path}} is written, end your turn with a short final reply.\n\n{{skill_section}}</task_context>\n\n<instructions>\n\n## Task instructions\nYou need to process a spreadsheet file based on specific instructions.\n**Instruction:** {{instruction}}\n\n## Input and Output\nYou are provided with an input spreadsheet file and you need to generate an output spreadsheet file based on the output_path.\n**Input File:** {{spreadsheet_path}}\n**Output Path:** {{output_path}}\n\n</instructions>"
+        },
+        "inspect__system_prompt": {
+          "spec": {
+            "default": "You are a helpful Spreadsheet Automation Engineer that interacts with a computer shell to solve data tasks.\nYou operate in a REPL (Read-Eval-Print Loop) environment where you must issue exactly ONE command at a time.",
+            "description": "text appended to Claude Code's system prompt for the inspect step: V2's system template",
+            "enum": [],
+            "frozen": false,
+            "hi": null,
+            "kind": "str",
+            "lo": null,
+            "required": false,
+            "values": []
+          },
+          "value": "You are a helpful Spreadsheet Automation Engineer that interacts with a computer shell to solve data tasks.\nYou operate in a REPL (Read-Eval-Print Loop) environment where you must issue exactly ONE command at a time."
+        },
+        "inspect__task": {
+          "spec": {
+            "default": "<task_context>\n\n## Important\n- When completing spreadsheet tasks, strictly avoid altering any cells that already contain values unless explicitly instructed. Modify only the cells that are required for the task.\n- You need to complete the instructions and ensure that the original formatting is preserved as much as possible.\n\n## Tools\nYou are provided with four tools: `Bash`, `view_xlsx` and `submit`. You must use these tools to complete the target task.\n**Important: You can only call ONE tool at a time per response.**\n- `Bash`: run shell commands (e.g., file operations, calling Python scripts with `python3`)\n- `view_xlsx`: inspect `.xlsx` files (list sheets, view sheet contents, see original formulas and values); a command on your PATH: run it with `Bash`\n- `submit`: finalize and submit your solution after verification; to submit, end your turn with a short final reply (there is no `submit` command)\n\n## Environment\nYou can complete the corresponding spreadsheet tasks using the following Python environment:\n`Pandas`, `openpyxl`, `numpy` and `LibreOffice`\nYou can use these environments to manipulate the spreadsheet data.\n\n## Recommended Workflow\n1. **Inspect**: Use `view_xlsx` to inspect the data. This will allow you to understand the structure and contents of the spreadsheet.\n   - You must choose mode `list` or `content` to inspect the data.\n   - List all sheets: `view_xlsx {{spreadsheet_path}} list`\n   - View specific sheet: `view_xlsx {{spreadsheet_path}} content \"Sheet1\"`\n   - View row range: `view_xlsx {{spreadsheet_path}} content \"Sheet1\" 1 50`\n\n## This Step\nThis is step 1 of 4 (Inspect). Later steps plan, implement and verify the edit, each in a new session that starts from the files named here. Inspect the input and write your notes to `inspect_notes.md` in the working directory: the workbook's structure, the sheets and cells relevant to the instruction, and the conventions you see (formulas, formats, layout). Do not write {{output_path}}: a later step does. When the notes are written, end your turn with a short final reply.\n\n{{skill_section}}</task_context>\n\n<instructions>\n\n## Task instructions\nYou need to process a spreadsheet file based on specific instructions.\n**Instruction:** {{instruction}}\n\n## Input and Output\nYou are provided with an input spreadsheet file and you need to generate an output spreadsheet file based on the output_path.\n**Input File:** {{spreadsheet_path}}\n**Output Path:** {{output_path}}\n\n</instructions>",
+            "description": "the inspect step's prompt: V2's instance template with its workflow cut to this step's stages",
+            "enum": [],
+            "frozen": false,
+            "hi": null,
+            "kind": "str",
+            "lo": null,
+            "required": false,
+            "values": []
+          },
+          "value": "<task_context>\n\n## Important\n- When completing spreadsheet tasks, strictly avoid altering any cells that already contain values unless explicitly instructed. Modify only the cells that are required for the task.\n- You need to complete the instructions and ensure that the original formatting is preserved as much as possible.\n\n## Tools\nYou are provided with four tools: `Bash`, `view_xlsx` and `submit`. You must use these tools to complete the target task.\n**Important: You can only call ONE tool at a time per response.**\n- `Bash`: run shell commands (e.g., file operations, calling Python scripts with `python3`)\n- `view_xlsx`: inspect `.xlsx` files (list sheets, view sheet contents, see original formulas and values); a command on your PATH: run it with `Bash`\n- `submit`: finalize and submit your solution after verification; to submit, end your turn with a short final reply (there is no `submit` command)\n\n## Environment\nYou can complete the corresponding spreadsheet tasks using the following Python environment:\n`Pandas`, `openpyxl`, `numpy` and `LibreOffice`\nYou can use these environments to manipulate the spreadsheet data.\n\n## Recommended Workflow\n1. **Inspect**: Use `view_xlsx` to inspect the data. This will allow you to understand the structure and contents of the spreadsheet.\n   - You must choose mode `list` or `content` to inspect the data.\n   - List all sheets: `view_xlsx {{spreadsheet_path}} list`\n   - View specific sheet: `view_xlsx {{spreadsheet_path}} content \"Sheet1\"`\n   - View row range: `view_xlsx {{spreadsheet_path}} content \"Sheet1\" 1 50`\n\n## This Step\nThis is step 1 of 4 (Inspect). Later steps plan, implement and verify the edit, each in a new session that starts from the files named here. Inspect the input and write your notes to `inspect_notes.md` in the working directory: the workbook's structure, the sheets and cells relevant to the instruction, and the conventions you see (formulas, formats, layout). Do not write {{output_path}}: a later step does. When the notes are written, end your turn with a short final reply.\n\n{{skill_section}}</task_context>\n\n<instructions>\n\n## Task instructions\nYou need to process a spreadsheet file based on specific instructions.\n**Instruction:** {{instruction}}\n\n## Input and Output\nYou are provided with an input spreadsheet file and you need to generate an output spreadsheet file based on the output_path.\n**Input File:** {{spreadsheet_path}}\n**Output Path:** {{output_path}}\n\n</instructions>"
+        },
+        "max_turns": {
+          "spec": {
+            "default": 50,
+            "description": "each step's turn cap (V2's per_instance_call_limit, Claude Code's --max-turns)",
+            "enum": [],
+            "frozen": true,
+            "hi": null,
+            "kind": "int",
+            "lo": 1,
+            "required": false,
+            "values": []
+          },
+          "value": 50
+        },
+        "plan__system_prompt": {
+          "spec": {
+            "default": "You are a helpful Spreadsheet Automation Engineer that interacts with a computer shell to solve data tasks.\nYou operate in a REPL (Read-Eval-Print Loop) environment where you must issue exactly ONE command at a time.",
+            "description": "text appended to Claude Code's system prompt for the plan step: V2's system template",
+            "enum": [],
+            "frozen": false,
+            "hi": null,
+            "kind": "str",
+            "lo": null,
+            "required": false,
+            "values": []
+          },
+          "value": "You are a helpful Spreadsheet Automation Engineer that interacts with a computer shell to solve data tasks.\nYou operate in a REPL (Read-Eval-Print Loop) environment where you must issue exactly ONE command at a time."
+        },
+        "plan__task": {
+          "spec": {
+            "default": "<task_context>\n\n## Important\n- When completing spreadsheet tasks, strictly avoid altering any cells that already contain values unless explicitly instructed. Modify only the cells that are required for the task.\n- You need to complete the instructions and ensure that the original formatting is preserved as much as possible.\n\n## Tools\nYou are provided with four tools: `Bash`, `view_xlsx` and `submit`. You must use these tools to complete the target task.\n**Important: You can only call ONE tool at a time per response.**\n- `Bash`: run shell commands (e.g., file operations, calling Python scripts with `python3`)\n- `view_xlsx`: inspect `.xlsx` files (list sheets, view sheet contents, see original formulas and values); a command on your PATH: run it with `Bash`\n- `submit`: finalize and submit your solution after verification; to submit, end your turn with a short final reply (there is no `submit` command)\n\n## Environment\nYou can complete the corresponding spreadsheet tasks using the following Python environment:\n`Pandas`, `openpyxl`, `numpy` and `LibreOffice`\nYou can use these environments to manipulate the spreadsheet data.\n\n## Recommended Workflow\n2. **Plan**: Decide how to manipulate the data using `openpyxl` or `LibreOffice`.\n\n## This Step\nThis is step 2 of 4 (Plan). The Inspect step's notes are in `inspect_notes.md`: read them first (you may also view {{spreadsheet_path}}). Write your plan to `plan.md` in the working directory: which cells to change and how. Do not write {{output_path}}: the next step implements your plan. When the plan is written, end your turn with a short final reply.\n\n{{skill_section}}</task_context>\n\n<instructions>\n\n## Task instructions\nYou need to process a spreadsheet file based on specific instructions.\n**Instruction:** {{instruction}}\n\n## Input and Output\nYou are provided with an input spreadsheet file and you need to generate an output spreadsheet file based on the output_path.\n**Input File:** {{spreadsheet_path}}\n**Output Path:** {{output_path}}\n\n</instructions>",
+            "description": "the plan step's prompt: V2's instance template with its workflow cut to this step's stages",
+            "enum": [],
+            "frozen": false,
+            "hi": null,
+            "kind": "str",
+            "lo": null,
+            "required": false,
+            "values": []
+          },
+          "value": "<task_context>\n\n## Important\n- When completing spreadsheet tasks, strictly avoid altering any cells that already contain values unless explicitly instructed. Modify only the cells that are required for the task.\n- You need to complete the instructions and ensure that the original formatting is preserved as much as possible.\n\n## Tools\nYou are provided with four tools: `Bash`, `view_xlsx` and `submit`. You must use these tools to complete the target task.\n**Important: You can only call ONE tool at a time per response.**\n- `Bash`: run shell commands (e.g., file operations, calling Python scripts with `python3`)\n- `view_xlsx`: inspect `.xlsx` files (list sheets, view sheet contents, see original formulas and values); a command on your PATH: run it with `Bash`\n- `submit`: finalize and submit your solution after verification; to submit, end your turn with a short final reply (there is no `submit` command)\n\n## Environment\nYou can complete the corresponding spreadsheet tasks using the following Python environment:\n`Pandas`, `openpyxl`, `numpy` and `LibreOffice`\nYou can use these environments to manipulate the spreadsheet data.\n\n## Recommended Workflow\n2. **Plan**: Decide how to manipulate the data using `openpyxl` or `LibreOffice`.\n\n## This Step\nThis is step 2 of 4 (Plan). The Inspect step's notes are in `inspect_notes.md`: read them first (you may also view {{spreadsheet_path}}). Write your plan to `plan.md` in the working directory: which cells to change and how. Do not write {{output_path}}: the next step implements your plan. When the plan is written, end your turn with a short final reply.\n\n{{skill_section}}</task_context>\n\n<instructions>\n\n## Task instructions\nYou need to process a spreadsheet file based on specific instructions.\n**Instruction:** {{instruction}}\n\n## Input and Output\nYou are provided with an input spreadsheet file and you need to generate an output spreadsheet file based on the output_path.\n**Input File:** {{spreadsheet_path}}\n**Output Path:** {{output_path}}\n\n</instructions>"
+        },
+        "skill": {
+          "spec": {
+            "default": "",
+            "description": "the skill, written to SKILL.md, which every step reads; empty, no prompt mentions it",
+            "enum": [],
+            "frozen": false,
+            "hi": null,
+            "kind": "str",
+            "lo": null,
+            "required": false,
+            "values": []
+          },
+          "value": ""
+        },
+        "verify__system_prompt": {
+          "spec": {
+            "default": "You are a helpful Spreadsheet Automation Engineer that interacts with a computer shell to solve data tasks.\nYou operate in a REPL (Read-Eval-Print Loop) environment where you must issue exactly ONE command at a time.",
+            "description": "text appended to Claude Code's system prompt for the verify step: V2's system template",
+            "enum": [],
+            "frozen": false,
+            "hi": null,
+            "kind": "str",
+            "lo": null,
+            "required": false,
+            "values": []
+          },
+          "value": "You are a helpful Spreadsheet Automation Engineer that interacts with a computer shell to solve data tasks.\nYou operate in a REPL (Read-Eval-Print Loop) environment where you must issue exactly ONE command at a time."
+        },
+        "verify__task": {
+          "spec": {
+            "default": "<task_context>\n\n## Important\n- When completing spreadsheet tasks, strictly avoid altering any cells that already contain values unless explicitly instructed. Modify only the cells that are required for the task.\n- You need to complete the instructions and ensure that the original formatting is preserved as much as possible.\n\n## Tools\nYou are provided with four tools: `Bash`, `view_xlsx` and `submit`. You must use these tools to complete the target task.\n**Important: You can only call ONE tool at a time per response.**\n- `Bash`: run shell commands (e.g., file operations, calling Python scripts with `python3`)\n- `view_xlsx`: inspect `.xlsx` files (list sheets, view sheet contents, see original formulas and values); a command on your PATH: run it with `Bash`\n- `submit`: finalize and submit your solution after verification; to submit, end your turn with a short final reply (there is no `submit` command)\n\n## Environment\nYou can complete the corresponding spreadsheet tasks using the following Python environment:\n`Pandas`, `openpyxl`, `numpy` and `LibreOffice`\nYou can use these environments to manipulate the spreadsheet data.\n\n## Recommended Workflow\n5. **Verify**: Check the output file exists, ensure the answer is correct.\n   - Do NOT combine verify and submit commands (e.g., `python3 script.py && submit`). Run them separately to ensure verification is complete before submission.\n   - Ensure the existing structure, layout, and formatting of the model are preserved throughout the process.\n\n6. **Submit**: When verification is successful, submit: end your turn with a short final reply.\n\n## This Step\nThis is step 4 of 4 (Verify and Submit). {{output_path}} was written by the Implement step from `plan.md` (the Plan step's plan) and `inspect_notes.md` (the Inspect step's notes). Check it against the instruction and {{spreadsheet_path}}, recalculating with LibreOffice as needed, and correct {{output_path}} where it is wrong: it is graded as you leave it. Write what you checked and found to `verify_report.md` in the working directory, then submit.\n\n{{skill_section}}</task_context>\n\n<instructions>\n\n## Task instructions\nYou need to process a spreadsheet file based on specific instructions.\n**Instruction:** {{instruction}}\n\n## Input and Output\nYou are provided with an input spreadsheet file and you need to generate an output spreadsheet file based on the output_path.\n**Input File:** {{spreadsheet_path}}\n**Output Path:** {{output_path}}\n\n</instructions>",
+            "description": "the verify step's prompt: V2's instance template with its workflow cut to this step's stages",
+            "enum": [],
+            "frozen": false,
+            "hi": null,
+            "kind": "str",
+            "lo": null,
+            "required": false,
+            "values": []
+          },
+          "value": "<task_context>\n\n## Important\n- When completing spreadsheet tasks, strictly avoid altering any cells that already contain values unless explicitly instructed. Modify only the cells that are required for the task.\n- You need to complete the instructions and ensure that the original formatting is preserved as much as possible.\n\n## Tools\nYou are provided with four tools: `Bash`, `view_xlsx` and `submit`. You must use these tools to complete the target task.\n**Important: You can only call ONE tool at a time per response.**\n- `Bash`: run shell commands (e.g., file operations, calling Python scripts with `python3`)\n- `view_xlsx`: inspect `.xlsx` files (list sheets, view sheet contents, see original formulas and values); a command on your PATH: run it with `Bash`\n- `submit`: finalize and submit your solution after verification; to submit, end your turn with a short final reply (there is no `submit` command)\n\n## Environment\nYou can complete the corresponding spreadsheet tasks using the following Python environment:\n`Pandas`, `openpyxl`, `numpy` and `LibreOffice`\nYou can use these environments to manipulate the spreadsheet data.\n\n## Recommended Workflow\n5. **Verify**: Check the output file exists, ensure the answer is correct.\n   - Do NOT combine verify and submit commands (e.g., `python3 script.py && submit`). Run them separately to ensure verification is complete before submission.\n   - Ensure the existing structure, layout, and formatting of the model are preserved throughout the process.\n\n6. **Submit**: When verification is successful, submit: end your turn with a short final reply.\n\n## This Step\nThis is step 4 of 4 (Verify and Submit). {{output_path}} was written by the Implement step from `plan.md` (the Plan step's plan) and `inspect_notes.md` (the Inspect step's notes). Check it against the instruction and {{spreadsheet_path}}, recalculating with LibreOffice as needed, and correct {{output_path}} where it is wrong: it is graded as you leave it. Write what you checked and found to `verify_report.md` in the working directory, then submit.\n\n{{skill_section}}</task_context>\n\n<instructions>\n\n## Task instructions\nYou need to process a spreadsheet file based on specific instructions.\n**Instruction:** {{instruction}}\n\n## Input and Output\nYou are provided with an input spreadsheet file and you need to generate an output spreadsheet file based on the output_path.\n**Input File:** {{spreadsheet_path}}\n**Output Path:** {{output_path}}\n\n</instructions>"
+        }
+      },
+      "memory": [],
+      "ports": [],
+      "version": 1
+    }
+  }
+}
