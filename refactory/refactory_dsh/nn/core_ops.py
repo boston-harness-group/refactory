@@ -358,7 +358,7 @@ def _placement_anchors(graph: Graph, name: str, kind: str | None = None, *,
                   and keys & (avail.get(node_id, set()) | _outputs(graph.nodes[node_id])))
 
 
-def _missing_edge_hint(graph: Graph, there: set[tuple[str, str]], name: str,
+def _missing_edge_hint(graph: Graph, name: str,
                        kind: str | None = None, *,
                        keys: set[tuple[str, str]] | None = None) -> str:
     """Name one in-edge whose predecessor does not carry ``name``, to show which path
@@ -387,8 +387,8 @@ def _missing_edge_hint(graph: Graph, there: set[tuple[str, str]], name: str,
     return ""
 
 
-def _not_on_every_path_hint(graph: Graph, there: set[tuple[str, str]],
-                            name: str, kind: str | None = None, *,
+def _not_on_every_path_hint(graph: Graph, name: str,
+                            kind: str | None = None, *,
                             keys: set[tuple[str, str]] | None = None) -> str:
     """A compact hint for a ``sees`` name that exists in the graph but is not in ``there``
     on every path: who produces it, one missing edge, and valid placements.
@@ -399,8 +399,11 @@ def _not_on_every_path_hint(graph: Graph, there: set[tuple[str, str]],
     producers = _producers_of(graph, name)
     parts: list[str] = []
     if producers:
-        parts.append(f"produced by {', '.join(producers)}")
-    edge = _missing_edge_hint(graph, there, name, kind, keys=keys)
+        shown = producers[:_PLACEMENT_SHOWN]
+        more = f" (+{len(producers) - _PLACEMENT_SHOWN} more)" \
+            if len(producers) > _PLACEMENT_SHOWN else ""
+        parts.append(f"produced by {', '.join(shown)}{more}")
+    edge = _missing_edge_hint(graph, name, kind, keys=keys)
     if edge:
         parts.append(f"missing on the {edge} path")
     anchors = _placement_anchors(graph, name, kind, keys=keys)
@@ -442,7 +445,7 @@ def _seen(graph: Graph, state: Mapping[str, Any], there: set[tuple[str, str]],
                 made = _outputs(graph.nodes[name]) & there
                 if not made:
                     all_outputs = _outputs(graph.nodes[name])
-                    hint = _not_on_every_path_hint(graph, there, name,
+                    hint = _not_on_every_path_hint(graph, name,
                                                    keys=all_outputs)
                     raise _Refused(
                         f"step {name!r}'s outputs are not there on every path to "
@@ -455,7 +458,7 @@ def _seen(graph: Graph, state: Mapping[str, Any], there: set[tuple[str, str]],
             else:
                 producers = _producers_of(graph, name)
                 if producers:
-                    hint = _not_on_every_path_hint(graph, there, name)
+                    hint = _not_on_every_path_hint(graph, name)
                     raise _Refused(
                         f"'sees' names {name!r}, which exists in the graph "
                         f"({hint}) but is not there before the new step on "
@@ -1531,7 +1534,7 @@ def _take_over_plan(graph: Graph, state: Mapping[str, Any], target_id: Any, side
                    if (n.kind == "fork" and anchor.id in n.targets)
                    or (n.kind == "data" and n.subgraph_entry == anchor.id)]
     if not _runs_first_on_every_path(graph, target_id, before):
-        hint = _not_on_every_path_hint(graph, set(), target_id)
+        hint = _not_on_every_path_hint(graph, target_id)
         raise _Refused(f"{target_id!r} does not run before the new step on every path to it "
                        f"({hint}); "
                        "'takes_over' names a step every run passes before the new one (not a "
@@ -2908,7 +2911,7 @@ def _route_take_over(graph: Graph, state: Mapping[str, Any], anchor: Node,
     if target.kind not in ("agent", "op") or not (target.writes or target.produces):
         raise _Refused(f"{target_id!r} is a {target.kind} with no outputs to take over")
     if target_id != anchor.id and not _runs_first_on_every_path(graph, target_id, [anchor.id]):
-        hint = _not_on_every_path_hint(graph, set(), target_id)
+        hint = _not_on_every_path_hint(graph, target_id)
         raise _Refused(f"{target_id!r} does not run before the route on every path "
                        f"({hint}); a way's "
                        "new step takes over a step every run passes before it")

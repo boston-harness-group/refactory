@@ -188,6 +188,40 @@ def test_suggested_placement_is_accepted():
     assert "guard" in graph.nodes
 
 
+def test_many_producers_are_capped_in_the_refusal():
+    """When many steps produce the same name the refusal lists at most
+    ``_PLACEMENT_SHOWN`` and says "(+N more)"."""
+    from refactory_dsh.nn.graph import Node
+
+    cap = core_ops._PLACEMENT_SHOWN
+    total = cap + 3
+    g = Graph()
+    g.add(Node("start", "agent", prompt_template="Start"))
+    g.add(Node("gate", "gate", evaluator="nn.operators:identity_gate",
+               max_iterations=1))
+    g.connect("start", "gate")
+    prev = "gate"
+    for i in range(total):
+        nid = f"w{i}"
+        g.add(Node(nid, "agent", prompt_template="Work",
+                   writes=["shared.txt"], produces=[f"fact_{i}"]))
+        g.connect(prev, nid, condition="proceed" if prev == "gate" else None)
+        prev = nid
+    g.add(Node("end", "agent", prompt_template="End"))
+    g.connect(prev, "end")
+    g.connect("gate", "end", condition="skip")
+    state = {"graph": g.to_state(), "knobs": {}}
+    with pytest.raises(nn_edits.EditError) as exc:
+        nn_edits.apply({"op": "insert", "before": "end", "kind": "code",
+                        "sees": ["shared.txt"], "text": "def main(inp): pass"}, state)
+    msg = str(exc.value)
+    assert f"(+{total - cap} more)" in msg
+    assert msg.count("produced by") == 1
+    producer_part = msg.split("produced by ")[1].split(";")[0]
+    names_before_plus = producer_part.split(" (+")[0]
+    assert names_before_plus.count(",") == cap - 1
+
+
 # ── 2. a copy is sent what the step is sent ────────────────────────────────
 
 
