@@ -1095,7 +1095,7 @@ def test_the_design_and_emit_prompts_are_told_what_the_mode_must_take(tmp_path):
         task={},
     )
     published = create_ops.prepare(ctx)
-    assert "takes these as input: `package`" in published["requires_input"]
+    assert "takes these as input (from --input): `package`" in published["requires_input"]
     assert "hardcodes a fixture" in published["requires_input"]
 
 
