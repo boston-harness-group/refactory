@@ -64,21 +64,54 @@ def test_takes_over_a_gate_via_route_says_wrong_kind():
 
 def test_every_recordable_cause_has_wording_in_no_answer_causes():
     """A cause record_spent can record must have an entry in NO_ANSWER_CAUSES,
-    so the proposer never sees a raw identifier."""
-    from refactory_dsh.nn.graph import RETRY_ON
-    from refactory_dsh.node_retry import INVENTED_TOOL_CALLS
+    so the proposer never sees a raw identifier.  The set comes from code
+    (RECORDABLE_CAUSES), not literals here."""
+    from refactory_dsh.node_retry import RECORDABLE_CAUSES
     from refactory_dsh.optim.base import NO_ANSWER_CAUSES
 
-    recordable = {
-        *RETRY_ON,
-        "declared_timeout",
-        "backstop",
-        "step_timeout",
-        INVENTED_TOOL_CALLS,
-        "failed",
-    }
-    missing = recordable - set(NO_ANSWER_CAUSES)
+    missing = RECORDABLE_CAUSES - set(NO_ANSWER_CAUSES)
     assert not missing, f"NO_ANSWER_CAUSES has no wording for: {sorted(missing)}"
+
+
+def test_recordable_causes_covers_retry_on():
+    """RECORDABLE_CAUSES must contain every RETRY_ON kind, so a new retry kind
+    added to the graph without wording fails the suite."""
+    from refactory_dsh.nn.graph import RETRY_ON
+    from refactory_dsh.node_retry import RECORDABLE_CAUSES
+
+    missing = set(RETRY_ON) - RECORDABLE_CAUSES
+    assert not missing, f"RECORDABLE_CAUSES is missing RETRY_ON members: {sorted(missing)}"
+
+
+def test_missing_cause_returns_only_members_of_missing_causes():
+    """missing_cause() returns only members of MISSING_CAUSES (or None), so a
+    new return value without wording is caught."""
+    import subprocess
+
+    from refactory_dsh.model import (
+        CompletionFailed,
+        CompletionTimeout,
+        DeclaredTimeout,
+        HarnessBackstop,
+    )
+    from refactory_dsh.node_retry import MISSING_CAUSES, missing_cause
+    from refactory_dsh.snippet import SnippetTimeout
+
+    cases = [
+        (SnippetTimeout("x"), "step_timeout"),
+        (subprocess.TimeoutExpired("x", 1), "step_timeout"),
+        (HarnessBackstop("x"), "backstop"),
+        (DeclaredTimeout("x"), "declared_timeout"),
+        (CompletionTimeout("x"), "timeout"),
+        (CompletionFailed("x", kind="worker"), None),
+        (RuntimeError("something"), None),
+    ]
+    for error, expected in cases:
+        result = missing_cause(error)
+        assert result == expected, f"{type(error).__name__}: got {result!r}, want {expected!r}"
+        if result is not None:
+            assert result in MISSING_CAUSES, \
+                f"missing_cause returned {result!r} which is not in MISSING_CAUSES"
 
 
 def test_declared_timeout_and_invented_tool_calls_render():

@@ -530,7 +530,7 @@ def test_the_optimizer_sees_no_answer_items_apart_from_wrong_ones():
          "missing_steps": {"solve": {"cause": "output_limit", "sessions": 3, "error": "x"}}},
     ]
     text = "\n".join(_item_evidence(records))
-    assert "1 passed, 1 answered wrong, 1 had no answer (a step ran out of output, ran out of turns, crashed or ran over its own time limit), 0 failed" in text
+    assert "1 passed, 1 answered wrong, 1 had no answer (a step gave none; cause below), 0 failed" in text
     assert "| 3 | solve | ran out of output without answering | 3 |" in text
     assert "not a wrong answer" in text
 

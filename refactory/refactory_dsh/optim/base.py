@@ -3345,8 +3345,8 @@ def _item_evidence(records: Sequence[dict[str, Any]]) -> list[str]:
     lines = [
         "## Item results of the candidate being edited",
         f"{len(records)} train item(s): {len(passed)} passed, {len(wrong)} answered "
-        f"wrong, " + (f"{len(unanswered)} had no answer (a step ran out of output, "
-                      "ran out of turns, crashed or ran over its own time limit), " if unanswered else "")
+        f"wrong, " + (f"{len(unanswered)} had no answer (a step gave none; cause below), "
+                      if unanswered else "")
         + f"{len(errored)} failed with an error{'' if timed_out or kept else mean}. An error is the "
         "item's run failing (its cause is below), not a wrong answer.",
     ]
