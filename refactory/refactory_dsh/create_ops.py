@@ -2042,17 +2042,19 @@ def smoke(ctx: Any) -> dict[str, Any]:
     )
     error = result.problem() if not result.ok else str(result.payload.get("error") or "")
     refused = bool(result.payload.get("sample_refused"))
+    exit_ok = result.payload.get("exit_ok")
     # --- harness-incident retry and per-item error check ---
     item_records = _read_smoke_item_records(workdir)
     excluded_ids: set[str] = set()
     item_errors: list[dict[str, Any]] = []
     had_incidents = False
     if item_records and result.ok and not refused:
-        excluded_ids, item_records = _settle_smoke_incidents(
-            item_records, identifier, workdir, project=project_for_nodes(),
-            model=bool(agent_nodes), knobs=samples or None,
-            model_context=context, timeout_s=timeout_s,
-        )
+        if exit_ok is not False:
+            excluded_ids, item_records = _settle_smoke_incidents(
+                item_records, identifier, workdir, project=project_for_nodes(),
+                model=bool(agent_nodes), knobs=samples or None,
+                model_context=context, timeout_s=timeout_s,
+            )
         had_incidents = bool(excluded_ids) or any(
             r.get("incident_reruns") for r in item_records)
     if item_records:
@@ -2069,9 +2071,9 @@ def smoke(ctx: Any) -> dict[str, Any]:
         ok = False
         error = error or "every item was a harness incident"
     elif had_incidents or excluded_ids:
-        ok = result.ok and not refused
+        ok = result.ok and exit_ok is not False and not refused
     else:
-        ok = result.ok and result.payload.get("exit_ok") is not False and not refused
+        ok = result.ok and exit_ok is not False and not refused
     # Determine timeout_kind: prefer the outer SandboxResult's kind; fall back to payload.
     _timeout_kind = result.timeout_kind or result.payload.get("timeout_kind") or None
     sample = result.payload.get("sample") or {}
