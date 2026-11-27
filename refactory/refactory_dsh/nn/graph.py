@@ -40,12 +40,13 @@ FALLBACK = "fallback"
 #: session went silent past the inactivity limit, or ran out of a per-completion limit;
 #: or reached the node's own declared `timeout_s`, the pipeline's limit, recorded
 #: ``declared_timeout``; each retry's limit is ``timeout_factor`` times the last),
-#: ``crash`` (the worker or product failed: an invalid result, a worker error) and
-#: ``output_limit`` (the model used its whole output allowance without answering -- the
-#: model failing the question, which a graph should fix, so it is retried only when a
-#: step opts in). A model that answered wrongly answers wrongly again, and a wire that
-#: kept failing or a key the provider refuses fails the same way, so none of those is
-#: retried (`node_retry.failure_kind`).
+#: ``crash`` (the worker or product failed: an invalid result, a worker error),
+#: ``output_limit`` (the model used its whole output allowance without answering) and
+#: ``turn_cap`` (the agent used its whole turn cap without finishing). ``output_limit``
+#: and ``turn_cap`` are the model failing the question, which a graph should fix, so
+#: they are retried only when a step opts in. A model that answered wrongly answers
+#: wrongly again, and a wire that kept failing or a key the provider refuses fails the
+#: same way, so none of those is retried (`node_retry.failure_kind`).
 RETRY_ON = ("crash", "output_limit", "timeout", "turn_cap")
 
 #: The most retries one node may declare, and the largest factor its limit may grow by
@@ -1127,9 +1128,9 @@ class Graph:
         - A declared ``retry`` wins; ``times: 0`` declares none.
         - Undeclared, an agent step in a data pass gets `PASS_RETRY_TIMES` fresh sessions
           on a crash (a worker or product failure), when a retry is safe for it
-          (`retry_safe`). Running out of output without answering is the model's own
-          failure and is not retried by default. When its retries are spent, or it runs
-          out of output, the step is missing rather than failed (`Executor._missing_optional`, the
+          (`retry_safe`). Running out of output or running out of turns is the model's
+          own failure and is not retried by default. When its retries are spent, or it
+          runs out of output or turns, the step is missing rather than failed (`Executor._missing_optional`, the
           spine's ``missing_on_crash``): a gate after it sees no answer and may reloop,
           a fork's join sees the branch without one, and the item goes on to be scored.
         - Undeclared, outside a data pass: none, as before.
@@ -1144,9 +1145,9 @@ class Graph:
         return {"on": ["crash"], "times": PASS_RETRY_TIMES, "timeout_factor": 1}
 
     def missing_on_crash(self, node_id: str) -> bool:
-        """Whether ``node_id``, when its retries are spent or it runs out of output without
-        answering, is missing rather than failed: an agent step in a data pass with a
-        retry rule (declared or the default)."""
+        """Whether ``node_id``, when its retries are spent or it runs out of output or
+        turns without answering, is missing rather than failed: an agent step in a data
+        pass with a retry rule (declared or the default)."""
         return self.in_data_pass(node_id) and self.retry_rule(node_id) is not None
 
     def fallback_gate(self, node_id: str) -> str | None:

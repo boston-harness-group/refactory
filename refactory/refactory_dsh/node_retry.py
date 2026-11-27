@@ -16,7 +16,7 @@ still recorded ``declared_timeout``), never one the harness backstop stopped
 (`model.HarnessBackstop`). It needs the node's own `timeout_s`, which each retry's limit
 multiplies. A retry on ``crash`` runs under the node's limit, or the route's when it has
 none. A retry after the output limit tells the model its last attempt ran out of room
-(`OUTPUT_LIMIT_NOTE`).
+(`OUTPUT_LIMIT_NOTE`); a retry after the turn cap tells it the same (`TURN_CAP_NOTE`).
 
 An attempt goes through the delivery bracket like any other (`agent_delivery.begin` and
 `finish`, which carry the target guard). A timed-out attempt is settled before the next
@@ -298,7 +298,7 @@ def restore_outputs(workdir: Path, snapshot: dict[str, Any]) -> None:
 
 def record_spent(workdir: Path, node: str, error: BaseException) -> None:
     """Record why a step left without an answer has none (`MISSING_DIR`): its retries
-    were spent, it ran out of output, or (an optional branch) it ended for time
+    were spent, it ran out of output or turns, or (an optional branch) it ended for time
     (`missing_cause`). Any other failure records nothing (an earlier visit's record goes),
     and its step's cause reads ``failed`` (`items.missing_steps`)."""
     if isinstance(error, RetriesExhausted):
