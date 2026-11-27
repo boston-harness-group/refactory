@@ -410,3 +410,29 @@ def test_a_refused_emit_is_redone_from_a_fresh_emit_txt(target, tmp_path):
     # The redo's emission is derived from its workspace's diff: the file it wrote, whole.
     assert (workdir / "emit.txt").read_text() == "===FILE: tool.py===\nprint('redone')\n"
     assert (target / repo_change.ARTIFACTS / NAME / "tool.py").read_text() == "print('redone')\n"
+
+
+# ── D11: bytecode directories don't block retries ────────────────────────
+
+def test_pycache_is_filtered_from_state_even_without_gitignore(tmp_path):
+    """``__pycache__`` is in UNWATCHED for the non-git path; the git path must agree."""
+    root = tmp_path / "repo"
+    root.mkdir()
+    _git(root, "init", "-q", "-b", "main")
+    _git(root, "config", "user.email", "test@example.com")
+    _git(root, "config", "user.name", "test")
+    (root / "app.py").write_text("print('app')\n")
+    _git(root, "add", "app.py")
+    _git(root, "commit", "-q", "-m", "base")
+
+    pycache = root / "__pycache__"
+    pycache.mkdir()
+    (pycache / "app.cpython-312.pyc").write_bytes(b"\x00" * 64)
+    nested = root / "pkg" / "__pycache__"
+    nested.mkdir(parents=True)
+    (nested / "mod.cpython-312.pyc").write_bytes(b"\x00" * 64)
+
+    changes = target_guard.state(root)["changes"]
+    assert not any("__pycache__" in p for p in changes), (
+        f"__pycache__ paths leaked into git state: {sorted(changes)}"
+    )
