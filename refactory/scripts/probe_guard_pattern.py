@@ -30,6 +30,12 @@ H. After implement, insert a sealed code step importing openpyxl.  The
    code-run pre-check (``E-code-run``) must skip it (not refuse), since sealed
    steps run in the Task's tool environment with no import allowlist.
 
+I. A sealed code fallback for the implement step: if implement fails, the
+   fallback runs sealed code that writes the same outputs.
+
+J. A sealed code step as a new branch of the fork around implement
+   (parallelized first to get a fork).
+
 For each, the probe shows:
   - the edit is accepted, with no false refusal;
   - the wiring validator passes;
@@ -329,6 +335,66 @@ def pattern_h(state: dict) -> dict:
     return result
 
 
+# ── Pattern I: sealed code fallback ───────────────────────────────────────
+
+FALLBACK_CODE = '''\
+import openpyxl, json
+
+def main(inp):
+    """Fallback: write a minimal output.xlsx when implement fails."""
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "Sheet1"
+    ws["A1"] = "fallback"
+    wb.save("output.xlsx")
+    return {"facts": {"implement": "fallback"}}
+'''
+
+
+def pattern_i(state: dict) -> dict:
+    """A sealed code fallback for the implement step."""
+    edit = {
+        "op": "fallback", "step": "implement", "kind": "code",
+        "text": FALLBACK_CODE,
+        "sealed": True,
+    }
+    return nn_edits.apply(edit, state)
+
+
+# ── Pattern J: sealed code branch ────────────────────────────────────────
+
+
+BRANCH_CODE = '''\
+import openpyxl
+
+def main(inp):
+    """Read the spreadsheet via openpyxl and produce a summary."""
+    wb = openpyxl.load_workbook("output.xlsx")
+    return {"facts": {"branch_sheets": len(wb.sheetnames)}}
+'''
+
+
+def pattern_j(state: dict) -> dict:
+    """A sealed code step as a branch of a fork around implement.
+
+    First parallelizes implement to create a fork, then adds a sealed code
+    branch to that fork.
+    """
+    state = nn_edits.apply(
+        {"op": "parallelize", "steps": ["implement"], "copies": 2},
+        state)
+    from refactory_dsh.nn.graph import Graph
+    graph = Graph.from_state(state["graph"])
+    fork = next(nid for nid, n in graph.nodes.items() if n.kind == "fork")
+    edit = {
+        "op": "branch", "fork": fork, "kind": "code",
+        "text": BRANCH_CODE,
+        "id": "sealed_branch",
+        "sealed": True,
+    }
+    return nn_edits.apply(edit, state)
+
+
 # ── probe logic ──────────────────────────────────────────────────────────
 
 def probe_pattern(name: str, label: str, build_fn, state: dict) -> bool:
@@ -492,6 +558,46 @@ def probe_pattern(name: str, label: str, build_fn, state: dict) -> bool:
                   f"writes: {guard.get('writes', [])}")
             passed = False
 
+    if name == "I":
+        fallbacks = [nid for nid, n in nodes.items() if n.get("sealed_script")]
+        if fallbacks:
+            _ok(f"sealed fallback step: {fallbacks[0]}")
+        else:
+            _fail("sealed fallback step", "no sealed step found")
+            passed = False
+        fb = nodes.get(fallbacks[0], {}) if fallbacks else {}
+        if "output.xlsx" in fb.get("writes", []):
+            _ok("fallback writes implement's output.xlsx")
+        else:
+            _fail("fallback writes output.xlsx", f"writes: {fb.get('writes', [])}")
+            passed = False
+        gate_nodes = [nid for nid, n in nodes.items() if n.get("kind") == "gate"
+                      and nid not in ("has_case",)]
+        if gate_nodes:
+            _ok(f"fallback gate: {gate_nodes[0]}")
+        else:
+            _fail("fallback gate", "no gate found")
+            passed = False
+
+    if name == "J":
+        branch = nodes.get("sealed_branch", {})
+        if branch.get("sealed_script"):
+            _ok("sealed_branch is sealed")
+        else:
+            _fail("sealed_branch sealed", f"sealed_script: {branch.get('sealed_script')}")
+            passed = False
+        fork_nodes = [nid for nid, n in nodes.items() if n.get("kind") == "fork"]
+        if fork_nodes:
+            fork_node = nodes[fork_nodes[0]]
+            if "sealed_branch" in fork_node.get("targets", []):
+                _ok(f"sealed_branch is a target of fork {fork_nodes[0]}")
+            else:
+                _fail("sealed_branch in fork", f"targets: {fork_node.get('targets', [])}")
+                passed = False
+        else:
+            _fail("fork node", "no fork found")
+            passed = False
+
     return passed
 
 
@@ -504,6 +610,8 @@ ALL_PATTERNS: list[tuple[str, str, Callable[[dict], dict]]] = [
     ("F", "loop with agent+tools judge", pattern_f),
     ("G", "sealed code guard after verify (read-modify-write takeover)", pattern_g),
     ("H", "sealed code step (openpyxl) passes code-run pre-check", pattern_h),
+    ("I", "sealed code fallback for implement", pattern_i),
+    ("J", "sealed code branch (after parallelizing implement)", pattern_j),
 ]
 
 
