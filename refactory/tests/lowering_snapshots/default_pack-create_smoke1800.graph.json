@@ -155,7 +155,7 @@
       "evaluator_type": "user",
       "evaluator_role": null,
       "evaluator_command": null,
-      "gate_prompt": "Approve the strategy before any code is written? The chosen approach is in strategy.json in the run directory, and the package is written from it. Answer proceed to build it, or reloop to have the strategy director choose another approach.\n\nDeclared inputs: {{requires_input}}",
+      "gate_prompt": "Approve the strategy before any code is written? The chosen approach is in strategy.json in the run directory, and the package is written from it. Answer proceed to build it, or reloop to have the strategy director choose another approach. Declared inputs: {{requires_input}}",
       "max_iterations": 4,
       "_type": "GateNode"
     },

@@ -117,7 +117,7 @@
         "panel": "Mode picker; Run once executes enabled modes including authoring; Optimize requires a scored mode. Use chat for stepwise gates."
       },
       "purpose": "Build a reusable mode package from a brief, name and task/single-shot inputs. Canonical smoke runs before separate QA and Overwatch; repair shares the attempt bound and completion needs current validation and intent evidence.",
-      "reviewed_schema": "0f8133a4d3689979709bcb345f3cb007c2da651e5545cacc1eb1cade0d87b660"
+      "reviewed_schema": "86c3e2d4e7088b79d4586037b2581bec3dc382ee3e51927f7ad8be795364613f"
     },
     "default_pack/create_fast": {
       "doc": "refactory/docs/authoring-validation.md",
@@ -237,7 +237,7 @@
         "panel": "Mode picker; Run once executes enabled modes including authoring; Optimize requires a scored mode. Use chat for stepwise gates."
       },
       "purpose": "Revise an existing mode package and validate the revision before separate QA and Overwatch. Supply revision_of, name and brief. allow_regression=true skips original execution and numerical comparison, while revised execution and intent evidence remain mandatory.",
-      "reviewed_schema": "bce0153020048657e3896d9ed8c89058d05cbbfa8a30f69e9f318fdb744b01a2"
+      "reviewed_schema": "969fff83709b85203e06a4c3402f3b8b8f3fb7ab44aa02bf0e274567f7bd805a"
     },
     "default_pack/edit_fast": {
       "doc": "refactory/docs/authoring-validation.md",

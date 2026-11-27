@@ -344,7 +344,7 @@ class CreateMode(Mode):
                 "Approve the strategy before any code is written? The chosen approach "
                 "is in strategy.json in the run directory, and the package is written "
                 "from it. Answer proceed to build it, or reloop to have the strategy "
-                "director choose another approach.\n\n"
+                "director choose another approach. "
                 "Declared inputs: {{requires_input}}"
             ),
         ))
