@@ -11,9 +11,14 @@ the same with the real steps graph.  These tests use the real edit path and
 """
 from __future__ import annotations
 
+import json
+from pathlib import Path
+
 from refactory_dsh.nn import edits as nn_edits
 from refactory_dsh.optim.checks import code_dry_run
 from refactory_packages.spreadsheetbench_v2.steps_mode import Steps
+
+import structure_fuzz_graphs as fg
 
 
 def _steps_state() -> dict:
@@ -29,23 +34,32 @@ def main(inp):
 """
 
 
-def test_code_dry_run_skips_sealed_script_step():
+def test_code_dry_run_skips_sealed_script_step(tmp_path: Path):
     """A sealed code step importing openpyxl is skipped (not refused) by
-    ``code_dry_run``.  Without the fix, ``snippet.execute`` applies V18 and
-    refuses ``import openpyxl``."""
-    state = _steps_state()
+    ``code_dry_run``.
+
+    Uses DraftReview (no data pass) with a real run directory so that
+    reverting the sealed check would reach ``snippet.execute`` and trigger
+    the V18 import-allowlist refusal.
+    """
+    state = fg.DraftReview().state_dict()
     result = nn_edits.apply(
-        {"op": "insert", "after": "implement", "kind": "code",
+        {"op": "insert", "after": "intake", "kind": "code",
          "text": OPENPYXL_GUARD,
          "id": "guard", "sealed": True,
-         "takes_over": ["implement", "output.xlsx"]},
+         "produces": ["sheets"]},
         state)
 
-    def _fake_recorded(_parent_id: str) -> dict:
-        return {}
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    (run_dir / "brief.txt").write_text("test brief")
+    (run_dir / "facts.json").write_text(json.dumps({"brief": "test value"}))
+
+    def _recorded(_parent_id: str) -> dict:
+        return {"run": str(run_dir)}
 
     refusals, notes = code_dry_run(
-        "parent", state, result, ["guard"], recorded=_fake_recorded)
+        "parent", state, result, ["guard"], recorded=_recorded)
     assert not refusals, f"sealed step was refused: {refusals}"
     sealed_notes = [n for n in notes if "sealed script step" in n]
     assert sealed_notes, f"expected a sealed skip note, got: {notes}"

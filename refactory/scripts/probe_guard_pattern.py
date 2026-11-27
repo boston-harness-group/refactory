@@ -271,14 +271,14 @@ def pattern_f(state: dict) -> dict:
 # ── Pattern G: sealed code guard AFTER verify (read-modify-write) ───────
 
 VERIFY_GUARD_CODE = '''\
-import openpyxl, json
+import openpyxl
 
 def main(inp):
     """Re-check the corrected output: restore stray cells verify introduced."""
     wb = openpyxl.load_workbook("output.xlsx")
     sheets = wb.sheetnames
-    return {"facts": {"sheets_checked": len(sheets)},
-            "files": {"output.xlsx": inp["files"]["output.xlsx"]}}
+    wb.save("output.xlsx")
+    return {"facts": {"sheets_checked": len(sheets)}}
 '''
 
 
@@ -315,6 +315,7 @@ def pattern_h(state: dict) -> dict:
         "id": "openpyxl_guard",
         "text": GUARD_CODE,
         "sealed": True,
+        "produces": ["restored_cells"],
         "takes_over": ["implement", "output.xlsx"],
     }
     result = nn_edits.apply(edit, state)

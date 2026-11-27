@@ -33,6 +33,24 @@ def _steps_state() -> dict:
     return Steps().state_dict()
 
 
+def _nearest_upstream_writer(nodes: dict, edges: list, reader_id: str, filename: str) -> str | None:
+    """BFS backward from *reader_id*; return the nearest node that writes *filename*."""
+    preds: dict[str, list[str]] = {}
+    for e in edges:
+        preds.setdefault(e["target"], []).append(e["source"])
+    visited: set[str] = set()
+    queue = list(preds.get(reader_id, []))
+    while queue:
+        nid = queue.pop(0)
+        if nid in visited:
+            continue
+        visited.add(nid)
+        if filename in nodes.get(nid, {}).get("writes", []):
+            return nid
+        queue.extend(preds.get(nid, []))
+    return None
+
+
 def test_selective_take_over_keeps_non_taken_outputs_for_downstream():
     """Insert a code step after implement that takes over only output.xlsx.
 
@@ -410,3 +428,141 @@ def test_selective_take_over_after_read_modify_write_step():
     # verify keeps its other outputs.
     assert reply_path("verify") in verify_after["writes"]
     assert session_path("verify") in verify_after["writes"]
+
+    # Wiring: verify reads output.xlsx from implement (the nearest upstream writer).
+    edges = result["graph"]["edges"]
+    assert _nearest_upstream_writer(nodes, edges, "verify", "output.xlsx") == "implement"
+
+    # Wiring: finalize reads output.xlsx from the new step.
+    assert _nearest_upstream_writer(nodes, edges, "finalize", "output.xlsx") == "revert_regressions"
+
+
+# ── write-only target: co-writers are still renamed ──────────────────────
+
+
+def test_write_only_target_co_writer_is_renamed():
+    """Take over a file the target writes but does NOT read.
+
+    DraftReview: intake → draft → review → finalize → ship.
+    Insert writer_a after intake (writes memo.txt) and writer_b after finalize
+    (writes memo.txt, doesn't read it).  Take over writer_b's memo.txt with a
+    new step.  writer_a is a co-writer and must be renamed (the fix's exclusion
+    does not fire because writer_b doesn't read memo.txt).
+    """
+    state = fg.DraftReview().state_dict()
+
+    s1 = nn_edits.apply(
+        {"op": "insert", "after": "intake", "kind": "code",
+         "text": "def main(inp):\n    return {'files': {'memo.txt': 'v1'}}",
+         "id": "writer_a", "writes": ["memo.txt"]},
+        state)
+
+    s2 = nn_edits.apply(
+        {"op": "insert", "after": "finalize", "kind": "code",
+         "text": "def main(inp):\n    return {'files': {'memo.txt': 'v2'}}",
+         "id": "writer_b", "writes": ["memo.txt"]},
+        s1)
+
+    nodes_before = s2["graph"]["nodes"]
+    assert "memo.txt" in nodes_before["writer_a"]["writes"]
+    assert "memo.txt" in nodes_before["writer_b"]["writes"]
+    assert "memo.txt" not in nodes_before["writer_b"].get("reads", [])
+
+    s3 = nn_edits.apply(
+        {"op": "insert", "after": "writer_b", "kind": "code",
+         "text": "def main(inp):\n    return {'files': {'memo.txt': 'v3'}}",
+         "id": "taker", "takes_over": ["writer_b", "memo.txt"]},
+        s2)
+
+    nodes = s3["graph"]["nodes"]
+
+    # taker owns memo.txt now.
+    assert "memo.txt" in nodes["taker"]["writes"]
+
+    # writer_b's memo.txt is renamed (taken over).
+    assert "memo.txt" not in nodes["writer_b"]["writes"]
+
+    # writer_a is a co-writer: its memo.txt is also renamed.
+    assert "memo.txt" not in nodes["writer_a"]["writes"]
+
+
+# ── two co-writers, only one feeds the target's read ─────────────────────
+
+
+def _two_writer_fork_state() -> dict:
+    """A fork where both branches write ``shared.txt``.
+
+    Branch A: c1 → target → reader.  Branch B: c2 (dead-end).
+    ``target`` reads ``shared.txt`` from ``c1`` (read-modify-write).
+    ``c2`` writes ``shared.txt`` but cannot reach ``target``.
+    """
+    from refactory_dsh import nn as _nn
+
+    graph = fg._graph([
+        fg.op("setup", writes=("seed.txt",)),
+        _nn.Node("split", "fork", targets=("c1", "c2")),
+        fg.op("c1", reads=("seed.txt",), writes=("shared.txt",)),
+        fg.op("target", reads=("shared.txt",), writes=("shared.txt",)),
+        fg.op("reader", reads=("shared.txt",), writes=("result.txt",)),
+        fg.op("c2", writes=("shared.txt",)),
+        _nn.Node("merge", "join", sources=("reader", "c2")),
+        fg.op("final", reads=("result.txt",), produces=("finished",)),
+    ], [
+        ("setup", "split"),
+        ("split", "merge"),
+        ("c1", "target"),
+        ("target", "reader"),
+        ("reader", "merge"),
+        ("c2", "merge"),
+        ("merge", "final"),
+    ])
+
+    class _TwoWriterFork(_nn.Mode):
+        name = "two_writer_fork"
+        def build(self):
+            return graph
+
+    return _TwoWriterFork().state_dict()
+
+
+def test_two_co_writers_only_feeder_is_kept():
+    """Two co-writers of ``shared.txt``.  Only the one that feeds the target's
+    read is kept; the other is renamed.
+
+    Fork: branch A has c1 → target → reader, branch B has c2.
+    Both c1 and c2 write shared.txt.  target reads shared.txt from c1
+    (read-modify-write).
+
+    Taking over target's shared.txt:
+    - c1 feeds target's read → NOT renamed (excluded by the fix).
+    - c2 is in a different branch, can't reach target → renamed.
+    """
+    state = _two_writer_fork_state()
+    nodes_before = state["graph"]["nodes"]
+    assert "shared.txt" in nodes_before["c1"]["writes"]
+    assert "shared.txt" in nodes_before["c2"]["writes"]
+    assert "shared.txt" in nodes_before["target"]["reads"]
+    assert "shared.txt" in nodes_before["target"]["writes"]
+
+    result = nn_edits.apply(
+        {"op": "insert", "after": "target", "kind": "code",
+         "text": "def main(inp):\n    return {'files': {'shared.txt': 'taken'}}",
+         "id": "taker", "takes_over": ["target", "shared.txt"]},
+        state)
+
+    nodes = result["graph"]["nodes"]
+
+    # taker owns shared.txt.
+    assert "shared.txt" in nodes["taker"]["writes"]
+
+    # c1 feeds target's read: its shared.txt is NOT renamed.
+    assert "shared.txt" in nodes["c1"]["writes"]
+
+    # c2 is in a different branch, doesn't feed the read: renamed.
+    assert "shared.txt" not in nodes["c2"]["writes"]
+
+    # target's shared.txt is renamed (taken over).
+    assert "shared.txt" not in nodes["target"]["writes"]
+
+    # target still reads shared.txt (from c1, unchanged).
+    assert "shared.txt" in nodes["target"]["reads"]
