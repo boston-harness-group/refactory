@@ -19,7 +19,6 @@ uv run python -m pytest refactory/tests/ -q -n 4 --shard 2/4   # ... one of CI's
 (it refuses `-n` rather than passing a suite it did not check), and the per-site base
 check runs a single test under a time cap.
 uv run python -m refactory_dsh.tools.gen_api_reference --check # docs match the code
-uv sync --group reference                                      # add the test-time oracle
 ```
 
 ### Run the tests your change touches
@@ -43,11 +42,9 @@ The command runs the Python suite only: a change under `packages/` needs `pnpm t
 the whole suite at most once before pushing, on eight workers; `--toolchain-gate` is the
 one command that must stay in a single process.
 
-`tests/test_ir_parity.py` compares `refactory_dsh/ir.py` with the reference graph
-language over every shipped mode. That reference is a **test-time oracle** and not
-a runtime dependency: it lives in the non-default `reference` group. CI installs it
-so the parity tests run on every pull request; a local `uv sync --group reference`
-adds it for development.
+`tests/test_ir_parity.py` checks every shipped mode's IR: that the state is valid,
+that `to_dict()` round-trips through `from_dict()`, and that a field-set snapshot
+catches unintentional additions or removals. It runs in the default suite.
 
 The DSH side, when you touch `packages/`:
 
@@ -83,13 +80,10 @@ No per-PR job installs Lean or mathlib (mathlib is a 7.4 GB checkout, and this s
 **`install.sh` provisions the default install, not the optional parts.** It creates
 `.venv` from `uv.lock`'s default (`dev`) group and installs the pinned pnpm workspace
 with the eight packages' `lib/` built, then creates the DSH profiles above. It does
-**not** install the non-default `reference` group — the parity oracle, added with
-`uv sync --group reference` — and it does not create `refactory/vendor/srf/graphs`,
-the legacy graph directory for the low-level `dsh --profile graph run` path; the
-public `uv run refactory ceo <package>/<mode>` route supplies its own graph directory.
-`.github/workflows/ci.yml` runs `install.sh` for the default install, then adds the
-reference group so the IR parity tests run on every pull request; the reference stays
-out of the default install.
+not create `refactory/vendor/srf/graphs`, the legacy graph directory for the low-level
+`dsh --profile graph run` path; the public
+`uv run refactory ceo <package>/<mode>` route supplies its own graph directory.
+`.github/workflows/ci.yml` runs `install.sh` for the default install.
 
 **CI runs the Python suite in four shards.** Each job runs `--shard I/4`: the suite
 packed by its CI seconds (`refactory/tests/ci_durations.json`), so the four together
@@ -193,10 +187,9 @@ explains fails the test.
 
 - If you change the executor, change nothing that makes a node behave differently
   on DSH. The lowering in `lowering.py` is the seam, and `refactory_dsh/ir.py` owns
-  the IR it lowers into. `tests/test_ir_parity.py` holds that copy against the
-  reference over every shipped mode: the serialization is byte-identical, and the
-  reference's validator accepts the result except for two modes whose refusal is a
-  limit of that validator, both recorded in `REFERENCE_REFUSALS` there.
+  the IR it lowers into. `tests/test_ir_parity.py` checks every shipped mode's IR
+  for validity, round-trip fidelity and field-set stability (a field added or
+  removed without updating the snapshot fails the suite).
 - The IR has **no field for the facts a node produces**, so `write_declarations`
   writes them beside the graph and the runner reads them from the run directory.
   That is a known wart, not an oversight to "clean up" silently.
@@ -245,6 +238,8 @@ Each of these happened, and the shape of the code is the response.
 - Any helper it duplicated from core, or that other methods could use, is moved to
   core (one copy) and imported by the method.
 - A faithful port pins its behaviour with a fixed-seed identical-trace test.
+- Growth of an oversized module (see [What not to do](#what-not-to-do)), or a new
+  module past the 1,500-line limit, is a finding.
 
 ## Documentation
 
@@ -273,6 +268,22 @@ Each of these happened, and the shape of the code is the response.
   name rather than guessing a package, and the registry refuses a name that exists
   in both roots rather than picking one.
 - **Do not repair a state.** Refuse it and report the reason.
+- **Do not grow an oversized module.** Keep modules small and single-purpose: about
+  1,500 lines per module and about 800 per class is the threshold past which a split
+  is due. The following modules are already well past that limit and must not grow
+  by more than a small, localised fix — new behaviour goes in a new or existing
+  focused module, imported from there:
+
+  | module | lines |
+  |---|---|
+  | `refactory_dsh/loop.py` | ~9,100 |
+  | `refactory_dsh/optim/base.py` | ~5,900 |
+  | `refactory_dsh/nn/core_ops.py` | ~4,700 |
+  | `refactory_dsh/nn/executor.py` | ~2,700 |
+
+  A split is a pure move first: code moved verbatim, old import paths re-exported
+  until callers migrate, the full suite and lowering snapshots unchanged. Behaviour
+  changes go in separate PRs.
 
 ## Public capability coverage
 

@@ -19,5 +19,9 @@ working in this repository.
   `FinalEvaluation`, the strategy trace, budgets). Do not write private copies; a
   genuinely new general piece goes in core once and the method imports it.
 - Review checks this: a duplicated helper is a finding.
+- Keep modules small and single-purpose. A module past about 1,500 lines, or a class
+  past about 800, is a sign to split, not to add. Before adding behaviour to an
+  already-oversized module, put it in a new or existing focused module instead (see
+  [contributing.md § What not to do](refactory/docs/contributing.md#what-not-to-do)).
 
 More guides (benchmark packages, edit operations, node kinds and judges) will follow.
