@@ -1,7 +1,7 @@
 """End-to-end probe: code steps read and write their declared files.
 
 Applies edits in the exact JSON op form a proposer sends, via the same edit
-path the loop uses, to the real spreadsheetbench_v2/steps seed graph.  Six
+path the loop uses, to the real spreadsheetbench_v2/steps seed graph.  Eight
 patterns:
 
 A. After implement, insert a sealed code step that reads input.xlsx,
@@ -20,6 +20,15 @@ D. A route after implement whose "revise" way has a step that takes_over
 E. A parallel fork of two new agent steps after plan.
 
 F. A loop around implement with an agent+tools judge.
+
+G. After verify, insert a sealed code guard that takes over verify's
+   output.xlsx.  verify both reads and writes output.xlsx (a read-modify-write
+   pattern); the takeover must rename only verify's write, keeping implement's
+   write (verify's read source) under the original name.
+
+H. After implement, insert a sealed code step importing openpyxl.  The
+   code-run pre-check (``E-code-run``) must skip it (not refuse), since sealed
+   steps run in the Task's tool environment with no import allowlist.
 
 For each, the probe shows:
   - the edit is accepted, with no false refusal;
@@ -259,6 +268,66 @@ def pattern_f(state: dict) -> dict:
     return nn_edits.apply(edit, state)
 
 
+# ── Pattern G: sealed code guard AFTER verify (read-modify-write) ───────
+
+VERIFY_GUARD_CODE = '''\
+import openpyxl, json
+
+def main(inp):
+    """Re-check the corrected output: restore stray cells verify introduced."""
+    wb = openpyxl.load_workbook("output.xlsx")
+    sheets = wb.sheetnames
+    return {"facts": {"sheets_checked": len(sheets)},
+            "files": {"output.xlsx": inp["files"]["output.xlsx"]}}
+'''
+
+
+def pattern_g(state: dict) -> dict:
+    """Insert a sealed code guard AFTER verify that takes over verify's output.xlsx.
+
+    verify both reads and writes output.xlsx (a read-modify-write pattern).
+    The takeover must rename only verify's WRITE; implement's write (verify's
+    read source) must stay under the original name.
+    """
+    edit = {
+        "op": "insert", "after": "verify", "kind": "code",
+        "id": "recheck_guard",
+        "text": VERIFY_GUARD_CODE,
+        "sealed": True,
+        "sees": ["output.xlsx"],
+        "produces": ["sheets_checked"],
+        "takes_over": ["verify", "output.xlsx"],
+    }
+    return nn_edits.apply(edit, state)
+
+
+# ── Pattern H: sealed code step (openpyxl) passes code-run pre-check ───
+
+
+def pattern_h(state: dict) -> dict:
+    """Insert a sealed code step importing openpyxl.  The edit is accepted and
+    ``code_dry_run`` skips it (not refuses), since sealed steps are exempt from
+    the V18 import allowlist."""
+    from refactory_dsh.optim.checks import code_dry_run
+
+    edit = {
+        "op": "insert", "after": "implement", "kind": "code",
+        "id": "openpyxl_guard",
+        "text": GUARD_CODE,
+        "sealed": True,
+        "takes_over": ["implement", "output.xlsx"],
+    }
+    result = nn_edits.apply(edit, state)
+
+    refusals, notes = code_dry_run("parent", state, result, ["openpyxl_guard"],
+                                   recorded=lambda _: {})
+    if refusals:
+        raise RuntimeError(f"code_dry_run refused sealed step: {refusals}")
+    if not any("sealed script step" in n for n in notes):
+        raise RuntimeError(f"expected sealed skip note, got: {notes}")
+    return result
+
+
 # ── probe logic ──────────────────────────────────────────────────────────
 
 def probe_pattern(name: str, label: str, build_fn, state: dict) -> bool:
@@ -377,6 +446,51 @@ def probe_pattern(name: str, label: str, build_fn, state: dict) -> bool:
             _fail("agent judge gate", "no gate found")
             passed = False
 
+    if name == "G":
+        guard = nodes.get("recheck_guard", {})
+        if "output.xlsx" in guard.get("writes", []):
+            _ok("recheck_guard writes output.xlsx")
+        else:
+            _fail("recheck_guard writes output.xlsx",
+                  f"writes: {guard.get('writes', [])}")
+            passed = False
+
+        impl = nodes.get("implement", {})
+        if "output.xlsx" in impl.get("writes", []):
+            _ok("implement keeps writing output.xlsx (verify's read source)")
+        else:
+            _fail("implement keeps output.xlsx",
+                  f"writes: {impl.get('writes', [])}")
+            passed = False
+
+        verify = nodes.get("verify", {})
+        if "output.xlsx" in verify.get("reads", []):
+            _ok("verify still reads output.xlsx (from implement)")
+        else:
+            _fail("verify reads output.xlsx",
+                  f"reads: {verify.get('reads', [])}")
+            passed = False
+
+        if "output.xlsx" not in verify.get("writes", []):
+            _ok("verify's write of output.xlsx is renamed (taken over)")
+        else:
+            _fail("verify's write renamed", "output.xlsx still in writes")
+            passed = False
+
+    if name == "H":
+        guard = nodes.get("openpyxl_guard", {})
+        if guard.get("sealed_script"):
+            _ok("openpyxl_guard is sealed")
+        else:
+            _fail("openpyxl_guard sealed", f"sealed_script: {guard.get('sealed_script')}")
+            passed = False
+        if "output.xlsx" in guard.get("writes", []):
+            _ok("openpyxl_guard writes output.xlsx")
+        else:
+            _fail("openpyxl_guard writes output.xlsx",
+                  f"writes: {guard.get('writes', [])}")
+            passed = False
+
     return passed
 
 
@@ -387,6 +501,8 @@ ALL_PATTERNS: list[tuple[str, str, Callable[[dict], dict]]] = [
     ("D", "route with one way taking over output.xlsx", pattern_d),
     ("E", "parallel fork (two copies of implement)", pattern_e),
     ("F", "loop with agent+tools judge", pattern_f),
+    ("G", "sealed code guard after verify (read-modify-write takeover)", pattern_g),
+    ("H", "sealed code step (openpyxl) passes code-run pre-check", pattern_h),
 ]
 
 

@@ -121,6 +121,10 @@ def code_dry_run(parent_id: str, parent_state: Mapping[str, Any], state: Mapping
         node = graph.nodes.get(node_id)
         if node is None:
             continue
+        if node.sealed_script:
+            notes.append(f"code dry run of {node_id!r} skipped: it is a sealed script step "
+                         "(no import allowlist; the smoke run checks it)")
+            continue
         folders, in_pass = _recorded_dirs(found, graph, node_id)
         if in_pass and node.inputs:
             # An item directory keeps the item's files, not reliably its facts: on the

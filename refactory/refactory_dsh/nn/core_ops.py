@@ -1526,9 +1526,12 @@ def _writer_group(graph: Graph, state: Mapping[str, Any], target: Node,
     reader keeps its names: that reader reads it there."""
     flow = _forward_flow(graph)
     later = {n for n in after if n in graph.nodes and _consumed(graph.nodes[n], state) & taken}
+    target_reads = _consumed(target, state) & taken
     group = {target.id}
     for node_id, node in graph.nodes.items():
         if node_id in after or node_id == target.id or not _outputs(node) & taken:
+            continue
+        if target_reads and (_outputs(node) & target_reads) and target.id in _reach(flow, node_id):
             continue
         around = set() if node_id == anchor else _reach(flow, node_id, without=cut)
         if not around & later:

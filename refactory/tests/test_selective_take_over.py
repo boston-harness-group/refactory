@@ -357,3 +357,56 @@ def test_example_refusal_selective_checks_only_selected():
     reason = _example_refusal(state, [edit_no_tools])
     assert reason is not None
     assert "agent" in reason.lower()
+
+
+# ── read-modify-write takeover (verify reads and writes the same file) ──
+
+
+def test_selective_take_over_after_read_modify_write_step():
+    """Insert a sealed code step after verify that takes over verify's output.xlsx.
+
+    verify both READS output.xlsx (from implement) and WRITES output.xlsx
+    (the corrected version).  Taking over verify's write must NOT rename
+    implement's write of the same file, or verify would lose the input it
+    reads from implement.
+
+    - implement keeps writing output.xlsx (verify's read source).
+    - verify's write of output.xlsx is renamed (taken over).
+    - verify still reads output.xlsx (from implement, unchanged).
+    - The new step reads verify's renamed output and writes output.xlsx.
+    - finalize reads output.xlsx (from the new step).
+    """
+    state = _steps_state()
+    nodes = state["graph"]["nodes"]
+
+    assert "output.xlsx" in nodes["implement"]["writes"]
+    assert "output.xlsx" in nodes["verify"]["writes"]
+    assert "output.xlsx" in nodes["verify"]["reads"]
+
+    result = nn_edits.apply(
+        {"op": "insert", "after": "verify", "kind": "code",
+         "text": "def main(inp):\n    return {'files': {'output.xlsx': inp.files['output.xlsx']}}",
+         "id": "revert_regressions",
+         "sealed": True,
+         "takes_over": ["verify", "output.xlsx"]},
+        state)
+
+    nodes = result["graph"]["nodes"]
+    new_step = nodes["revert_regressions"]
+    impl_after = nodes["implement"]
+    verify_after = nodes["verify"]
+
+    assert "output.xlsx" in new_step["writes"]
+
+    # implement keeps writing output.xlsx: verify's read source is not renamed.
+    assert "output.xlsx" in impl_after["writes"]
+
+    # verify's write of output.xlsx is renamed (taken over).
+    assert "output.xlsx" not in verify_after["writes"]
+
+    # verify still reads output.xlsx (from implement, unchanged).
+    assert "output.xlsx" in verify_after["reads"]
+
+    # verify keeps its other outputs.
+    assert reply_path("verify") in verify_after["writes"]
+    assert session_path("verify") in verify_after["writes"]
