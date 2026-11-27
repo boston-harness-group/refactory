@@ -286,9 +286,9 @@ def main() -> int:
         except Exception as error:
             from refactory_dsh.node_retry import falls_back_on, leaves_no_answer
             # An optional fork branch is missing on any failure; an agent step in a data
-            # pass only when its retries are spent or it ran out of output without
-            # answering (`missing_on_crash`); a step with a fallback on a genuine failure,
-            # never a timeout (`falls_back`).
+            # pass only when its retries are spent or it ran out of output or turns
+            # without answering (`missing_on_crash`); a step with a fallback on a genuine
+            # failure, never a timeout (`falls_back`).
             fell = bool(spec.get('falls_back')) and falls_back_on(error)
             if spec.get('optional') or (spec.get('missing_on_crash')
                                         and leaves_no_answer(error)) or fell:

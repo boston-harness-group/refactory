@@ -36,6 +36,7 @@ from refactory_dsh.node_retry import RETRY_EVENT
 # not on the import.
 PASS_RETRY_TIMES = getattr(nn_graph, "PASS_RETRY_TIMES", 2)
 OUTPUT_LIMIT_NOTE = getattr(node_retry, "OUTPUT_LIMIT_NOTE", "ran out of output room")
+TURN_CAP_NOTE = getattr(node_retry, "TURN_CAP_NOTE", "used its whole turn cap")
 
 HERE = Path(__file__).resolve().parent
 REPO_ROOT = HERE.parent.parent
@@ -56,6 +57,15 @@ OUTPUT_LIMIT = ("dsh: worker error: Product subagent failure (product: Claude Co
                 "query-run; category: output-limit; exit code: 1): output limit reached after "
                 "128000 output tokens: each response is capped at 32000 tokens and the model "
                 "had not answered when Claude Code stopped resuming it")
+#: What the Claude Code adapter reports when the agent uses its whole turn cap
+#: without ``maxTurns`` set (category: limit).
+TURN_CAP = ("dsh: worker error: Product subagent failure (product: Claude Code; stage: "
+            "query-run; category: limit; exit code: 1)")
+#: What the real worker record produces when ``maxTurns`` IS set: the adapter emits
+#: ``turn_limit_reached`` metadata and the process exits with ``category: unknown``.
+#: This is the shape seen in production (spreadsheetbench_v2/steps, max_turns=50).
+TURN_CAP_REAL = ("dsh: worker error: Product subagent failure (product: Claude Code; stage: "
+                 "query-run; category: unknown; exit code: 1) turn_limit_reached:50")
 #: A product failure that is not the output limit.
 WORKER_CRASH = ("dsh: worker error: Product subagent failure (product: Claude Code; stage: "
                 "query-run; category: invalid-result; exit code: 1): the answer was empty")
@@ -77,6 +87,19 @@ with open(root / "lock", "w") as lock:
 plan = plans[key]
 step = plan[calls] if calls < len(plan) else plan[-1]
 if step.startswith("dsh:"):
+    # A step that names turn_limit_reached:<N> writes the metadata into the worker
+    # receipt, as the real Claude Code adapter does via onRefactoryMetadata before the
+    # process exits.
+    import re as _re
+    _m = _re.search(r"turn_limit_reached:(\\d+)", step)
+    if _m:
+        _receipt = os.environ.get("REFACTORY_WORKER_RECEIPT")
+        if _receipt:
+            _rp = pathlib.Path(_receipt)
+            if _rp.exists():
+                _rec = json.loads(_rp.read_text())
+                _rec["turn_limit_reached"] = int(_m.group(1))
+                _rp.write_text(json.dumps(_rec, indent=2) + "\\n")
     print(step, file=sys.stderr)
     sys.exit(1)
 print(step)
@@ -292,6 +315,56 @@ def test_an_opted_in_output_limit_is_retried_and_told_it_ran_out_of_room(tmp_pat
 
 
 @pytest.mark.parametrize("runtime", RUNTIMES)
+def test_a_turn_cap_is_not_retried_and_leaves_no_answer(tmp_path, runtime):
+    """[both runtimes] Using the whole turn cap is the model failing the question: by
+    default it is not retried. The step has no answer (cause ``turn_cap``, one session),
+    the item is graded without it, and its siblings are scored."""
+    dsh = Scripted(tmp_path / "dsh", {"": [TURN_CAP, "right"]})
+    scores, run = _run(runtime, _straight(), tmp_path, dsh)
+    assert _keys(scores) == [("0", False, 0.0, None), *RIGHT[1:]]
+    assert dsh.calls() == 4
+    item = _pass(run, "0")
+    assert _events(item, RETRY_EVENT) == []
+    [record] = [r for r in scores if str(r["id"]) == "0"]
+    assert record["missing_steps"]["solve"]["cause"] == "turn_cap"
+    assert record["missing_steps"]["solve"]["sessions"] == 1
+    assert "category: limit" in record["missing_steps"]["solve"]["error"]
+
+
+@pytest.mark.parametrize("runtime", RUNTIMES)
+def test_an_opted_in_turn_cap_is_retried_and_told_it_ran_out_of_turns(tmp_path, runtime):
+    """[both runtimes] A step that declares ``retry.on: ["turn_cap"]`` gets a fresh
+    session after the turn cap, and that session's prompt says the last one ran out of
+    turns."""
+    dsh = Scripted(tmp_path / "dsh", {"": [TURN_CAP, "right"]})
+    scores, run = _run(runtime, _straight(retry={"on": ["crash", "turn_cap"], "times": 2}),
+                       tmp_path, dsh)
+    assert _keys(scores) == RIGHT
+    assert dsh.calls() == 5
+    first, second, *rest = dsh.prompts()
+    assert TURN_CAP_NOTE not in first and TURN_CAP_NOTE in second
+    assert not any(TURN_CAP_NOTE in prompt for prompt in rest)
+    [retried] = _events(_pass(run, "0"), RETRY_EVENT)
+    assert retried["reason"] == "turn_cap" and "turn cap" in retried["summary"]
+
+
+@pytest.mark.parametrize("runtime", RUNTIMES)
+def test_a_real_turn_cap_with_category_unknown_is_classified_by_receipt(tmp_path, runtime):
+    """[both runtimes] The real production shape: ``category: unknown`` in the error text
+    but ``turn_limit_reached`` in the worker receipt. The receipt wins: classified as
+    ``turn_cap``, not retried, step has no answer."""
+    dsh = Scripted(tmp_path / "dsh", {"": [TURN_CAP_REAL, "right"]})
+    scores, run = _run(runtime, _straight(), tmp_path, dsh)
+    assert _keys(scores) == [("0", False, 0.0, None), *RIGHT[1:]]
+    assert dsh.calls() == 4
+    item = _pass(run, "0")
+    assert _events(item, RETRY_EVENT) == []
+    [record] = [r for r in scores if str(r["id"]) == "0"]
+    assert record["missing_steps"]["solve"]["cause"] == "turn_cap"
+    assert record["missing_steps"]["solve"]["sessions"] == 1
+
+
+@pytest.mark.parametrize("runtime", RUNTIMES)
 def test_a_step_whose_retries_all_crash_is_missing_and_its_item_still_scored(tmp_path, runtime):
     """[both runtimes] Every session of item 0 crashes: after `PASS_RETRY_TIMES` retries the
     step is missing, the item is graded without an answer (0, no error), and its siblings
@@ -457,9 +530,23 @@ def test_the_optimizer_sees_no_answer_items_apart_from_wrong_ones():
          "missing_steps": {"solve": {"cause": "output_limit", "sessions": 3, "error": "x"}}},
     ]
     text = "\n".join(_item_evidence(records))
-    assert "1 passed, 1 answered wrong, 1 had no answer (a step ran out of output, crashed or ran over its own time limit), 0 failed" in text
+    assert "1 passed, 1 answered wrong, 1 had no answer (a step gave none; cause below), 0 failed" in text
     assert "| 3 | solve | ran out of output without answering | 3 |" in text
     assert "not a wrong answer" in text
+
+
+def test_the_optimizer_sees_turn_cap_items_as_no_answer():
+    from refactory_dsh.optim.base import _item_evidence
+
+    records = [
+        {"id": "1", "passed": True, "score": 1.0, "error_text": None},
+        {"id": "2", "passed": False, "score": 0.0, "error_text": None, "fail_reason": "no answer",
+         "missing_steps": {"solve": {"cause": "turn_cap", "sessions": 1, "error": "used its turn cap"}}},
+    ]
+    text = "\n".join(_item_evidence(records))
+    assert "1 had no answer" in text
+    assert "| 2 | solve | used its whole turn cap without finishing | 1 |" in text
+    assert "not retried" in text
 
 
 # ── outside a data pass: unchanged ──────────────────────────────────────────
@@ -563,6 +650,12 @@ def test_which_failures_are_crashes():
                                          kind="transport")) is None
     assert failure_kind(CompletionFailed("model completion failed (exit 1): x", kind="worker")) == "crash"
     assert failure_kind(CompletionFailed("model completion failed (exit 1): x", kind="output_limit")) == "output_limit"
+    assert cause_kind(TURN_CAP) == "turn_cap"
+    # The real production error text says category: unknown -- the error text alone
+    # classifies it as a worker crash; the receipt's turn_limit_reached elevates it.
+    real_error = TURN_CAP_REAL.split(" turn_limit_reached:")[0]
+    assert cause_kind(real_error) == "worker", "category: unknown is a crash by text alone"
+    assert failure_kind(CompletionFailed("model completion failed (exit 1): x", kind="turn_cap")) == "turn_cap"
     assert failure_kind(CompletionFailed("model completion failed (exit 1): x", kind="setup")) is None
     # A bare status code inside a token count is not an HTTP 429.
     from refactory_dsh.model import is_transport_failure
@@ -579,6 +672,7 @@ def test_the_optimizer_is_told_what_a_crash_does():
     text = "\n".join(composition_section(nn_edits.catalogue(), nodes, state["edges"]))
     assert "**crashes**" in text and "fresh session" in text and "no answer" in text
     assert "**running out of output**" in text and "model failing that question" in text
+    assert "**running out of turns**" in text
     assert "It is not retried" in text
     assert "vote" not in text and "Address it" not in text, "the fact, not a remedy"
 

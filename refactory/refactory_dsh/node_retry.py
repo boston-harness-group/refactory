@@ -16,7 +16,7 @@ still recorded ``declared_timeout``), never one the harness backstop stopped
 (`model.HarnessBackstop`). It needs the node's own `timeout_s`, which each retry's limit
 multiplies. A retry on ``crash`` runs under the node's limit, or the route's when it has
 none. A retry after the output limit tells the model its last attempt ran out of room
-(`OUTPUT_LIMIT_NOTE`).
+(`OUTPUT_LIMIT_NOTE`); a retry after the turn cap tells it the same (`TURN_CAP_NOTE`).
 
 An attempt goes through the delivery bracket like any other (`agent_delivery.begin` and
 `finish`, which carry the target guard). A timed-out attempt is settled before the next
@@ -71,6 +71,12 @@ OUTPUT_LIMIT_NOTE = ("Note: your previous attempt at this step ran out of output
                      "before it gave an answer. Keep your working short and commit to an "
                      "answer well before the limit.")
 
+#: What a retry after the turn cap adds to the node's prompt: the agent used all its
+#: turns without finishing, and a fresh session with the same prompt tends to do so again.
+TURN_CAP_NOTE = ("Note: your previous attempt at this step used its whole turn cap "
+                 "without finishing. Work more efficiently and commit to an answer "
+                 "well before you run out of turns.")
+
 #: What the retry of a step with no tools (``tool_policy`` ``none``) adds to its prompt
 #: when its reply wrote out tool calls or their results (`agent_json.invented_tool_calls`):
 #: nothing ran, so any result in it was made up.
@@ -93,6 +99,20 @@ KEPT_SYNCS = frozenset({"kept", "verified"})
 #: The ``reason`` of the `RETRY_EVENT` for that retry.
 INVENTED_TOOL_CALLS = "invented_tool_calls"
 
+#: Every cause `missing_cause` can return (excluding None): a session that ended for
+#: time or whose sandbox did not start. `missing_cause` returns only members of this set.
+MISSING_CAUSES = frozenset({"step_timeout", "backstop", "declared_timeout", "timeout"})
+
+#: Every cause that can reach `optim.base.NO_ANSWER_CAUSES`: the causes `record_spent`
+#: writes (from `nn.graph.RETRY_ON`, `MISSING_CAUSES`, `INVENTED_TOOL_CALLS`, and the
+#: ``"failed"`` default `items.missing_steps` uses when no cause file exists).
+#: Tested against `nn.graph.RETRY_ON` so a new retry kind without wording fails the suite.
+RECORDABLE_CAUSES = frozenset({
+    "crash", "output_limit", "timeout", "turn_cap",  # nn.graph.RETRY_ON
+    *MISSING_CAUSES,
+    INVENTED_TOOL_CALLS,
+    "failed",
+})
 
 #: Where a step whose retries were spent records why, beside its
 #: ``reviews/<step>-missing.txt``: ``<step>.json`` with its cause and session count
@@ -146,10 +166,11 @@ def leaves_no_answer(error: BaseException) -> bool:
     """Whether ``error`` leaves a data-pass step missing rather than failing its item:
     its retries are spent (`RetriesExhausted`), or the model used its whole output
     allowance without answering, which is the model failing the question and is not
-    retried unless the step opts in (``retry.on: ["output_limit"]``), or a step with no
+    retried unless the step opts in (``retry.on: ["output_limit"]``), or the agent used
+    its whole turn cap without finishing (``retry.on: ["turn_cap"]``), or a step with no
     tools wrote out tool calls again after it was told (`InventedToolCalls`)."""
     return (isinstance(error, (RetriesExhausted, InventedToolCalls))
-            or failure_kind(error) == "output_limit")
+            or failure_kind(error) in ("output_limit", "turn_cap"))
 
 
 #: How the walker's op child hands back a `subprocess.TimeoutExpired` it cannot rebuild
@@ -183,7 +204,7 @@ def missing_cause(error: BaseException) -> str | None:
     own failure), ``declared_timeout`` (`model.DeclaredTimeout`), ``step_timeout`` (the
     step's own limit: an op's own `subprocess.TimeoutExpired`, a code step's
     `snippet.SnippetTimeout` -- its fault, never a harness timeout) or ``timeout``
-    (`failure_kind`); else None."""
+    (`failure_kind`); else None. Returns only members of `MISSING_CAUSES`."""
     from refactory_dsh.model import DeclaredTimeout, HarnessBackstop
 
     if own_timeout(error):
@@ -291,13 +312,15 @@ def restore_outputs(workdir: Path, snapshot: dict[str, Any]) -> None:
 
 def record_spent(workdir: Path, node: str, error: BaseException) -> None:
     """Record why a step left without an answer has none (`MISSING_DIR`): its retries
-    were spent, it ran out of output, or (an optional branch) it ended for time
+    were spent, it ran out of output or turns, or (an optional branch) it ended for time
     (`missing_cause`). Any other failure records nothing (an earlier visit's record goes),
     and its step's cause reads ``failed`` (`items.missing_steps`)."""
     if isinstance(error, RetriesExhausted):
         cause: str | None = error.cause
     elif failure_kind(error) == "output_limit":
         cause = "output_limit"
+    elif failure_kind(error) == "turn_cap":
+        cause = "turn_cap"
     elif isinstance(error, InventedToolCalls):
         cause = INVENTED_TOOL_CALLS
     else:
@@ -348,6 +371,8 @@ def failure_kind(error: BaseException) -> str | None:
     failed (`model.CompletionFailed` of kind ``worker``: an invalid result, a worker
     error). ``output_limit`` is the model using its whole output allowance without
     answering: the model's own failure on the question, retried only when a step opts in.
+    ``turn_cap`` is the agent using its whole turn cap without finishing: the model's own
+    failure, like the output limit, and not retried unless a step opts in.
     A wire that kept failing (``transport``) and a key, model name or prompt the provider
     refuses (``setup``) are none of them: the next session would fail the same way.
     Cancellation, budget exhaustion, a refusal and a bad answer are never retried, and
@@ -369,19 +394,22 @@ def failure_kind(error: BaseException) -> str | None:
     if isinstance(error, CompletionFailed):
         # Only a product failure: a wire that kept failing (a proxy outage) or a request
         # the provider refuses would fail the next session the same way.
-        return {"worker": "crash", "output_limit": "output_limit"}.get(error.kind)
+        return {"worker": "crash", "output_limit": "output_limit",
+                "turn_cap": "turn_cap"}.get(error.kind)
     return None
 
 
 def _cause(error: BaseException, kind: str) -> str:
-    """What a `RetriesExhausted` says its last attempt ended on: ``output_limit``, or
-    ``declared_timeout`` for a session its node's declared wall stopped
+    """What a `RetriesExhausted` says its last attempt ended on: ``output_limit``,
+    ``turn_cap``, or ``declared_timeout`` for a session its node's declared wall stopped
     (`model.DeclaredTimeout`, the pipeline's limit, though its declared retry answered it),
     else the retry kind."""
     from refactory_dsh.model import DeclaredTimeout
 
     if _output_limit(error):
         return "output_limit"
+    if _turn_cap(error):
+        return "turn_cap"
     if isinstance(error, DeclaredTimeout):
         return "declared_timeout"
     return kind
@@ -389,6 +417,10 @@ def _cause(error: BaseException, kind: str) -> str:
 
 def _output_limit(error: BaseException) -> bool:
     return getattr(error, "kind", None) == "output_limit"
+
+
+def _turn_cap(error: BaseException) -> bool:
+    return getattr(error, "kind", None) == "turn_cap"
 
 
 def attempt_walls(base_s: int, rule: dict[str, Any]) -> list[int]:
@@ -485,6 +517,8 @@ def _record_retry(workdir: Path, node: str, *, attempt: int, tries: int, waited_
         what = f"has no tools but wrote out tool calls after {waited_s}s"
     elif _output_limit(error):
         what = f"reached its output limit without answering after {waited_s}s"
+    elif _turn_cap(error):
+        what = f"used its whole turn cap without finishing after {waited_s}s"
     else:
         what = f"crashed after {waited_s}s"
     limit = f" and {wall_s}s" if wall_s is not None else ""
@@ -714,7 +748,8 @@ def deliver(
             ran.append(int(round(_clock() - started)))
             spent_s.append(ran[-1])
             spent = ", then ".join(f"{seconds}s" for seconds in ran)
-            failed = {"timeout": "timed out", "output_limit": "ran out of output"}.get(kind, "crashed")
+            failed = {"timeout": "timed out", "output_limit": "ran out of output",
+                      "turn_cap": "used its whole turn cap without finishing"}.get(kind, "crashed")
             its = "its declared retry" if kind == "timeout" else "its retry"
             if index + 1 >= tries:
                 raise RetriesExhausted(
@@ -740,11 +775,16 @@ def deliver(
             _record_retry(workdir, node, attempt=index + 2 + told, tries=most, waited_s=ran[-1],
                           wall_s=limit, error=error, kind=kind)
             attempt_client = _with_wall(client, limit) if limit is not None else client
-            # A session that used its whole output allowance tends to do so again on the
-            # same prompt; the retry is told, and the note is not carried further. A step
-            # told it has no tools stays told.
-            attempt_prompt = (f"{prompt}\n\n{OUTPUT_LIMIT_NOTE}" if _output_limit(error) else prompt) \
-                + (f"\n\n{NO_TOOLS_NOTE}" if told else "")
+            # A session that used its whole output allowance or turn cap tends to do so
+            # again on the same prompt; the retry is told, and the note is not carried
+            # further. A step told it has no tools stays told.
+            if _output_limit(error):
+                attempt_prompt = f"{prompt}\n\n{OUTPUT_LIMIT_NOTE}"
+            elif _turn_cap(error):
+                attempt_prompt = f"{prompt}\n\n{TURN_CAP_NOTE}"
+            else:
+                attempt_prompt = prompt
+            attempt_prompt += f"\n\n{NO_TOOLS_NOTE}" if told else ""
             keep_now = keep and kind == "timeout" and workspace is not None
             stale_session = _session_of(error) if keep_now else None
             index += 1
