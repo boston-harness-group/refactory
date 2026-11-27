@@ -325,12 +325,15 @@ def prepare(ctx: Any) -> dict[str, Any]:
     # them truthfully; only their later gates can record actual validation.
     for feedback in ("research-review.txt", "strategy-review.txt", "validation.txt"):
         ctx.write_text(feedback, "not run: initial authoring pass; no prior feedback\n")
-    ctx.write_json("brief.json", {
+    brief_payload = {
         "name": name, "brief": brief, "extends": extends, "mode": revision,
         "task_ref": task_ref, "task_refs": task_refs,
         "single_shot": single_shot, "data_node": data_node,
         "requires_input": list(inputs), "smoke_timeout_s": smoke_timeout_s,
-    })
+    }
+    if inputs:
+        brief_payload["requires_input_source"] = "--input"
+    ctx.write_json("brief.json", brief_payload)
     return {
         "name": name,
         "brief": brief,
@@ -346,20 +349,7 @@ def prepare(ctx: Any) -> dict[str, Any]:
         "task_ref": task_ref,
         "class_of_work": metadata["class_of_work"],
         "data_node": metadata["data_node"],
-        "requires_input": (
-            "The brief says this mode takes these as input: " + ", ".join(f"`{name}`" for name in inputs)
-            + ". It must receive each one as a declared knob named after it, or by "
-            "reading a file under that name from the run directory. A mode that "
-            "hardcodes a fixture instead of accepting the input is refused by "
-            "validation."
-        ) if inputs else (
-            "No specific inputs were named. If this mode takes input data (a file, "
-            "folder, text, or other data to process rather than a setting to "
-            "configure), declare each such knob with `required=True` so the "
-            "empty-input validation can verify the mode stops when its input is "
-            "missing. A knob for a configuration file, reference database, or "
-            "output location should not be required."
-        ),
+        "requires_input": _requires_input_fact(inputs, source="--input" if inputs else ""),
     }
 
 
@@ -586,6 +576,7 @@ Write one JSON object and nothing else:
  "edges": [{"source": "...", "target": "...", "condition": null}],
  "start": "<node id>",
  "score": "<which produced fact score() reads, and why that is the right number>",
+ "inputs": ["<knob names the mode must accept as input data, empty when the mode generates without input>"],
  "findings": {"FND-<slug>-<n>": "<node or knob that handles it, or [set-aside: reason]>"}}
 
 Rules:
@@ -622,6 +613,10 @@ Rules:
   edges, subgraph boundaries, targets and sources must exist in `nodes`.
 - Every read must be written by some node, and every declared knob consumed.
 - `closest_existing` must name a mode from the survey, or be 'none' if none is close.
+- `inputs` names every knob that receives *data to process* (a file, a folder, text),
+  as opposed to a *setting* (a threshold, a model name, a timeout). Each must be a
+  declared knob with `required: true`. A mode that generates output without input data
+  has an empty `inputs` list.
 """
 
 
@@ -724,6 +719,7 @@ def review_design(ctx: Any) -> str:
     ctx.write_text("strategy-review.txt", report or "ok\n")
     ctx.set_fact("design_review", report or "(the intended design is coherent)")
     if not problems:
+        _adopt_strategy_inputs(ctx, raw)
         return "proceed"
     if used >= attempts_allowed:
         raise ValueError(
@@ -731,6 +727,31 @@ def review_design(ctx: Any) -> str:
         )
     ctx.set_fact("design_attempts_used", used)
     return Verdict("reloop", report)
+
+
+def _adopt_strategy_inputs(ctx: Any, raw_strategy: str) -> None:
+    """Record the strategy's declared inputs in ``brief.json`` and the fact.
+
+    Called when the design review passes, before the person's gate.  ``--input``
+    wins: when ``brief.json`` already carries a non-empty ``requires_input`` list
+    (set by ``prepare_create`` from ``--input``), the strategy's list is ignored.
+    """
+    brief = ctx.read_json("brief.json", {}) or {}
+    if brief.get("requires_input"):
+        return
+    try:
+        payload = json.loads(raw_strategy[raw_strategy.index("{"): raw_strategy.rindex("}") + 1])
+    except (ValueError, json.JSONDecodeError):
+        return
+    strategy_inputs = [str(name).strip() for name in (payload.get("inputs") or [])
+                       if str(name).strip()]
+    if not strategy_inputs:
+        return
+    brief["requires_input"] = strategy_inputs
+    brief["requires_input_source"] = "plan"
+    ctx.write_json("brief.json", brief)
+    ctx.set_fact("requires_input", _requires_input_fact(
+        tuple(strategy_inputs), source="the plan"))
 
 
 def _review(raw: str) -> list[str]:
@@ -1130,6 +1151,28 @@ def _evict(module_name: str) -> None:
         if name == module_name or name.startswith(module_name + ".")
     ]:
         del sys.modules[cached]
+
+
+def _requires_input_fact(inputs: tuple[str, ...] | list[str], *, source: str = "") -> str:
+    """The ``requires_input`` fact text for a list of input names."""
+    if not inputs:
+        return (
+            "No specific inputs were named. If this mode takes input data (a file, "
+            "folder, text, or other data to process rather than a setting to "
+            "configure), declare each such knob with `required=True` so the "
+            "empty-input validation can verify the mode stops when its input is "
+            "missing. A knob for a configuration file, reference database, or "
+            "output location should not be required."
+        )
+    source_note = f" (from {source})" if source else ""
+    return (
+        f"The brief says this mode takes these as input{source_note}: "
+        + ", ".join(f"`{name}`" for name in inputs)
+        + ". It must receive each one as a declared knob named after it, or by "
+        "reading a file under that name from the run directory. A mode that "
+        "hardcodes a fixture instead of accepting the input is refused by "
+        "validation."
+    )
 
 
 def declared_inputs(raw: Any) -> tuple[str, ...]:
@@ -2218,9 +2261,6 @@ def check_empty_input(ctx: Any) -> dict[str, Any]:
         declared=declared, model=bool(_agent_nodes(name)), timeout_s=timeout_s,
         model_context=context, smoke_items=int(ctx.knob("smoke_items", 3)), split=split,
     )
-    if receipt.get("inferred") and receipt.get("declared"):
-        brief["requires_input"] = receipt["declared"]
-        ctx.write_json("brief.json", brief)
     ctx.write_json(empty_input.RECEIPT, receipt)
     if receipt["status"] == "finding":
         package = Path(str(ctx.facts.get("package_path") or ""))

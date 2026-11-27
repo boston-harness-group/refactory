@@ -172,12 +172,17 @@ def infer_inputs(
     described: dict[str, Any], samples: dict[str, str],
     *, project: Path, run_root: Path,
 ) -> list[str]:
-    """Knob names that are inputs, inferred from the mode when ``--input`` is not given.
+    """Knob names that are inputs, inferred from the mode's structure as a last resort.
 
-    A ``required=True`` knob explicitly needs a user-provided value: the mode refuses
-    to start without one, which is what an input knob should do. A knob whose sample
-    or default is an existing path that looks like input data (`_looks_like_input`) is
-    input too. Data-node sources are handled separately by `plan`.
+    Called only when neither ``--input`` nor the plan declared any inputs.  A
+    ``required=True`` knob is inferred only when its value *and* its sample are both
+    empty or blank, or when its effective value is an existing input-like path
+    (`_looks_like_input`).  A required knob with a non-empty default that is not a
+    path into the project is a *setting* (``model_name``, ``api_endpoint``), never
+    an input.  A knob whose value only looks like a path is left for ``plan()``'s
+    ``undeclared`` list, which is inconclusive and never emptied.
+
+    Data-node sources are handled separately by `plan`.
 
     Returns the inferred names in sorted order, or an empty list when nothing qualifies.
     """
@@ -190,13 +195,31 @@ def infer_inputs(
         if name in writes or (isinstance(value, str) and _normal(value) in writes):
             continue
         if name in required:
-            inputs.append(name)
-            continue
-        check_value = samples.get(name, value)
-        real = _as_path(check_value, project)
-        if real is not None and _looks_like_input(real, project=project, run_root=run_root):
-            inputs.append(name)
+            default_blank = not str(value or "").strip()
+            if default_blank:
+                inputs.append(name)
+                continue
+            real = _as_path(value, project)
+            if real is not None and _looks_like_input(
+                    real, project=project, run_root=run_root):
+                inputs.append(name)
     return inputs
+
+
+def _infer_reasons(
+    names: list[str], described: dict[str, Any], samples: dict[str, str],
+    *, project: Path, run_root: Path,
+) -> list[str]:
+    """Why each inferred name qualified, for the run warning."""
+    values = dict(described.get("values") or {})
+    reasons: list[str] = []
+    for name in names:
+        value = values.get(name)
+        if not str(value or "").strip():
+            reasons.append(f"{name} (required, default empty)")
+        else:
+            reasons.append(f"{name} (required, default is an input-like path)")
+    return reasons
 
 
 def plan(
@@ -340,8 +363,9 @@ def run(
     from refactory_dsh import sandbox
     from refactory_dsh.items import write_source
 
+    from refactory_dsh import target_guard
+
     workdir = Path(workdir)
-    inferred = False
     receipt: dict[str, Any] = {"mode": identifier, "workdir": str(workdir.resolve()),
                                "declared": list(declared), "timeout_s": int(timeout_s)}
     backstop = sandbox.smoke_backstop_s(int(timeout_s))
@@ -358,9 +382,13 @@ def run(
                                      run_root=run_root or workdir)
         if inferred_list:
             declared = tuple(inferred_list)
-            inferred = True
             receipt["declared"] = list(declared)
-    receipt["inferred"] = inferred
+            reasons = _infer_reasons(inferred_list, described, samples, project=project,
+                                     run_root=run_root or workdir)
+            target_guard.warn(
+                "the empty-input check inferred these inputs from the mode's structure "
+                f"(neither --input nor the plan declared any): {', '.join(reasons)}"
+            )
     planned = plan(described, samples, declared, empty_root=workdir / EMPTY_ROOT,
                    project=project, run_root=run_root or workdir)
     receipt.update({key: planned[key] for key in ("inputs", "kept", "undeclared")})

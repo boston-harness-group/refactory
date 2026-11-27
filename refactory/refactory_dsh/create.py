@@ -300,6 +300,7 @@ class CreateMode(Mode):
                 "## What the research found\n{{research}}\n\n"
                 "## The perspectives\n{{strategy_plan}}\n\n"
                 "## What went wrong last time\n{{design_review}}\n\n"
+                "## What this mode must take as input\n{{requires_input}}\n\n"
                 "Compile the perspectives into one strategy. Every ask in the brief must "
                 "appear in it unless the user explicitly agreed to exclude it; naming "
                 "an ask out of scope does not supply that agreement. Preserve user-approved "
@@ -323,10 +324,10 @@ class CreateMode(Mode):
         ))
         graph.add(Node(
             "review", "gate", evaluator=f"{OPS}:review_design",
-            reads=("strategy.json", "research/", "strategy/"),
-            writes=("strategy-review.txt",),
+            reads=("strategy.json", "brief.json", "research/", "strategy/"),
+            writes=("strategy-review.txt", "brief.json"),
             produces=("design_review", "design_attempts_used",
-                      "finding_coverage"),
+                      "finding_coverage", "requires_input"),
             knobs=("design_attempts",),
             max_iterations=8,
             notes="check the intended graph before any code exists",
@@ -337,13 +338,14 @@ class CreateMode(Mode):
         # stops at it; a headless DSH run stops and prints the steer and resume commands.
         graph.add(Node(
             "gate_strategy", "gate", gate_kind="user",
-            reads=("strategy.json",),
+            reads=("strategy.json", "brief.json"),
             max_iterations=4,
             notes=(
                 "Approve the strategy before any code is written? The chosen approach "
                 "is in strategy.json in the run directory, and the package is written "
                 "from it. Answer proceed to build it, or reloop to have the strategy "
-                "director choose another approach."
+                "director choose another approach.\n\n"
+                "Declared inputs: {{requires_input}}"
             ),
         ))
         graph.add(Node(

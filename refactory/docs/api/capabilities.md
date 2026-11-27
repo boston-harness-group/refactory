@@ -7794,7 +7794,7 @@ Build a reusable mode package from a brief, name and task/single-shot inputs. Ca
       "id": "gate_strategy",
       "kind": "gate",
       "knobs": [],
-      "notes": "Approve the strategy before any code is written? The chosen approach is in strategy.json in the run directory, and the package is written from it. Answer proceed to build it, or reloop to have the strategy director choose another approach.",
+      "notes": "Approve the strategy before any code is written? The chosen approach is in strategy.json in the run directory, and the package is written from it. Answer proceed to build it, or reloop to have the strategy director choose another approach.\n\nDeclared inputs: {{requires_input}}",
       "role": "ceo"
     },
     {
@@ -8345,7 +8345,7 @@ Build a reusable mode package from a brief, name and task/single-shot inputs. Ca
       "panel": "Mode picker; Run once executes enabled modes including authoring; Optimize requires a scored mode. Use chat for stepwise gates."
     },
     "purpose": "Build a reusable mode package from a brief, name and task/single-shot inputs. Canonical smoke runs before separate QA and Overwatch; repair shares the attempt bound and completion needs current validation and intent evidence.",
-    "reviewed_schema": "d4cbfcedf956fdbbf67b0f88dd04595d233534e8342ac4329d2d9fb055828b08"
+    "reviewed_schema": "0f8133a4d3689979709bcb345f3cb007c2da651e5545cacc1eb1cade0d87b660"
   }
 }
 ```
@@ -11235,7 +11235,7 @@ Revise an existing mode package and validate the revision before separate QA and
       "id": "gate_strategy",
       "kind": "gate",
       "knobs": [],
-      "notes": "Approve the strategy before any code is written? The chosen approach is in strategy.json in the run directory, and the package is written from it. Answer proceed to build it, or reloop to have the strategy director choose another approach.",
+      "notes": "Approve the strategy before any code is written? The chosen approach is in strategy.json in the run directory, and the package is written from it. Answer proceed to build it, or reloop to have the strategy director choose another approach.\n\nDeclared inputs: {{requires_input}}",
       "role": "ceo"
     },
     {
@@ -11786,7 +11786,7 @@ Revise an existing mode package and validate the revision before separate QA and
       "panel": "Mode picker; Run once executes enabled modes including authoring; Optimize requires a scored mode. Use chat for stepwise gates."
     },
     "purpose": "Revise an existing mode package and validate the revision before separate QA and Overwatch. Supply revision_of, name and brief. allow_regression=true skips original execution and numerical comparison, while revised execution and intent evidence remain mandatory.",
-    "reviewed_schema": "f7e831e44d53ac22baea475914513e9ca60600a99fbac6ab16055d24cbe1c0a9"
+    "reviewed_schema": "bce0153020048657e3896d9ed8c89058d05cbbfa8a30f69e9f318fdb744b01a2"
   }
 }
 ```

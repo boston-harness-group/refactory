@@ -1,18 +1,12 @@
-"""Declared-inputs inference: a created mode's inputs are inferred from its structure.
+"""Declared-inputs: inputs come from ``--input``, the plan, or a narrowed structural fallback.
 
-When ``--input`` is not given, ``empty_input.infer_inputs`` reads the produced package's
-knobs and infers which are inputs:
-
-* a ``required=True`` str knob explicitly needs user input;
-* a knob whose sample or default is an existing path that looks like input data
-  (under the project or home, not a system location, write or scratch);
-* data-node ``source_path`` sources are handled separately by ``plan()``.
-
-Outputs (knobs whose value names a declared write), configuration files (not required,
-no input-like path), and non-str settings are never inferred.
-
-The inferred inputs are stored in ``brief.json``'s ``requires_input``, so the empty-input
-check and every other reader works without ``--input``.
+The planning step (strategy) names the inputs the mode will take, which the person
+reviews at the gate.  ``--input`` wins when given.  When neither ``--input`` nor the
+plan declared inputs, ``infer_inputs`` applies a narrowed structural fallback: only
+``required=True`` knobs whose value *and* sample are both empty or are an existing
+input-like path.  A required setting with a non-empty non-path default (``model_name``,
+``api_endpoint``) is never inferred.  A knob whose value only looks like a path stays
+in ``plan()``'s ``undeclared`` list (inconclusive, never emptied).
 """
 
 from __future__ import annotations
@@ -241,7 +235,6 @@ def test_required_knob_is_inferred_as_input(tmp_path, project, plates):
     knob as input, the check runs, and the mode stops on empty input → pass."""
     _install(project, NAME, required_files(NAME))
     receipt = _run(project, tmp_path, f"{NAME}/analyser", {"input_dir": str(plates)})
-    assert receipt["inferred"] is True
     assert "input_dir" in receipt["declared"]
     assert receipt["status"] != "not_applicable", (
         "with a required knob the check must run, not say 'not applicable'")
@@ -253,7 +246,6 @@ def test_required_knob_inferred_without_sample(tmp_path, project):
     The mode's required-knob check refuses to start → non-zero exit → pass."""
     _install(project, NAME, required_files(NAME))
     receipt = _run(project, tmp_path, f"{NAME}/analyser", {})
-    assert receipt["inferred"] is True
     assert "input_dir" in receipt["declared"]
     assert receipt["status"] == "pass", receipt
 
@@ -266,7 +258,6 @@ def test_explicit_input_overrides_inference(tmp_path, project, plates):
     _install(project, NAME, required_files(NAME))
     receipt = _run(project, tmp_path, f"{NAME}/analyser",
                    {"input_dir": str(plates)}, declared=("input_dir",))
-    assert receipt.get("inferred") is not True
     assert receipt["status"] == "pass", receipt
 
 
@@ -276,7 +267,6 @@ def test_explicit_input_different_from_inferred(tmp_path, project, plates):
     _install(project, NAME, required_files(NAME))
     receipt = _run(project, tmp_path, f"{NAME}/analyser",
                    {"input_dir": str(plates)}, declared=("threshold",))
-    assert receipt.get("inferred") is not True
     assert "threshold" in receipt["knobs"], "the explicitly declared knob is emptied"
     assert "input_dir" not in receipt["knobs"], (
         "the inferred knob must not be emptied when --input is explicit")
@@ -290,7 +280,6 @@ def test_pure_generator_is_not_applicable(tmp_path, project):
     'not applicable', no false declaration."""
     _install(project, "gen_pkg", generator_files("gen_pkg"))
     receipt = _run(project, tmp_path, "gen_pkg/gen", {})
-    assert receipt["inferred"] is False
     assert receipt["declared"] == []
     assert receipt["status"] == "not_applicable"
 
@@ -334,39 +323,6 @@ def test_numeric_bool_enum_knobs_never_inferred(tmp_path, project):
     assert result == []
 
 
-# ── T4b: knob with input-like default path inferred ──────────────────────
-
-
-def test_knob_with_input_like_default_is_inferred(tmp_path, project):
-    """A knob whose default is an existing path under the project that looks like input."""
-    (project / "data" / "input").mkdir(parents=True)
-    described = {
-        "knobs": ["source_dir"],
-        "values": {"source_dir": "data/input"},
-        "required": [],
-        "data_nodes": [],
-        "writes": [],
-    }
-    result = infer_inputs(described, {}, project=project, run_root=project / "run")
-    assert result == ["source_dir"]
-
-
-def test_knob_with_input_like_sample_is_inferred(tmp_path, project):
-    """A knob whose sample is an existing path under the project is inferred."""
-    data = project / "data" / "plates"
-    data.mkdir(parents=True)
-    described = {
-        "knobs": ["input_dir"],
-        "values": {"input_dir": ""},
-        "required": [],
-        "data_nodes": [],
-        "writes": [],
-    }
-    result = infer_inputs(described, {"input_dir": str(data)}, project=project,
-                          run_root=project / "run")
-    assert result == ["input_dir"]
-
-
 # ── T5: mutation checks ──────────────────────────────────────────────────
 
 
@@ -393,49 +349,6 @@ def test_mutation_removing_required_field_loses_inference(tmp_path, project, pla
     assert receipt["status"] == "not_applicable", (
         "without required=True the knob is not inferred, and plates is under "
         "tmp_path (not project), so _looks_like_input returns False")
-
-
-# ── brief.json is updated with inferred inputs ──────────────────────────
-
-
-def test_check_empty_input_updates_brief_json(tmp_path, project, plates):
-    """check_empty_input stores inferred inputs in brief.json so later readers see them."""
-    from refactory_dsh import create_ops
-
-    _install(project, NAME, required_files(NAME))
-    package = registry.workspace_root(project) / NAME
-
-    class Ctx:
-        def __init__(self):
-            self.workdir = tmp_path / "run"
-            self.workdir.mkdir()
-            self.facts = {"name": NAME, "package_path": str(package)}
-            self.knobs = {"sample_knobs": json.dumps([f"input_dir={plates}"]),
-                          "smoke_timeout_s": 120}
-            self.model = self.budget = None
-
-        def knob(self, name, default=None):
-            return self.knobs.get(name, default)
-
-        def read_json(self, name, default=None):
-            path = self.workdir / name
-            return json.loads(path.read_text()) if path.exists() else default
-
-        def write_json(self, name, payload):
-            (self.workdir / name).write_text(json.dumps(payload, default=str))
-
-        def exists(self, name):
-            return (self.workdir / name).exists()
-
-    ctx = Ctx()
-    ctx.write_json("smoke.json", {"mode": f"{NAME}/analyser"})
-    ctx.write_json("brief.json", {"name": NAME, "brief": "analyse plates",
-                                  "requires_input": []})
-    receipt = create_ops.check_empty_input(ctx)
-    brief = ctx.read_json("brief.json", {})
-    assert "input_dir" in brief.get("requires_input", []), (
-        "inferred inputs must be stored in brief.json")
-    assert receipt["status"] == "pass"
 
 
 # ── infer_inputs unit tests ──────────────────────────────────────────────
@@ -465,3 +378,173 @@ def test_infer_inputs_multiple_required(tmp_path):
     }
     result = infer_inputs(described, {}, project=tmp_path, run_root=tmp_path / "run")
     assert result == ["input_dir", "query_text"]
+
+
+# ── the seven required tests ────────────────────────────────────────────
+
+
+def test_plan_declared_inputs_appear_in_gate_text_and_check_runs(
+    tmp_path, project, plates,
+):
+    """With no --input, the plan (strategy.json) names the inputs. review_design
+    extracts them into brief.json, the gate_strategy notes render them, and the
+    empty-input check runs with those inputs declared."""
+    from refactory_dsh import create_ops
+
+    _install(project, NAME, required_files(NAME))
+    strategy = json.dumps({
+        "considered": [{"approach": "a", "why_not": ""}, {"approach": "b", "why_not": ""}],
+        "chosen": "a", "why": "simpler", "will_not": [], "closest_existing": "none",
+        "knobs": [{"name": "input_dir", "kind": "str", "default": "",
+                   "description": "folder of CSVs", "required": True}],
+        "nodes": [{"id": "analyse", "kind": "op", "call": "ops:analyse",
+                   "knobs": ["input_dir"], "writes": ["report.json"], "produces": ["rows"]}],
+        "edges": [], "start": "analyse", "score": "rows",
+        "inputs": ["input_dir"],
+        "findings": {},
+    })
+    # Simulate the review gate context.
+    class Ctx:
+        def __init__(self):
+            self.workdir = tmp_path / "run"
+            self.workdir.mkdir()
+            self.facts = {"name": NAME, "requires_input": ""}
+            self.knobs = {"design_attempts": 2}
+        def knob(self, name, default=None):
+            return self.knobs.get(name, default)
+        def read_json(self, name, default=None):
+            path = self.workdir / name
+            return json.loads(path.read_text()) if path.exists() else default
+        def read_text(self, name):
+            return (self.workdir / name).read_text()
+        def write_json(self, name, payload):
+            (self.workdir / name).write_text(json.dumps(payload, default=str))
+        def write_text(self, name, text):
+            (self.workdir / name).write_text(text)
+        def set_fact(self, name, value):
+            self.facts[name] = value
+        def exists(self, name):
+            return (self.workdir / name).exists()
+
+    ctx = Ctx()
+    ctx.write_json("brief.json", {"name": NAME, "brief": "analyse plates",
+                                  "requires_input": []})
+    (ctx.workdir / "strategy.json").write_text(strategy)
+
+    verdict = create_ops.review_design(ctx)
+    assert verdict == "proceed"
+    brief = ctx.read_json("brief.json", {})
+    assert brief["requires_input"] == ["input_dir"], (
+        "the plan's inputs must be written to brief.json")
+    assert brief.get("requires_input_source") == "plan"
+    assert "input_dir" in ctx.facts.get("requires_input", ""), (
+        "the requires_input fact must name the declared input")
+    # The gate_strategy notes render the fact.
+    from refactory_dsh.nn.executor import render, RunContext
+    from refactory_dsh.create import CreateMode
+    gate = CreateMode().build().nodes["gate_strategy"]
+    run_ctx = RunContext(ctx.workdir)
+    run_ctx.facts = dict(ctx.facts)
+    rendered = render(gate.notes, run_ctx)
+    assert "input_dir" in rendered, (
+        "the gate text must show the declared input so the person can correct it")
+    # Now run the empty-input check with brief.json's declared inputs.
+    receipt = _run(project, tmp_path, f"{NAME}/analyser",
+                   {"input_dir": str(plates)},
+                   declared=tuple(brief["requires_input"]))
+    assert receipt["status"] == "pass", receipt
+
+
+def test_input_overrides_plan(tmp_path, project, plates):
+    """--input overrides the plan's inputs: even if the strategy names different
+    inputs, the explicitly declared ones are used."""
+    _install(project, NAME, required_files(NAME))
+    receipt = _run(project, tmp_path, f"{NAME}/analyser",
+                   {"input_dir": str(plates)}, declared=("input_dir",))
+    assert receipt["status"] == "pass", receipt
+    assert "input_dir" in receipt["knobs"], "the --input knob is emptied"
+
+
+def test_pure_generator_not_applicable(tmp_path, project):
+    """A mode with no input knobs and no data-node sources gets 'not applicable'."""
+    _install(project, "gen_pkg", generator_files("gen_pkg"))
+    receipt = _run(project, tmp_path, "gen_pkg/gen", {})
+    assert receipt["declared"] == []
+    assert receipt["status"] == "not_applicable"
+
+
+def test_required_model_name_setting_not_inferred(tmp_path):
+    """F1: a required knob with a non-empty non-path default is a setting, not an input.
+    model_name='gpt-4' is required but has a fallback value, so it must not be inferred."""
+    described = {
+        "knobs": ["model_name", "api_endpoint", "input_dir"],
+        "values": {"model_name": "gpt-4", "api_endpoint": "https://api.example.com",
+                   "input_dir": ""},
+        "required": ["model_name", "api_endpoint", "input_dir"],
+        "data_nodes": [],
+        "writes": [],
+    }
+    result = infer_inputs(described, {}, project=tmp_path, run_root=tmp_path / "run")
+    assert "model_name" not in result, (
+        "a required setting with a non-empty default must not be inferred")
+    assert "api_endpoint" not in result, (
+        "a required setting with a non-empty default must not be inferred")
+    assert "input_dir" in result, (
+        "a required knob with an empty default is input")
+
+
+def test_config_file_stays_undeclared_inconclusive_not_emptied(tmp_path, project, plates):
+    """F2: a config_file='config.yaml' knob whose value is an existing input-like path
+    stays undeclared (inconclusive), and is never emptied."""
+    config = project / "config.yaml"
+    config.write_text("threshold: 0.5\n")
+    described = {
+        "knobs": ["config_file", "input_dir"],
+        "values": {"config_file": "config.yaml", "input_dir": ""},
+        "required": ["input_dir"],
+        "data_nodes": [],
+        "writes": [],
+    }
+    result = infer_inputs(described, {}, project=project, run_root=project / "run")
+    assert "config_file" not in result, (
+        "a non-required knob must not be inferred even if its value is an input-like path")
+    assert "input_dir" in result
+    # plan() leaves it in undeclared → inconclusive
+    planned = empty_input.plan(described, {}, ("input_dir",),
+                               empty_root=tmp_path / "e", project=project,
+                               run_root=project / "run")
+    assert any("config_file" in entry for entry in planned["undeclared"]), (
+        "config_file must stay in the undeclared list")
+    assert "config_file" not in planned["knobs"], (
+        "config_file must not be emptied")
+
+
+def test_fallback_warning_appears(tmp_path, project, plates, capsys):
+    """F3: when the structural fallback fires, a run warning names what was inferred."""
+    _install(project, NAME, required_files(NAME))
+    receipt = _run(project, tmp_path, f"{NAME}/analyser", {"input_dir": str(plates)})
+    assert receipt["status"] == "pass", receipt
+    captured = capsys.readouterr()
+    assert "inferred" in captured.err, (
+        "a run warning must name what the fallback inferred")
+    assert "input_dir" in captured.err
+
+
+def test_produced_results_filters_empty_root_and_items_override(tmp_path):
+    """The writes filter excludes files under the empty-input root and the items override,
+    and reports only declared writes the run left behind."""
+    from refactory_dsh.nn.executor import ITEMS_OVERRIDE
+
+    workdir = tmp_path / "run"
+    workdir.mkdir()
+    (workdir / "report.json").write_text("{}")
+    (workdir / "summary.csv").write_text("a,b\n1,2\n")
+    empty_dir = workdir / empty_input.EMPTY_ROOT / "knob-x"
+    empty_dir.mkdir(parents=True)
+    (empty_dir / "placeholder.txt").write_text("")
+    (workdir / ITEMS_OVERRIDE).write_text("{}")
+    writes = ["report.json", "summary.csv", "missing.txt",
+              f"{empty_input.EMPTY_ROOT}/knob-x/placeholder.txt", ITEMS_OVERRIDE]
+    result = empty_input.produced_results(workdir, writes)
+    assert result == ["report.json", "summary.csv"], (
+        "only existing declared writes outside the empty root and items override are reported")
