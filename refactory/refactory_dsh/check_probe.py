@@ -4,8 +4,10 @@ A check that cannot run -- an option no installed pytest plugin provides, a prog
 is not installed -- used to be found only by the build's self-check, after research,
 design and the build (o55-dm149c: 82 minutes). Design's prepare probes it instead
 (`probe_check`): each pytest step collects (``--collect-only -q``, its options kept) and
-each other step's program is looked up. The probe never runs the check, and never stops
-the run: what it finds is a warning on the approval card and in the run's log.
+each other step's program is looked up. The probe never runs the check. When the run has
+a worktree, a probe fault (a command pytest cannot parse, a missing program) stops the run
+at prepare, before research starts; without a worktree the probe is advisory: its warning
+goes to the approval card and the run's log.
 
 It runs where the check will run, with the check's environment: in the run's worktree,
 still at its base, after the install the check itself makes (`worktree.ensure_environment`,
@@ -211,9 +213,9 @@ def probe_warning(probe: str, returncode: int | None, output: str, *, where: str
 def probe_check(ctx: Any, command: str) -> str:
     """Probe the check where it will run; a warning when it may not run at all, else "".
 
-    Advisory: the change may add what the base lacks (a plugin, a tool, a test), so a
-    probe never stops the run. Its warning goes to the run's log here and to the
-    approval card (`design_ops.design_review_status`), where a person decides.
+    When the run has a worktree, a non-empty return is a fault the caller must refuse
+    before research starts (`design_ops.prepare_design` raises ``ValueError``). Without
+    a worktree the warning is advisory: shown on the approval card and in the run's log.
 
     In the run's worktree, still at its base, after the install its check makes -- the
     same `worktree.ensure_environment` call and record, so the check does not install
