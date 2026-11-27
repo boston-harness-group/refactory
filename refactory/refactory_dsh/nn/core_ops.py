@@ -1508,8 +1508,10 @@ def _take_over_plan(graph: Graph, state: Mapping[str, Any], target_id: Any, side
     if not isinstance(target_id, str) or target_id not in graph.nodes:
         raise _Refused(f"'takes_over' names an existing step, not {target_id!r}")
     target = graph.nodes[target_id]
-    if target.kind not in ("agent", "op") or not (target.writes or target.produces):
-        raise _Refused(f"{target_id!r} is a {target.kind} with no outputs to take over")
+    if target.kind not in ("agent", "op"):
+        raise _Refused(f"{target_id!r} is a {target.kind}; only agent or op steps can be taken over")
+    if not (target.writes or target.produces):
+        raise _Refused(f"{target_id!r} has no outputs to take over")
     if only is not None:
         available = {*target.writes, *target.produces}
         missing = only - available
@@ -2908,8 +2910,10 @@ def _route_take_over(graph: Graph, state: Mapping[str, Any], anchor: Node,
     if not isinstance(target_id, str) or target_id not in graph.nodes:
         raise _Refused(f"'takes_over' names an existing step, not {target_id!r}")
     target = graph.nodes[target_id]
-    if target.kind not in ("agent", "op") or not (target.writes or target.produces):
-        raise _Refused(f"{target_id!r} is a {target.kind} with no outputs to take over")
+    if target.kind not in ("agent", "op"):
+        raise _Refused(f"{target_id!r} is a {target.kind}; only agent or op steps can be taken over")
+    if not (target.writes or target.produces):
+        raise _Refused(f"{target_id!r} has no outputs to take over")
     if target_id != anchor.id and not _runs_first_on_every_path(graph, target_id, [anchor.id]):
         hint = _not_on_every_path_hint(graph, target_id)
         raise _Refused(f"{target_id!r} does not run before the route on every path "
@@ -3930,8 +3934,10 @@ OPERATORS: dict[str, dict[str, Any]] = {
         "fields": ("step", "kind", "text", "system", "sees", "id", "call", "reads", "tools",
                    "route", "sealed"),
         "line": "a step run instead when 'step' (one run per item) fails -- it raises, "
-                "crashes past its retries or hits its output or prompt limit; never for time or a "
-                "harness fault: it writes that step's outputs, so what reads them still "
+                "crashes past its retries, hits its output limit, its turn cap, its prompt "
+                "limit, or is still writing at the session time limit (backstop); never for "
+                "a timeout (the harness's, a declared wall or the step's own) or a harness "
+                "fault: it writes that step's outputs, so what reads them still "
                 "gets an answer; 'kind' as in insert; it sees what 'step' sees; when the step "
                 "writes more than one file, the fallback must be a code step"
                 + FALLBACK_TOOLS + " (a plain agent writes only its reply)"

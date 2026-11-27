@@ -99,6 +99,20 @@ KEPT_SYNCS = frozenset({"kept", "verified"})
 #: The ``reason`` of the `RETRY_EVENT` for that retry.
 INVENTED_TOOL_CALLS = "invented_tool_calls"
 
+#: Every cause `missing_cause` can return (excluding None): a session that ended for
+#: time or whose sandbox did not start. `missing_cause` returns only members of this set.
+MISSING_CAUSES = frozenset({"step_timeout", "backstop", "declared_timeout", "timeout"})
+
+#: Every cause that can reach `optim.base.NO_ANSWER_CAUSES`: the causes `record_spent`
+#: writes (from `nn.graph.RETRY_ON`, `MISSING_CAUSES`, `INVENTED_TOOL_CALLS`, and the
+#: ``"failed"`` default `items.missing_steps` uses when no cause file exists).
+#: Tested against `nn.graph.RETRY_ON` so a new retry kind without wording fails the suite.
+RECORDABLE_CAUSES = frozenset({
+    "crash", "output_limit", "timeout", "turn_cap",  # nn.graph.RETRY_ON
+    *MISSING_CAUSES,
+    INVENTED_TOOL_CALLS,
+    "failed",
+})
 
 #: Where a step whose retries were spent records why, beside its
 #: ``reviews/<step>-missing.txt``: ``<step>.json`` with its cause and session count
@@ -190,7 +204,7 @@ def missing_cause(error: BaseException) -> str | None:
     own failure), ``declared_timeout`` (`model.DeclaredTimeout`), ``step_timeout`` (the
     step's own limit: an op's own `subprocess.TimeoutExpired`, a code step's
     `snippet.SnippetTimeout` -- its fault, never a harness timeout) or ``timeout``
-    (`failure_kind`); else None."""
+    (`failure_kind`); else None. Returns only members of `MISSING_CAUSES`."""
     from refactory_dsh.model import DeclaredTimeout, HarnessBackstop
 
     if own_timeout(error):
