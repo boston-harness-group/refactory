@@ -290,7 +290,7 @@ def _fallback() -> None:
     """'a step run instead when 'step' (one run per item) fails ... it writes that step's
     outputs, so what reads them still gets an answer; ... it sees what 'step' sees'"""
     line = core_ops.OPERATORS["fallback"]["line"]
-    assert "never for time or a harness fault" in line
+    assert "never for a timeout" in line and "harness fault" in line
     before = _seed("fuzz_data_pass")
     _a, out = _ok("fuzz_data_pass", {"op": "fallback", "step": "solve"})
     graph = _graph(out)
@@ -529,5 +529,5 @@ def test_a_fallback_agrees_across_the_operator_section_the_legend_and_the_view(t
                if re.match(r"\s*decide(_fallback)? agent ", row)}
     assert outputs == {"answer.txt"}, view
     # Said once: the line and the form, nowhere else in the request.
-    assert text.count("never for time or a harness fault") == 1
+    assert text.count("never for a timeout") == 1
     assert text.count(form) == 1

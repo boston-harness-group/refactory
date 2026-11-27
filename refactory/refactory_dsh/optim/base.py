@@ -2113,12 +2113,14 @@ def composition_section(catalogue: Sequence[dict[str, Any]], node_states: Sequen
         "`fail_item`. The last step of the pass can be looped too: the "
         "loop then adds a step after the gate to end the pass.",
         "- **running out of output**: a model call that uses its whole output allowance "
-        "without answering is the model failing that question. It is not retried: the step "
+        "without answering is the model failing that question. It is not retried unless the "
+        "step opts in (retry.on): the step "
         "has no answer, and the item goes on without it (a gate after it sees no answer and "
         "may reloop; a fork's join sees that branch without one; a code op's `inp['files']` "
         "holds only the files that exist; an item left with nothing to grade scores 0).",
         "- **running out of turns**: an agent that uses its whole turn cap without finishing "
-        "is the model failing that question, like running out of output. It is not retried: "
+        "is the model failing that question, like running out of output. It is not retried "
+        "unless the step opts in (retry.on): "
         "the step has no answer, and the item goes on without it, as above.",
         "- **crashes**: when the worker or product fails (not the model's own output or turn "
         "cap), an agent step in the per-item pass that is safe to rerun (no tools, its own "
@@ -3284,6 +3286,8 @@ NO_ANSWER_CAUSES = {
     "backstop": "was still writing at the session time limit (4 h by default)",
     "step_timeout": "ran over its own time limit",
     "failed": "failed (optional branch)",
+    "declared_timeout": "ran past its own declared timeout_s",
+    "invented_tool_calls": "wrote out tool calls it has no tools for",
 }
 
 
@@ -3341,8 +3345,8 @@ def _item_evidence(records: Sequence[dict[str, Any]]) -> list[str]:
     lines = [
         "## Item results of the candidate being edited",
         f"{len(records)} train item(s): {len(passed)} passed, {len(wrong)} answered "
-        f"wrong, " + (f"{len(unanswered)} had no answer (a step ran out of output, "
-                      "ran out of turns, crashed or ran over its own time limit), " if unanswered else "")
+        f"wrong, " + (f"{len(unanswered)} had no answer (a step gave none; cause below), "
+                      if unanswered else "")
         + f"{len(errored)} failed with an error{'' if timed_out or kept else mean}. An error is the "
         "item's run failing (its cause is below), not a wrong answer.",
     ]
@@ -3371,8 +3375,8 @@ def _item_evidence(records: Sequence[dict[str, Any]]) -> list[str]:
             "",
             "No answer -- not a wrong answer: a step gave none, so the item was graded "
             "without it. Running out of output or running out of turns is the model's own "
-            "failure on the question and is not retried; a crash is the worker's, retried "
-            "in fresh sessions first:",
+            "failure on the question and is not retried unless the step opts in; a crash is "
+            "the worker's or the product's, retried in fresh sessions first:",
             _table(["item", "step", "cause", "sessions"], rows[:ITEM_EVIDENCE_ROWS]),
         ]
         if len(rows) > ITEM_EVIDENCE_ROWS:
