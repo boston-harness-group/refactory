@@ -596,6 +596,20 @@ def test_reloop_second_plan_replaces_first(tmp_path):
     assert brief["requires_input_source"] == "plan"
 
 
+def test_reloop_plan_with_no_inputs_clears_earlier_plan(tmp_path):
+    """A reloop's plan that declares no inputs drops the first plan's inputs."""
+    from refactory_dsh.create_ops import _adopt_strategy_inputs
+
+    ctx = _make_ctx(tmp_path)
+    _adopt_strategy_inputs(ctx, _strategy_json(["input_dir"]))
+    assert ctx.read_json("brief.json", {})["requires_input"] == ["input_dir"]
+
+    _adopt_strategy_inputs(ctx, _strategy_json([]))
+    brief = ctx.read_json("brief.json", {})
+    assert not brief.get("requires_input"), "stale plan inputs must not survive"
+    assert "requires_input_source" not in brief
+
+
 def test_input_flag_wins_over_plan_on_reloop(tmp_path):
     """--input (requires_input_source == '--input') blocks adoption on reloop."""
     from refactory_dsh.create_ops import _adopt_strategy_inputs

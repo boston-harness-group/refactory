@@ -754,6 +754,12 @@ def _adopt_strategy_inputs(ctx: Any, raw_strategy: str) -> None:
     strategy_inputs = [str(name).strip() for name in (raw_inputs or [])
                        if isinstance(name, str) and str(name).strip()]
     if not strategy_inputs:
+        if brief.get("requires_input_source") == "plan":
+            # A reloop's new plan declares no inputs: drop the earlier plan's.
+            brief.pop("requires_input", None)
+            brief.pop("requires_input_source", None)
+            ctx.write_json("brief.json", brief)
+            ctx.set_fact("requires_input", _requires_input_fact(()))
         return
     brief["requires_input"] = strategy_inputs
     brief["requires_input_source"] = "plan"
