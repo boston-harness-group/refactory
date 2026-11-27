@@ -1034,12 +1034,12 @@ _WORKING = {
         "import json, os, time\n"
         "from pathlib import Path\n\n"
         "def printing(ctx):\n"
-        "    for i in range(20):\n"
+        "    for i in range(30):\n"
         "        print('tick', i, flush=True)\n"
         "        time.sleep(0.25)\n"
         "    return {'best': 1.0}\n\n"
         "def rewriting(ctx):\n"
-        "    for i in range(20):\n"
+        "    for i in range(30):\n"
         "        ctx.write_json('span.json', {'tick': i})\n"
         "        time.sleep(0.25)\n"
         "    return {'best': 1.0}\n\n"
@@ -1051,7 +1051,7 @@ _WORKING = {
         "def streaming(ctx):\n"
         "    alive = ctx.workdir / '.refactory' / 'workers' / 'worker-test.activity'\n"
         "    alive.parent.mkdir(parents=True, exist_ok=True)\n"
-        "    for i in range(20):\n"
+        "    for i in range(30):\n"
         "        alive.touch()\n"
         "        time.sleep(0.25)\n"
         "    return {}\n\n"
@@ -1100,7 +1100,7 @@ _WORKING = {
         "class Steps(_Scored):\n"
         "    name = 'steps'\n"
         "    def build(self):\n"
-        "        return _item('step', 'step', 'step')\n\n"
+        "        return _item('step', 'step', 'step', 'step', 'step')\n\n"
         "class Streaming(_Scored):\n"
         "    name = 'streaming'\n"
         "    def build(self):\n"
@@ -1109,8 +1109,9 @@ _WORKING = {
 }
 
 #: How long the run may go without work, in each runtime. A model smoke's own limit is
-#: the run's (`run_on_dsh`), a little less than the sandbox's: 6 s gives the run 3 s.
-_LIMITS = {"spine": 6, "walker": 3}
+#: the run's (`run_on_dsh`), a little less than the sandbox's: 12 s gives the run 7 s,
+#: whose backstop (28 s) gives CI margin against load-induced slowdown.
+_LIMITS = {"spine": 12, "walker": 3}
 #: The run's own limit, either way: every working op above runs longer than this.
 _RUN_LIMIT_S = 3
 
@@ -1137,10 +1138,10 @@ def _smoke(tmp_path: Path, mode: str, runtime: str) -> sandbox.SandboxResult:
 
 @pytest.mark.parametrize("runtime", ["spine", "walker"])
 @pytest.mark.parametrize("mode", [
-    "printing",   # an op that prints for 5 s and writes nothing
-    "rewriting",  # an op that rewrites a declared file for 5 s and prints nothing
-    "steps",      # one item, three silent 1.5 s nodes in a row
-    "streaming",  # an op in an item whose worker's activity file moves for 5 s
+    "printing",   # an op that prints for 7.5 s and writes nothing
+    "rewriting",  # an op that rewrites a declared file for 7.5 s and prints nothing
+    "steps",      # one item, five silent 1.5 s nodes in a row
+    "streaming",  # an op in an item whose worker's activity file moves for 7.5 s
 ])
 def test_a_smoke_that_keeps_working_outlives_its_inactivity_limit(
         tmp_path, graph_profile_home, mode, runtime):
