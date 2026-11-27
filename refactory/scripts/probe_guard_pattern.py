@@ -368,8 +368,8 @@ BRANCH_CODE = '''\
 import openpyxl
 
 def main(inp):
-    """Read the spreadsheet via openpyxl and produce a summary."""
-    wb = openpyxl.load_workbook("output.xlsx")
+    """Read input.xlsx via openpyxl and produce a summary."""
+    wb = openpyxl.load_workbook("input.xlsx")
     return {"facts": {"branch_sheets": len(wb.sheetnames)}}
 '''
 
@@ -378,7 +378,9 @@ def pattern_j(state: dict) -> dict:
     """A sealed code step as a branch of a fork around implement.
 
     First parallelizes implement to create a fork, then adds a sealed code
-    branch to that fork.
+    branch to that fork.  The branch reads input.xlsx (available before the
+    fork) rather than output.xlsx (written by implement, not yet available
+    to a parallel branch).
     """
     state = nn_edits.apply(
         {"op": "parallelize", "steps": ["implement"], "copies": 2},
@@ -391,6 +393,8 @@ def pattern_j(state: dict) -> dict:
         "text": BRANCH_CODE,
         "id": "sealed_branch",
         "sealed": True,
+        "sees": ["input.xlsx"],
+        "produces": ["branch_sheets"],
     }
     return nn_edits.apply(edit, state)
 
@@ -565,18 +569,26 @@ def probe_pattern(name: str, label: str, build_fn, state: dict) -> bool:
         else:
             _fail("sealed fallback step", "no sealed step found")
             passed = False
-        fb = nodes.get(fallbacks[0], {}) if fallbacks else {}
+        fb_id = fallbacks[0] if fallbacks else None
+        fb = nodes.get(fb_id, {}) if fb_id else {}
         if "output.xlsx" in fb.get("writes", []):
             _ok("fallback writes implement's output.xlsx")
         else:
             _fail("fallback writes output.xlsx", f"writes: {fb.get('writes', [])}")
             passed = False
-        gate_nodes = [nid for nid, n in nodes.items() if n.get("kind") == "gate"
-                      and nid not in ("has_case",)]
-        if gate_nodes:
-            _ok(f"fallback gate: {gate_nodes[0]}")
+        fb_gate = None
+        if fb_id:
+            for nid, n in nodes.items():
+                if n.get("kind") != "gate":
+                    continue
+                edges = result["graph"].get("edges", [])
+                if any(e.get("target") == fb_id and e.get("source") == nid for e in edges):
+                    fb_gate = nid
+                    break
+        if fb_gate:
+            _ok(f"fallback gate wired to {fb_id}: {fb_gate}")
         else:
-            _fail("fallback gate", "no gate found")
+            _fail("fallback gate", f"no gate wired to {fb_id}")
             passed = False
 
     if name == "J":
@@ -585,6 +597,17 @@ def probe_pattern(name: str, label: str, build_fn, state: dict) -> bool:
             _ok("sealed_branch is sealed")
         else:
             _fail("sealed_branch sealed", f"sealed_script: {branch.get('sealed_script')}")
+            passed = False
+        if "input.xlsx" in branch.get("reads", []):
+            _ok("sealed_branch reads input.xlsx")
+        else:
+            _fail("sealed_branch reads input.xlsx", f"reads: {branch.get('reads', [])}")
+            passed = False
+        if "branch_sheets" in branch.get("produces", []):
+            _ok("sealed_branch produces branch_sheets")
+        else:
+            _fail("sealed_branch produces branch_sheets",
+                  f"produces: {branch.get('produces', [])}")
             passed = False
         fork_nodes = [nid for nid, n in nodes.items() if n.get("kind") == "fork"]
         if fork_nodes:

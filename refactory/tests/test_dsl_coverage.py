@@ -352,6 +352,7 @@ def test_every_operation_the_map_names_for_sealed_script_makes_one(op):
     kind 'code' and 'sealed' true; ``loop`` and ``route`` with judge 'code' and 'sealed')."""
     _POLISH_CODE = {"op": "insert", "after": "solve", "id": "polish", "kind": "code",
                     "takes_over": "solve"}
+    seed = "agent_pass"
     if op == "insert":
         edits = [{"op": "insert", "after": "solve", "kind": "code", "sealed": True,
                   "takes_over": "solve"}]
@@ -360,9 +361,35 @@ def test_every_operation_the_map_names_for_sealed_script_makes_one(op):
     elif op == "route":
         edits = [_POLISH_CODE, {"op": "route", "after": "solve", "judge": "code",
                                 "sealed": True}]
+    elif op == "branch":
+        edits = [_LOOK, _PAIR, {"op": "branch", "fork": "look_fork", "kind": "code",
+                                "id": "sb", "sealed": True, "to": "solve"}]
+    elif op == "merge":
+        edits = [_LOOK, {"op": "insert", "after": "look", "id": "look2", "kind": "agent",
+                         "text": "Again.", "takes_over": "look"},
+                 {"op": "merge", "steps": ["look", "look2"], "kind": "code",
+                  "sealed": True}]
+    elif op == "fallback":
+        edits = [{"op": "fallback", "step": "solve", "kind": "code", "sealed": True}]
+    elif op == "split":
+        edits = [{"op": "split", "step": "solve", "into": [
+            {"kind": "code", "text": "def main(inp): return {}", "sealed": True},
+            {"kind": "agent", "text": "Answer."}]}]
+    elif op == "parallelize":
+        edits = [_LOOK, {"op": "parallelize", "after": "look", "new": [
+            {"kind": "code", "text": "def main(inp): return {}", "id": "sc",
+             "sealed": True},
+            {"kind": "agent", "text": "B.", "id": "pb", "to": "solve"}]}]
+    elif op == "map":
+        seed = "solver"
+        edits = [{"op": "map", "after": "frame", "over": "solver_prompt",
+                  "text": "Do one.", "to": "solve",
+                  "combine": {"kind": "code",
+                              "text": "def main(inp): return {}",
+                              "sealed": True}}]
     else:
         pytest.skip(f"{op} not wired for sealed_script test")
-    parent, out = _field_attempt("agent_pass", edits)
+    parent, out = _field_attempt(seed, edits)
     assert isinstance(out, Candidate), (op, out)
     new = [n for k, n in out.state["graph"]["nodes"].items()
            if k not in parent.state["graph"]["nodes"] and n.get("sealed_script")]
