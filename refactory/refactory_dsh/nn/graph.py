@@ -46,7 +46,7 @@ FALLBACK = "fallback"
 #: step opts in). A model that answered wrongly answers wrongly again, and a wire that
 #: kept failing or a key the provider refuses fails the same way, so none of those is
 #: retried (`node_retry.failure_kind`).
-RETRY_ON = ("crash", "output_limit", "timeout")
+RETRY_ON = ("crash", "output_limit", "timeout", "turn_cap")
 
 #: The most retries one node may declare, and the largest factor its limit may grow by
 #: per retry. A bound, so a declared rule cannot hold a run for an unbounded time. Four

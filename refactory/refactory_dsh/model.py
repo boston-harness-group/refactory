@@ -465,15 +465,19 @@ def failure_kind(cause: str) -> str:
 
     ``output_limit``: the model used its whole output allowance without answering --
     the DSH runner's ``dsh: max-tokens:`` or the Claude Code adapter's
-    ``category: output-limit``. ``setup`` (`SETUP_FAILURE_MARKERS`): the next session
-    would be refused the same way. ``transport``: the wire or the provider failed, also
-    when a product result reports it (`PROVIDER_FAILURE_MARKERS`). Otherwise ``worker``:
-    the worker or the product failed. Only ``output_limit`` and ``worker`` are crashes a
-    node's retry answers (`node_retry.CRASH_KINDS`).
+    ``category: output-limit``. ``turn_cap``: the agent used its whole turn cap without
+    finishing -- the Claude Code adapter's ``category: limit``. ``setup``
+    (`SETUP_FAILURE_MARKERS`): the next session would be refused the same way.
+    ``transport``: the wire or the provider failed, also when a product result reports
+    it (`PROVIDER_FAILURE_MARKERS`). Otherwise ``worker``: the worker or the product
+    failed. ``output_limit``, ``turn_cap`` and ``worker`` are the kinds a node's retry
+    may answer (`node_retry.failure_kind`).
     """
     lowered = (cause or "").lower()
     if lowered.startswith("dsh: max-tokens:") or "category: output-limit" in lowered:
         return "output_limit"
+    if "category: limit" in lowered:
+        return "turn_cap"
     if any(marker in lowered for marker in SETUP_FAILURE_MARKERS):
         return "setup"
     if is_transport_failure(lowered) or any(marker in lowered for marker in PROVIDER_FAILURE_MARKERS):

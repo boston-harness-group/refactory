@@ -2117,11 +2117,14 @@ def composition_section(catalogue: Sequence[dict[str, Any]], node_states: Sequen
         "has no answer, and the item goes on without it (a gate after it sees no answer and "
         "may reloop; a fork's join sees that branch without one; a code op's `inp['files']` "
         "holds only the files that exist; an item left with nothing to grade scores 0).",
-        "- **crashes**: when the worker or product fails (not the model's own output), an "
-        "agent step in the per-item pass that is safe to rerun (no tools, its own report "
-        "files only, or a workspace) is run again in a fresh session, up to 2 more times; "
-        "if every session crashes it has no answer, as above. An item that times out is a "
-        f"{HARNESS_TIMEOUT}.",
+        "- **running out of turns**: an agent that uses its whole turn cap without finishing "
+        "is the model failing that question, like running out of output. It is not retried: "
+        "the step has no answer, and the item goes on without it, as above.",
+        "- **crashes**: when the worker or product fails (not the model's own output or turn "
+        "cap), an agent step in the per-item pass that is safe to rerun (no tools, its own "
+        "report files only, or a workspace) is run again in a fresh session, up to 2 more "
+        "times; if every session crashes it has no answer, as above. An item that times out "
+        f"is a {HARNESS_TIMEOUT}.",
     ]
     if {"parallel", "parallelize"} & ops:
         lines.append(
@@ -3275,6 +3278,7 @@ def pipeline_item_errors(records: Sequence[dict[str, Any]]) -> list[dict[str, An
 #: How the optimizer is told why a step gave no answer (`items.missing_steps` causes).
 NO_ANSWER_CAUSES = {
     "output_limit": "ran out of output without answering",
+    "turn_cap": "used its whole turn cap without finishing",
     "crash": "crashed in every session",
     "timeout": "timed out",
     "backstop": "was still writing at the session time limit (4 h by default)",
@@ -3338,7 +3342,7 @@ def _item_evidence(records: Sequence[dict[str, Any]]) -> list[str]:
         "## Item results of the candidate being edited",
         f"{len(records)} train item(s): {len(passed)} passed, {len(wrong)} answered "
         f"wrong, " + (f"{len(unanswered)} had no answer (a step ran out of output, "
-                      "crashed or ran over its own time limit), " if unanswered else "")
+                      "ran out of turns, crashed or ran over its own time limit), " if unanswered else "")
         + f"{len(errored)} failed with an error{'' if timed_out or kept else mean}. An error is the "
         "item's run failing (its cause is below), not a wrong answer.",
     ]
@@ -3366,8 +3370,9 @@ def _item_evidence(records: Sequence[dict[str, Any]]) -> list[str]:
         lines += [
             "",
             "No answer -- not a wrong answer: a step gave none, so the item was graded "
-            "without it. Running out of output is the model's own failure on the question "
-            "and is not retried; a crash is the worker's, retried in fresh sessions first:",
+            "without it. Running out of output or running out of turns is the model's own "
+            "failure on the question and is not retried; a crash is the worker's, retried "
+            "in fresh sessions first:",
             _table(["item", "step", "cause", "sessions"], rows[:ITEM_EVIDENCE_ROWS]),
         ]
         if len(rows) > ITEM_EVIDENCE_ROWS:
