@@ -1313,6 +1313,11 @@ def smoke(
         "    raise SystemExit(0)\n"
         f"{watch}"
         f"result = {evaluation}\n"
+        # Persist per-item records so the caller can read them (the walker keeps
+        # them in memory; the spine writes them itself).
+        f"_irp = Path({str(Path(workdir))!r}) / 'item_records.json'\n"
+        "if not _irp.exists() and getattr(result, 'item_records', None):\n"
+        "    _irp.write_text(json.dumps(list(result.item_records), default=str))\n"
         # The knob values the run used, so a comparison can say what differed (dm-263).
         # Reported after the run, so a mode that cannot report them still passes.
         "try:\n"
