@@ -104,6 +104,90 @@ def test_taking_over_a_step_that_runs_after_is_refused():
     assert reason and "does not run before the new step" in reason
 
 
+# ── 1b. sees refusals name producers, missing paths and valid placements ──
+
+
+def _skip_graph_state() -> dict:
+    """A graph with a gate whose proceed path goes through a producer and whose skip
+    path bypasses it: prepare → has_case; has_case --proceed--> work → finalize;
+    has_case --skip--> finalize.  ``work`` writes ``output.xlsx`` and produces
+    ``work_result``."""
+    from refactory_dsh.nn.graph import Node
+
+    g = Graph()
+    g.add(Node("prepare", "agent", prompt_template="Prepare"))
+    g.add(Node("has_case", "gate", evaluator="nn.operators:identity_gate",
+               max_iterations=1))
+    g.add(Node("work", "agent", prompt_template="Do work",
+               writes=["output.xlsx"], produces=["work_result"]))
+    g.add(Node("finalize", "agent", prompt_template="Finalize"))
+    g.connect("prepare", "has_case")
+    g.connect("has_case", "work", condition="proceed")
+    g.connect("work", "finalize")
+    g.connect("has_case", "finalize", condition="skip")
+    return {"graph": g.to_state(), "knobs": {}}
+
+
+def test_sees_file_not_on_every_path_names_producer_and_placement():
+    """A file in ``sees`` that exists in the graph but is missing on the skip path:
+    the refusal names the producer, the missing edge, and a valid placement."""
+    state = _skip_graph_state()
+    with pytest.raises(nn_edits.EditError) as exc:
+        nn_edits.apply({"op": "insert", "before": "finalize", "kind": "code",
+                        "sealed": True, "sees": ["output.xlsx"],
+                        "text": "def main(inp): pass"}, state)
+    msg = str(exc.value)
+    assert "produced by work" in msg
+    assert "has_case --skip--> finalize" in msg
+    assert '"after" one of [work]' in msg
+    assert "every path" in msg
+
+
+def test_sees_step_not_on_every_path_names_missing_edge_and_placement():
+    """A step id in ``sees`` whose outputs are not on every path: the refusal names
+    the missing edge and a valid placement, not just 'outputs are not there'."""
+    state = _skip_graph_state()
+    with pytest.raises(nn_edits.EditError) as exc:
+        nn_edits.apply({"op": "insert", "before": "finalize", "kind": "code",
+                        "sees": ["work"], "text": "def main(inp): pass"}, state)
+    msg = str(exc.value)
+    assert "has_case --skip--> finalize" in msg
+    assert '"after" one of [work]' in msg
+
+
+def test_sees_fact_not_on_every_path_names_producer_and_placement():
+    """A fact produced by a step on the proceed path only: the refusal names the
+    producer and the valid anchor."""
+    state = _skip_graph_state()
+    with pytest.raises(nn_edits.EditError) as exc:
+        nn_edits.apply({"op": "insert", "before": "finalize", "kind": "code",
+                        "sees": ["work_result"], "text": "def main(inp): pass"}, state)
+    msg = str(exc.value)
+    assert "produced by work" in msg
+    assert '"after" one of [work]' in msg
+
+
+def test_sees_nonexistent_name_says_no_step_produces_it():
+    """A name no step writes or produces: the refusal says so clearly."""
+    state = _skip_graph_state()
+    with pytest.raises(nn_edits.EditError) as exc:
+        nn_edits.apply({"op": "insert", "before": "finalize", "kind": "code",
+                        "sees": ["nonexistent"], "text": "def main(inp): pass"}, state)
+    msg = str(exc.value)
+    assert "no step produces it" in msg
+    assert "'sees' names 'nonexistent'" in msg
+
+
+def test_suggested_placement_is_accepted():
+    """The placement the refusal suggests (``"after": "work"``) is accepted when applied."""
+    state = _skip_graph_state()
+    after = nn_edits.apply({"op": "insert", "after": "work", "kind": "code",
+                            "sealed": True, "sees": ["output.xlsx"],
+                            "text": "def main(inp): pass", "id": "guard"}, state)
+    graph = Graph.from_state(after["graph"])
+    assert "guard" in graph.nodes
+
+
 # ── 2. a copy is sent what the step is sent ────────────────────────────────
 
 
