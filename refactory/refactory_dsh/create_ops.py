@@ -14,6 +14,7 @@ import os
 import re
 import shutil
 import sys
+import warnings
 from pathlib import Path
 from typing import Any
 
@@ -737,14 +738,21 @@ def _adopt_strategy_inputs(ctx: Any, raw_strategy: str) -> None:
     (set by ``prepare_create`` from ``--input``), the strategy's list is ignored.
     """
     brief = ctx.read_json("brief.json", {}) or {}
-    if brief.get("requires_input"):
+    if brief.get("requires_input_source") == "--input":
         return
     try:
         payload = json.loads(raw_strategy[raw_strategy.index("{"): raw_strategy.rindex("}") + 1])
     except (ValueError, json.JSONDecodeError):
         return
-    strategy_inputs = [str(name).strip() for name in (payload.get("inputs") or [])
-                       if str(name).strip()]
+    raw_inputs = payload.get("inputs")
+    if raw_inputs is not None and not isinstance(raw_inputs, list):
+        warnings.warn(
+            f"strategy 'inputs' must be a list, got {type(raw_inputs).__name__}; ignoring",
+            stacklevel=2,
+        )
+        return
+    strategy_inputs = [str(name).strip() for name in (raw_inputs or [])
+                       if isinstance(name, str) and str(name).strip()]
     if not strategy_inputs:
         return
     brief["requires_input"] = strategy_inputs

@@ -169,18 +169,18 @@ def _normal(value: Any) -> str:
 
 
 def infer_inputs(
-    described: dict[str, Any], samples: dict[str, str],
+    described: dict[str, Any],
     *, project: Path, run_root: Path,
 ) -> list[str]:
     """Knob names that are inputs, inferred from the mode's structure as a last resort.
 
     Called only when neither ``--input`` nor the plan declared any inputs.  A
-    ``required=True`` knob is inferred only when its value *and* its sample are both
-    empty or blank, or when its effective value is an existing input-like path
-    (`_looks_like_input`).  A required knob with a non-empty default that is not a
-    path into the project is a *setting* (``model_name``, ``api_endpoint``), never
-    an input.  A knob whose value only looks like a path is left for ``plan()``'s
-    ``undeclared`` list, which is inconclusive and never emptied.
+    ``required=True`` knob is inferred only when its value is empty or blank, or
+    when its effective value is an existing input-like path (`_looks_like_input`).
+    A required knob with a non-empty default that is not a path into the project is
+    a *setting* (``model_name``, ``api_endpoint``), never an input.  A knob whose
+    value only looks like a path is left for ``plan()``'s ``undeclared`` list, which
+    is inconclusive and never emptied.
 
     Data-node sources are handled separately by `plan`.
 
@@ -207,7 +207,7 @@ def infer_inputs(
 
 
 def _infer_reasons(
-    names: list[str], described: dict[str, Any], samples: dict[str, str],
+    names: list[str], described: dict[str, Any],
     *, project: Path, run_root: Path,
 ) -> list[str]:
     """Why each inferred name qualified, for the run warning."""
@@ -378,12 +378,12 @@ def run(
                 "reason": f"the mode could not be described, so the empty-input run did "
                           f"not start: {type(exc).__name__}: {exc}"}
     if not declared:
-        inferred_list = infer_inputs(described, samples, project=project,
+        inferred_list = infer_inputs(described, project=project,
                                      run_root=run_root or workdir)
         if inferred_list:
             declared = tuple(inferred_list)
             receipt["declared"] = list(declared)
-            reasons = _infer_reasons(inferred_list, described, samples, project=project,
+            reasons = _infer_reasons(inferred_list, described, project=project,
                                      run_root=run_root or workdir)
             target_guard.warn(
                 "the empty-input check inferred these inputs from the mode's structure "

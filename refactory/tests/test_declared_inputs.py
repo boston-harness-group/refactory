@@ -306,7 +306,7 @@ def test_config_knob_not_inferred(tmp_path, project):
         "data_nodes": [],
         "writes": [],
     }
-    result = infer_inputs(described, {}, project=tmp_path, run_root=tmp_path / "run")
+    result = infer_inputs(described, project=tmp_path, run_root=tmp_path / "run")
     assert result == [], f"no knob should be inferred: {result}"
 
 
@@ -319,7 +319,7 @@ def test_numeric_bool_enum_knobs_never_inferred(tmp_path, project):
         "data_nodes": [],
         "writes": [],
     }
-    result = infer_inputs(described, {}, project=tmp_path, run_root=tmp_path / "run")
+    result = infer_inputs(described, project=tmp_path, run_root=tmp_path / "run")
     assert result == []
 
 
@@ -363,7 +363,7 @@ def test_infer_inputs_required_not_in_writes(tmp_path):
         "data_nodes": [],
         "writes": ["results"],
     }
-    result = infer_inputs(described, {}, project=tmp_path, run_root=tmp_path / "run")
+    result = infer_inputs(described, project=tmp_path, run_root=tmp_path / "run")
     assert result == []
 
 
@@ -376,7 +376,7 @@ def test_infer_inputs_multiple_required(tmp_path):
         "data_nodes": [],
         "writes": [],
     }
-    result = infer_inputs(described, {}, project=tmp_path, run_root=tmp_path / "run")
+    result = infer_inputs(described, project=tmp_path, run_root=tmp_path / "run")
     assert result == ["input_dir", "query_text"]
 
 
@@ -484,7 +484,7 @@ def test_required_model_name_setting_not_inferred(tmp_path):
         "data_nodes": [],
         "writes": [],
     }
-    result = infer_inputs(described, {}, project=tmp_path, run_root=tmp_path / "run")
+    result = infer_inputs(described, project=tmp_path, run_root=tmp_path / "run")
     assert "model_name" not in result, (
         "a required setting with a non-empty default must not be inferred")
     assert "api_endpoint" not in result, (
@@ -505,7 +505,7 @@ def test_config_file_stays_undeclared_inconclusive_not_emptied(tmp_path, project
         "data_nodes": [],
         "writes": [],
     }
-    result = infer_inputs(described, {}, project=project, run_root=project / "run")
+    result = infer_inputs(described, project=project, run_root=project / "run")
     assert "config_file" not in result, (
         "a non-required knob must not be inferred even if its value is an input-like path")
     assert "input_dir" in result
@@ -528,6 +528,150 @@ def test_fallback_warning_appears(tmp_path, project, plates, capsys):
     assert "inferred" in captured.err, (
         "a run warning must name what the fallback inferred")
     assert "input_dir" in captured.err
+
+
+# ── adopt_strategy_inputs: reloop replaces plan inputs ───────────────────
+
+
+def _make_ctx(tmp_path, brief_payload=None):
+    """Lightweight gate context for _adopt_strategy_inputs tests."""
+
+    class Ctx:
+        def __init__(self):
+            self.workdir = tmp_path / "run"
+            self.workdir.mkdir(exist_ok=True)
+            self.facts = {"name": NAME, "requires_input": ""}
+            self.knobs = {"design_attempts": 2}
+        def knob(self, name, default=None):
+            return self.knobs.get(name, default)
+        def read_json(self, name, default=None):
+            path = self.workdir / name
+            return json.loads(path.read_text()) if path.exists() else default
+        def read_text(self, name):
+            return (self.workdir / name).read_text()
+        def write_json(self, name, payload):
+            (self.workdir / name).write_text(json.dumps(payload, default=str))
+        def write_text(self, name, text):
+            (self.workdir / name).write_text(text)
+        def set_fact(self, name, value):
+            self.facts[name] = value
+        def exists(self, name):
+            return (self.workdir / name).exists()
+
+    ctx = Ctx()
+    ctx.write_json("brief.json", brief_payload or {
+        "name": NAME, "brief": "analyse plates", "requires_input": []})
+    return ctx
+
+
+def _strategy_json(inputs):
+    return json.dumps({
+        "considered": [{"approach": "a", "why_not": ""}],
+        "chosen": "a", "why": "simpler", "will_not": [], "closest_existing": "none",
+        "knobs": [{"name": "input_dir", "kind": "str", "default": "",
+                   "description": "folder", "required": True}],
+        "nodes": [{"id": "analyse", "kind": "op", "call": "ops:analyse",
+                   "knobs": ["input_dir"], "writes": ["report.json"],
+                   "produces": ["rows"]}],
+        "edges": [], "start": "analyse", "score": "rows",
+        "inputs": inputs,
+        "findings": {},
+    })
+
+
+def test_reloop_second_plan_replaces_first(tmp_path):
+    """On a reloop, a second strategy's inputs replace the first plan's."""
+    from refactory_dsh.create_ops import _adopt_strategy_inputs
+
+    ctx = _make_ctx(tmp_path)
+    _adopt_strategy_inputs(ctx, _strategy_json(["input_dir"]))
+    brief = ctx.read_json("brief.json", {})
+    assert brief["requires_input"] == ["input_dir"]
+    assert brief["requires_input_source"] == "plan"
+
+    _adopt_strategy_inputs(ctx, _strategy_json(["query_text"]))
+    brief = ctx.read_json("brief.json", {})
+    assert brief["requires_input"] == ["query_text"], (
+        "the second plan's inputs must replace the first plan's")
+    assert brief["requires_input_source"] == "plan"
+
+
+def test_input_flag_wins_over_plan_on_reloop(tmp_path):
+    """--input (requires_input_source == '--input') blocks adoption on reloop."""
+    from refactory_dsh.create_ops import _adopt_strategy_inputs
+
+    ctx = _make_ctx(tmp_path, {
+        "name": NAME, "brief": "analyse plates",
+        "requires_input": ["user_file"],
+        "requires_input_source": "--input",
+    })
+    _adopt_strategy_inputs(ctx, _strategy_json(["input_dir"]))
+    brief = ctx.read_json("brief.json", {})
+    assert brief["requires_input"] == ["user_file"], (
+        "--input must win: plan cannot overwrite CLI-declared inputs")
+    assert brief["requires_input_source"] == "--input"
+
+
+# ── adopt_strategy_inputs: type safety on inputs ────────────────────────
+
+
+def test_string_inputs_ignored_with_warning(tmp_path):
+    """A string 'inputs' in the strategy is ignored (not split into chars)."""
+    from refactory_dsh.create_ops import _adopt_strategy_inputs
+    import warnings as _warnings
+
+    ctx = _make_ctx(tmp_path)
+    with _warnings.catch_warnings(record=True) as caught:
+        _warnings.simplefilter("always")
+        _adopt_strategy_inputs(ctx, _strategy_json("input_dir"))
+    brief = ctx.read_json("brief.json", {})
+    assert not brief.get("requires_input"), (
+        "a string 'inputs' must not be adopted (would split into characters)")
+    assert any("must be a list" in str(w.message) for w in caught), (
+        "a warning must be emitted for a non-list 'inputs'")
+
+
+def test_dict_inputs_ignored_with_warning(tmp_path):
+    """A dict 'inputs' in the strategy is ignored."""
+    from refactory_dsh.create_ops import _adopt_strategy_inputs
+    import warnings as _warnings
+
+    ctx = _make_ctx(tmp_path)
+    raw = json.dumps({
+        "considered": [{"approach": "a", "why_not": ""}],
+        "chosen": "a", "why": "simpler", "will_not": [], "closest_existing": "none",
+        "knobs": [], "nodes": [], "edges": [], "start": "x", "score": "y",
+        "inputs": {"key": "val"},
+        "findings": {},
+    })
+    with _warnings.catch_warnings(record=True) as caught:
+        _warnings.simplefilter("always")
+        _adopt_strategy_inputs(ctx, raw)
+    brief = ctx.read_json("brief.json", {})
+    assert not brief.get("requires_input"), (
+        "a dict 'inputs' must not be adopted")
+    assert any("must be a list" in str(w.message) for w in caught)
+
+
+def test_list_with_non_strings_filtered(tmp_path):
+    """Non-string items in the inputs list are silently dropped."""
+    from refactory_dsh.create_ops import _adopt_strategy_inputs
+
+    ctx = _make_ctx(tmp_path)
+    raw = json.dumps({
+        "considered": [{"approach": "a", "why_not": ""}],
+        "chosen": "a", "why": "simpler", "will_not": [], "closest_existing": "none",
+        "knobs": [], "nodes": [], "edges": [], "start": "x", "score": "v",
+        "inputs": ["good_name", 42, None, "", {"nested": True}],
+        "findings": {},
+    })
+    _adopt_strategy_inputs(ctx, raw)
+    brief = ctx.read_json("brief.json", {})
+    assert brief.get("requires_input") == ["good_name"], (
+        "only non-empty string items survive filtering")
+
+
+# ── produced_results ─────────────────────────────────────────────────────
 
 
 def test_produced_results_filters_empty_root_and_items_override(tmp_path):
