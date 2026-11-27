@@ -900,8 +900,8 @@ def harness_incident(record: dict[str, Any]) -> bool:
 
 def missing_steps(pass_dir: Path) -> dict[str, dict[str, Any]]:
     """The steps a pass went on without, each with why: ``cause`` (``output_limit``,
-    ``crash``, ``timeout``, ``invented_tool_calls``; for an optional branch, ``backstop``,
-    ``declared_timeout`` or ``timeout`` when it timed out so, else ``failed``:
+    ``turn_cap``, ``crash``, ``timeout``, ``invented_tool_calls``; for an optional branch,
+    ``backstop``, ``declared_timeout`` or ``timeout`` when it timed out so, else ``failed``:
     `node_retry.missing_cause`), ``sessions`` (how many ran, when known) and ``error``. From ``reviews/<step>-missing.txt``, which both runtimes
     write (`nn.fork._record_missing`, `worker_node.main`), and the step's
     `node_retry.record_spent` record. A map's run the list had no element for is left
