@@ -1681,3 +1681,42 @@ def test_step_cap_allows_each_items_reloops(tmp_path, parallelism):
     assert result.item_records == []
     attempts = [json.loads(p.read_text()) for p in (tmp_path / "run").glob("passes/data/*/attempts.json")]
     assert sorted(attempts) == [5] * 6
+
+
+# ── D9: 20+ items complete cleanly on the walker ─────────────────────────
+
+@pytest.mark.parametrize("parallelism", [1, 4])
+def test_twenty_items_complete_on_walker(tmp_path, monkeypatch, parallelism):
+    """D9 — a data node with 20 items finishes cleanly, at any parallelism."""
+    N = 20
+    visited_dir = tmp_path / "visited"
+    visited_dir.mkdir()
+    monkeypatch.setenv("VISITED_DIR", str(visited_dir))
+
+    items = tuple({"id": str(i)} for i in range(N))
+    graph = _data_graph("_ops_data_parallel", "noop_op", items=items,
+                        parallelism=parallelism)
+    result = execute(graph, tmp_path / "run", max_steps=200)
+
+    assert result.exit_ok, result.error
+    assert len(list(visited_dir.glob("*"))) == N
+
+
+def test_twenty_items_finish_on_spine_loader(tmp_path):
+    """D9 — command_finish returns valid JSON with 20 items (the spine parses it)."""
+    from refactory_dsh.items import (
+        command_begin, command_end, command_finish, command_prepare,
+    )
+
+    N = 20
+    run, node = _loader_run(tmp_path, tuple(str(i) for i in range(N)))
+    command_prepare(node, run, requested=N)
+    for index in range(N):
+        command_begin(node, run, index, concurrent=True)
+        command_end(node, run, index, concurrent=True)
+    finished = command_finish(node, run)
+    output = json.dumps(finished, default=str)
+    # The JSON the spine parses must be valid.
+    parsed = json.loads(output)
+    assert isinstance(parsed, dict)
+    assert len(parsed["records"]) == N

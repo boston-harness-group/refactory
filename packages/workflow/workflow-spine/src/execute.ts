@@ -247,6 +247,15 @@ async function runSpec(shell: ShellExecutor, spec: ShellExecSpec): Promise<Shell
 }
 
 /**
+ * Stdout capture budget for data-node commands (`list`, `begin`, `end`,
+ * `prepare`, `finish`).  `finish` returns every item's record in one JSON
+ * object; at 20+ items the output can exceed the shell's default cap, whose
+ * tail-only truncation breaks the parse.  8 MiB matches the runtime bridge's
+ * maxBuffer and is well above what a 100-item benchmark produces.
+ */
+const DATA_STDOUT_MAX_BYTES = 8 * 1024 * 1024
+
+/**
  * The item command a data node runs: one verb of its loader, naming the node.
  *
  * The loader is deployment state (`dataCommand`), not graph structure: the graph
@@ -306,7 +315,9 @@ export async function runDataCommand(
 ): Promise<{ ok: true; value: Record<string, unknown> } | CommandFailure> {
   const command = dataCommandOf(node, verb, config, index, failedReason, failedKind, extra)
   const allowance = resourceCheck(node, config)
-  const resolved = shell.resolve(requestFor(node, command, config))
+  const request = requestFor(node, command, config)
+  request.stdoutMaxBytes = DATA_STDOUT_MAX_BYTES
+  const resolved = shell.resolve(request)
   const spec = allowance === undefined ? resolved : { ...resolved, timeoutMs: Math.min(resolved.timeoutMs, allowance) }
   const result = await runSpec(shell, spec)
   resourceCheck(node, config)
@@ -320,16 +331,17 @@ export async function runDataCommand(
   if (result.exitCode !== 0) {
     return { ...base, ok: false, error: `${node.id} ${verb} exited with code ${String(result.exitCode)}` }
   }
+  if (result.stdout.truncated) {
+    return { ...base, ok: false, error: `${node.id} ${verb} produced ${String(stdout.length)} bytes of output (truncated), not parseable as JSON` }
+  }
   try {
     const value: unknown = JSON.parse(stdout)
     if (value === null || typeof value !== 'object' || Array.isArray(value)) {
-      return { ...base, ok: false, error: `${node.id} ${verb} printed ${stdout}, not a JSON object` }
+      return { ...base, ok: false, error: `${node.id} ${verb} printed ${String(stdout.length)} bytes, not a JSON object` }
     }
     return { ok: true, value: value as Record<string, unknown> }
   } catch {
-    // The loader's stdout is its answer, so unparseable output is the failure: a
-    // command that printed a usage line exited 0 somewhere it should not have.
-    return { ...base, ok: false, error: `${node.id} ${verb} printed ${stdout}, not JSON` }
+    return { ...base, ok: false, error: `${node.id} ${verb} printed ${String(stdout.length)} bytes, not JSON` }
   }
 }
 
