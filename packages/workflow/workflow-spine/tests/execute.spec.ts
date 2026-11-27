@@ -4,7 +4,7 @@ import { join, resolve } from 'node:path'
 import { spawnSync } from 'node:child_process'
 import { describe, expect, it } from 'vitest'
 import type { ShellExecution, ShellExecRequest, ShellExecSpec, ShellExecutor, ShellRunResult } from '@deepseek-ai/dsh-shell'
-import { commandOf, isDeterministic, NODE_ENV_KEY, REASON_LIMIT, reasonOf, runDeterministic, runWarningsOf, verdictOf } from '../src/execute.ts'
+import { commandOf, isDeterministic, NODE_ENV_KEY, REASON_LIMIT, reasonOf, runDataCommand, runDeterministic, runWarningsOf, verdictOf } from '../src/execute.ts'
 import type { CommandFailure, CommandOutcome, CommandRunnerConfig, NodeManifest } from '../src/execute.ts'
 import { Spine } from '../src/spine.ts'
 import type { NodeView } from '../src/spine.ts'
@@ -395,5 +395,86 @@ describe('reading the run warnings a completed node printed', () => {
     expect(runWarningsOf('refactory: warning: credential readiness is unverified')).toEqual([])
     expect(runWarningsOf('/x/y.py:3: DeprecationWarning: old API\nUserWarning: noisy')).toEqual([])
     expect(runWarningsOf('')).toEqual([])
+  })
+})
+
+// ── D9/D10: data command error messages never contain item text ──────────
+
+describe('runDataCommand error messages', () => {
+  const dataConfig: CommandRunnerConfig & { dataCommand: string } = {
+    dataCommand: 'python -m refactory_dsh.items',
+    env: {},
+    timeoutMs: 10_000,
+  }
+
+  function dataNode(): NodeView {
+    const graph: WorkflowGraph = {
+      name: 'test',
+      start_node: 'data',
+      nodes: {
+        data: { _type: 'DataNode', id: 'data', task_ref: 'probe', subgraph_entry: 'work', subgraph_exit: 'work', reads: [], writes: [] },
+        work: { _type: 'FnNode', id: 'work', command: 'true', reads: [], writes: [] },
+      },
+      edges: [],
+    }
+    return new Spine(graph, { maxIterations: 1 }).view('data')
+  }
+
+  function shellWith(stdout: string, truncated: boolean): ShellExecutor {
+    return {
+      resolve(request: ShellExecRequest): ShellExecSpec {
+        return {
+          command: request.command,
+          workdir: request.workdir ?? process.cwd(),
+          timeoutMs: request.timeoutMs ?? 10_000,
+          onExpiry: 'kill',
+          stdoutMaxBytes: request.stdoutMaxBytes ?? 1_000_000,
+          sandboxPolicy: undefined,
+        }
+      },
+      async execute(_spec: ShellExecSpec): Promise<ShellExecution> {
+        const result: ShellRunResult = {
+          exitCode: 0,
+          signal: null,
+          timedOut: false,
+          aborted: false,
+          timeoutMs: 10_000,
+          stdout: { text: stdout, truncated },
+          stderr: { text: '', truncated: false },
+        }
+        return { result: async () => result } as unknown as ShellExecution
+      },
+    } as unknown as ShellExecutor
+  }
+
+  it('reports byte count, not item text, when output is not JSON', async () => {
+    const itemText = 'The secret answer is 42 and the proof is ...'
+    const shell = shellWith(itemText, false)
+    const result = await runDataCommand(shell, dataNode(), 'end', dataConfig, 0)
+    expect(result.ok).toBe(false)
+    if (!result.ok) {
+      expect(result.error).not.toContain(itemText)
+      expect(result.error).toContain('bytes')
+    }
+  })
+
+  it('reports byte count, not item text, when output is not an object', async () => {
+    const shell = shellWith('"a string with secrets"', false)
+    const result = await runDataCommand(shell, dataNode(), 'end', dataConfig, 0)
+    expect(result.ok).toBe(false)
+    if (!result.ok) {
+      expect(result.error).not.toContain('secrets')
+      expect(result.error).toContain('bytes')
+    }
+  })
+
+  it('reports truncation rather than a parse error when stdout was truncated', async () => {
+    const shell = shellWith('"records": []}', true)
+    const result = await runDataCommand(shell, dataNode(), 'finish', dataConfig)
+    expect(result.ok).toBe(false)
+    if (!result.ok) {
+      expect(result.error).toContain('truncated')
+      expect(result.error).not.toContain('"records"')
+    }
   })
 })
