@@ -1078,3 +1078,43 @@ def test_the_decision_record_fails_on_a_changed_message(monkeypatch):
     new = sf.generate_record()
     diffs = sf.diff_records(old, new)
     assert diffs, "the record should have detected the message change"
+
+
+def test_mutation_takeover_false_no_outputs_is_caught(monkeypatch):
+    """When ``_take_over_plan`` claims 'has no outputs to take over' for a step that
+    does have outputs, the ``refusal_names`` invariant catches the lie."""
+    from refactory_dsh.nn import core_ops
+
+    original = core_ops._take_over_plan
+
+    def sabotaged(graph, state, target_id, side, anchor, *, only=None):
+        if isinstance(target_id, str) and target_id in graph.nodes:
+            target = graph.nodes[target_id]
+            if target.kind not in ("agent", "op"):
+                raise core_ops._Refused(
+                    f"{target_id!r} is a {target.kind}; only agent or op steps can be taken over")
+            raise core_ops._Refused(f"{target_id!r} has no outputs to take over")
+        return original(graph, state, target_id, side, anchor, only=only)
+
+    monkeypatch.setattr(core_ops, "_take_over_plan", sabotaged)
+    _finds("refusal_names", seeds=("fuzz_dataflow", "fuzz_draft_review", "fuzz_skip_path"))
+
+
+def test_mutation_compound_refusal_names_are_checked(monkeypatch):
+    """Compound refusal messages with the ``[edit N of M: op]`` tag are stripped and
+    checked against the intermediate state: a false kind claim is caught."""
+    from refactory_dsh.nn import core_ops
+
+    def sabotaged(graph, node_id, what):
+        node = core_ops._require_step(graph, node_id)
+        if node.kind not in ("agent", "op"):
+            raise core_ops._Refused(
+                f"{node.id!r} is a agent; {what} works on a step (agent, op or code)")
+        return node
+
+    monkeypatch.setattr(core_ops, "_plain_step", sabotaged)
+    fuzzer = sf.Fuzzer(42, walker=False, compound=0.5,
+                       seed_names=("fuzz_gates", "fuzz_draft_review"))
+    fuzzer.run(300)
+    assert fuzzer.stats.refusal_hits["refusal_names"] > 0, (
+        "compound refusals should be checked and find the false kind claim")

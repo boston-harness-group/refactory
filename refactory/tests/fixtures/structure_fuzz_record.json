@@ -601,18 +601,16 @@
     {
       "decision": "refused",
       "edit": {
-        "name": "k4",
-        "op": "add_knob",
-        "spec": {
-          "default": "x",
-          "kind": "str"
-        }
+        "after": "raw2",
+        "kind": "agent",
+        "op": "insert",
+        "takes_over": "plot_revise"
       },
       "reason_codes": [
-        "V7"
+        "E-precondition"
       ],
       "reasons": [
-        "V7 [k4]: knob is declared but no node consumes it, so moving it cannot change the run"
+        "E-precondition: 'plot_revise' does not run before the new step on every path to it (produced by plot_revise; missing on the plot_route --proceed--> describe path; \"after\" one of [plot_revise] would reach it); 'takes_over' names a step every run passes before the new one (not a step after it, on a sibling branch or on a branch a route can skip)"
       ],
       "seed_name": "fuzz_file_output",
       "step": 5
@@ -620,17 +618,18 @@
     {
       "decision": "refused",
       "edit": {
-        "op": "rewire",
+        "after": "ship",
+        "kind": "agent",
+        "op": "insert",
         "sees": [
-          "ship"
-        ],
-        "step": "plot_route_judge_inputs"
+          "finished"
+        ]
       },
       "reason_codes": [
-        "E-precondition"
+        "E-unread"
       ],
       "reasons": [
-        "E-precondition: 'plot_route_judge_inputs' is a plain op: what it reads is what its callable reads. Rewire an agent or a code step"
+        "E-unread: nothing reads the output of new step 'ship_next', so it changes no result (give it 'takes_over': describe)"
       ],
       "seed_name": "fuzz_file_output",
       "step": 6
@@ -1554,27 +1553,16 @@
     {
       "decision": "refused",
       "edit": {
-        "id": "start",
-        "op": "remove_node"
+        "after": "finalize",
+        "kind": "agent",
+        "op": "insert",
+        "takes_over": "op3"
       },
       "reason_codes": [
-        "V1",
-        "V2",
-        "V6"
+        "E-precondition"
       ],
       "reasons": [
-        "V1: the graph declares no start node",
-        "V2 [agent4]: node is not reachable from the start node",
-        "V2 [code5]: node is not reachable from the start node",
-        "V2 [finalize]: node is not reachable from the start node",
-        "V2 [has_case]: node is not reachable from the start node",
-        "V2 [op3]: node is not reachable from the start node",
-        "V2 [process]: node is not reachable from the start node",
-        "V2 [process_fork]: node is not reachable from the start node",
-        "V2 [process_join]: node is not reachable from the start node",
-        "V6 [has_case]: reads 'brief.txt', which no node on a path from '' to a terminal produces",
-        "V6 [op3]: reads 'brief.txt', which no node on a path from '' to a terminal produces",
-        "V6 [process]: reads 'brief.txt', which no node on a path from '' to a terminal produces"
+        "E-precondition: 'op3' does not run before the new step on every path to it (missing on the has_case --skip--> finalize path); 'takes_over' names a step every run passes before the new one (not a step after it, on a sibling branch or on a branch a route can skip)"
       ],
       "seed_name": "fuzz_skip_path",
       "step": 3
@@ -1603,19 +1591,9 @@
       "step": 4
     },
     {
-      "decision": "accepted",
-      "edit": {
-        "fork": "process_fork",
-        "op": "serialize"
-      },
-      "seed_name": "fuzz_skip_path",
-      "state_id": "147e88738ab7",
-      "step": 5
-    },
-    {
       "decision": "refused",
       "edit": {
-        "after": "has_case",
+        "after": "process_fork",
         "kind": "agent",
         "op": "insert",
         "sees": [
@@ -1626,19 +1604,41 @@
         "E-precondition"
       ],
       "reasons": [
-        "E-precondition: 'has_case' is a gate whose out-edges carry verdicts; insert before the step a verdict leads to"
+        "E-precondition: 'process_fork' is a fork; add a step beside its branches with 'branch', or insert after one of its branches"
+      ],
+      "seed_name": "fuzz_skip_path",
+      "step": 5
+    },
+    {
+      "decision": "refused",
+      "edit": {
+        "judge": "code",
+        "op": "loop",
+        "step": "process_fork"
+      },
+      "reason_codes": [
+        "E-precondition"
+      ],
+      "reasons": [
+        "E-precondition: 'process_fork' is a fork; loop works on a step (agent, op or code)"
       ],
       "seed_name": "fuzz_skip_path",
       "step": 6
     },
     {
-      "decision": "accepted",
+      "decision": "refused",
       "edit": {
-        "op": "duplicate",
-        "target": "finalize"
+        "fork": "process_fork",
+        "kind": "code",
+        "op": "branch"
       },
+      "reason_codes": [
+        "E-unread"
+      ],
+      "reasons": [
+        "E-unread: nothing reads the output of new step 'process_fork_branch', so it changes no result (no step can read it)"
+      ],
       "seed_name": "fuzz_skip_path",
-      "state_id": "2e95b01e3d97",
       "step": 7
     },
     {
@@ -1787,15 +1787,16 @@
     {
       "decision": "refused",
       "edit": {
-        "kind": "code",
-        "op": "fallback",
-        "step": "reason_d1"
+        "after": "reason_d1",
+        "kind": "agent",
+        "op": "insert",
+        "takes_over": "ship_c2"
       },
       "reason_codes": [
         "E-precondition"
       ],
       "reasons": [
-        "E-precondition: 'reason_d1' runs outside any per-item pass; a fallback answers for a step that runs once per item"
+        "E-precondition: 'ship_c2' does not run before the new step on every path to it (missing on the intake --> gather path); 'takes_over' names a step every run passes before the new one (not a step after it, on a sibling branch or on a branch a route can skip)"
       ],
       "seed_name": "fuzz_tool_step",
       "step": 5
