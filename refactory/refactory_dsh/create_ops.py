@@ -1862,6 +1862,27 @@ def _given_holdout(ctx: Any) -> float | None:
     return value
 
 
+def _check_manifest_disjoint(manifest: dict[str, Any], source: str) -> None:
+    """Refuse a parts manifest whose train, val and test share items.
+
+    Extraction candidate: the outer loop checks this inline in
+    ``Loop._load_parts_manifest`` (loop.py); this standalone version lets
+    create mode call it without a Loop instance.
+    """
+    from refactory_dsh import task as task_module
+
+    parts = {k: [str(x) for x in v] for k, v in manifest.items() if isinstance(v, list)}
+    names = [n for n in (task_module.TRAIN, task_module.VAL, task_module.TEST) if n in parts]
+    for index, first in enumerate(names):
+        for second in names[index + 1:]:
+            shared = set(parts[first]) & set(parts[second])
+            if shared:
+                raise SplitRefused(
+                    f"parts_manifest {source!r}: {first} and {second} share items "
+                    f"{sorted(shared)}; train, val and test must be disjoint"
+                )
+
+
 def _smoke_split(ctx: Any) -> tuple[dict[str, Any], dict[str, Any]]:
     """The split the produced mode's real runs use, for `sandbox.smoke`'s sample, and a
     record of it for ``smoke.json``.
@@ -1919,6 +1940,7 @@ def _smoke_split(ctx: Any) -> tuple[dict[str, Any], dict[str, Any]]:
         raise SplitRefused(f"parts_manifest {source!r} ({path}) cannot be read as JSON: {exc}") from exc
     if not isinstance(manifest, dict) or not task_module.manifest_part_ids(manifest, task_module.TRAIN):
         raise SplitRefused(f"parts_manifest {source!r} names no train ids for the smoke to sample")
+    _check_manifest_disjoint(manifest, source)
     record["parts_manifest"] = str(path)
     copy = ctx.workdir / SMOKE_PARTS
     copy.write_text(json.dumps(manifest, indent=2))
@@ -1974,6 +1996,66 @@ def _model_context(ctx: Any) -> dict[str, str]:
     return (client if isinstance(client, DshModelClient) else DshModelClient()).context()
 
 
+def _read_smoke_item_records(workdir: Path) -> list[dict[str, Any]]:
+    """Read per-item records the sandbox wrote (walker or spine)."""
+    path = workdir / "item_records.json"
+    if not path.exists():
+        return []
+    try:
+        records = json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError):
+        return []
+    return records if isinstance(records, list) else []
+
+
+def _settle_smoke_incidents(
+    item_records: list[dict[str, Any]],
+    identifier: str,
+    workdir: Path,
+    *,
+    project: Path,
+    model: bool,
+    knobs: dict[str, Any] | None,
+    model_context: dict[str, str],
+    timeout_s: int,
+) -> tuple[set[str], list[dict[str, Any]]]:
+    """Rerun harness-incident items, return ``(excluded ids, updated records)``.
+
+    Reuses `items.harness_incident` to identify incidents and
+    `loop.INCIDENT_RERUNS` for the retry cap. Each rerun calls
+    `sandbox.smoke` with a manifest containing only the incident ids.
+    """
+    from refactory_dsh import sandbox
+    from refactory_dsh import task as task_module
+    from refactory_dsh.items import harness_incident
+    from refactory_dsh.loop import INCIDENT_RERUNS
+
+    remaining = list(dict.fromkeys(
+        str(r.get("id")) for r in item_records if harness_incident(r)))
+    if not remaining:
+        return set(), item_records
+    records = list(item_records)
+    for attempt in range(1, INCIDENT_RERUNS + 1):
+        if not remaining:
+            break
+        rerun_dir = workdir / "incident_reruns" / str(attempt)
+        rerun_dir.mkdir(parents=True, exist_ok=True)
+        manifest_path = rerun_dir / task_module.MANIFEST
+        manifest_path.write_text(json.dumps({task_module.TRAIN: remaining}))
+        rerun = sandbox.smoke(
+            identifier, rerun_dir, project=project, model=model,
+            knobs=knobs, model_context=model_context, timeout_s=timeout_s,
+            smoke_items=0, holdout=0, parts_manifest=manifest_path,
+        )
+        fresh_records = _read_smoke_item_records(rerun_dir)
+        fresh = {str(r.get("id")): r for r in fresh_records}
+        records = [{**fresh[str(r.get("id"))], "incident_reruns": attempt}
+                   if str(r.get("id")) in fresh else r for r in records]
+        remaining = [i for i in remaining
+                     if i not in fresh or harness_incident(fresh[i])]
+    return set(remaining), records
+
+
 def _smoke_timeout_record(result: Any, identifier: str, workdir: Path, *, model: bool) -> dict[str, Any]:
     """Describe an incomplete pass without claiming a score or model request occurred."""
     return {
@@ -2024,7 +2106,38 @@ def smoke(ctx: Any) -> dict[str, Any]:
     )
     error = result.problem() if not result.ok else str(result.payload.get("error") or "")
     refused = bool(result.payload.get("sample_refused"))
-    ok = result.ok and result.payload.get("exit_ok") is not False and not refused
+    exit_ok = result.payload.get("exit_ok")
+    # --- harness-incident retry and per-item error check ---
+    item_records = _read_smoke_item_records(workdir)
+    excluded_ids: set[str] = set()
+    item_errors: list[dict[str, Any]] = []
+    had_incidents = False
+    if item_records and result.ok and not refused:
+        if exit_ok is not False:
+            excluded_ids, item_records = _settle_smoke_incidents(
+                item_records, identifier, workdir, project=project_for_nodes(),
+                model=bool(agent_nodes), knobs=samples or None,
+                model_context=context, timeout_s=timeout_s,
+            )
+        had_incidents = bool(excluded_ids) or any(
+            r.get("incident_reruns") for r in item_records)
+    if item_records:
+        from refactory_dsh.optim.base import pipeline_item_errors
+        active = [r for r in item_records if str(r.get("id")) not in excluded_ids]
+        item_errors = pipeline_item_errors(active)
+    if item_errors:
+        ok = False
+        error = error or "; ".join(
+            f"{e['kind']}" + (f" at node {e['node']}" if e.get("node") else "")
+            + f" (item {e.get('item')}): {e.get('first')}"
+            for e in item_errors[:2])
+    elif excluded_ids and not [r for r in item_records if str(r.get("id")) not in excluded_ids]:
+        ok = False
+        error = error or "every item was a harness incident"
+    elif had_incidents or excluded_ids:
+        ok = result.ok and exit_ok is not False and not refused
+    else:
+        ok = result.ok and exit_ok is not False and not refused
     # Determine timeout_kind: prefer the outer SandboxResult's kind; fall back to payload.
     _timeout_kind = result.timeout_kind or result.payload.get("timeout_kind") or None
     sample = result.payload.get("sample") or {}
@@ -2044,6 +2157,8 @@ def smoke(ctx: Any) -> dict[str, Any]:
         "split": split_record,
         "sampled_items": sample.get("per_node"),
         "warnings": warnings,
+        "incident_reruns": {"excluded": sorted(excluded_ids)} if excluded_ids else None,
+        "item_errors": item_errors or None,
         "status": ("pass" if ok else "split_refused" if refused else
                    failure_kind(error, timed_out=result.timed_out, returncode=result.returncode)),
     }

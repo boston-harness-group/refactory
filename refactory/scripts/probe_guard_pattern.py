@@ -1,7 +1,7 @@
 """End-to-end probe: code steps read and write their declared files.
 
 Applies edits in the exact JSON op form a proposer sends, via the same edit
-path the loop uses, to the real spreadsheetbench_v2/steps seed graph.  Six
+path the loop uses, to the real spreadsheetbench_v2/steps seed graph.  Eight
 patterns:
 
 A. After implement, insert a sealed code step that reads input.xlsx,
@@ -20,6 +20,21 @@ D. A route after implement whose "revise" way has a step that takes_over
 E. A parallel fork of two new agent steps after plan.
 
 F. A loop around implement with an agent+tools judge.
+
+G. After verify, insert a sealed code guard that takes over verify's
+   output.xlsx.  verify both reads and writes output.xlsx (a read-modify-write
+   pattern); the takeover must rename only verify's write, keeping implement's
+   write (verify's read source) under the original name.
+
+H. After implement, insert a sealed code step importing openpyxl.  The
+   code-run pre-check (``E-code-run``) must skip it (not refuse), since sealed
+   steps run in the Task's tool environment with no import allowlist.
+
+I. A sealed code fallback for the implement step: if implement fails, the
+   fallback runs sealed code that writes the same outputs.
+
+J. A sealed code step as a new branch of the fork around implement
+   (parallelized first to get a fork).
 
 For each, the probe shows:
   - the edit is accepted, with no false refusal;
@@ -259,6 +274,131 @@ def pattern_f(state: dict) -> dict:
     return nn_edits.apply(edit, state)
 
 
+# ── Pattern G: sealed code guard AFTER verify (read-modify-write) ───────
+
+VERIFY_GUARD_CODE = '''\
+import openpyxl
+
+def main(inp):
+    """Re-check the corrected output: restore stray cells verify introduced."""
+    wb = openpyxl.load_workbook("output.xlsx")
+    sheets = wb.sheetnames
+    wb.save("output.xlsx")
+    return {"facts": {"sheets_checked": len(sheets)}}
+'''
+
+
+def pattern_g(state: dict) -> dict:
+    """Insert a sealed code guard AFTER verify that takes over verify's output.xlsx.
+
+    verify both reads and writes output.xlsx (a read-modify-write pattern).
+    The takeover must rename only verify's WRITE; implement's write (verify's
+    read source) must stay under the original name.
+    """
+    edit = {
+        "op": "insert", "after": "verify", "kind": "code",
+        "id": "recheck_guard",
+        "text": VERIFY_GUARD_CODE,
+        "sealed": True,
+        "sees": ["output.xlsx"],
+        "produces": ["sheets_checked"],
+        "takes_over": ["verify", "output.xlsx"],
+    }
+    return nn_edits.apply(edit, state)
+
+
+# ── Pattern H: sealed code step (openpyxl) passes code-run pre-check ───
+
+
+def pattern_h(state: dict) -> dict:
+    """Insert a sealed code step importing openpyxl.  The edit is accepted and
+    ``code_dry_run`` skips it (not refuses), since sealed steps are exempt from
+    the V18 import allowlist."""
+    from refactory_dsh.optim.checks import code_dry_run
+
+    edit = {
+        "op": "insert", "after": "implement", "kind": "code",
+        "id": "openpyxl_guard",
+        "text": GUARD_CODE,
+        "sealed": True,
+        "produces": ["restored_cells"],
+        "takes_over": ["implement", "output.xlsx"],
+    }
+    result = nn_edits.apply(edit, state)
+
+    refusals, notes = code_dry_run("parent", state, result, ["openpyxl_guard"],
+                                   recorded=lambda _: {})
+    if refusals:
+        raise RuntimeError(f"code_dry_run refused sealed step: {refusals}")
+    if not any("sealed script step" in n for n in notes):
+        raise RuntimeError(f"expected sealed skip note, got: {notes}")
+    return result
+
+
+# ── Pattern I: sealed code fallback ───────────────────────────────────────
+
+FALLBACK_CODE = '''\
+import openpyxl, json
+
+def main(inp):
+    """Fallback: write a minimal output.xlsx when implement fails."""
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "Sheet1"
+    ws["A1"] = "fallback"
+    wb.save("output.xlsx")
+    return {"facts": {"implement": "fallback"}}
+'''
+
+
+def pattern_i(state: dict) -> dict:
+    """A sealed code fallback for the implement step."""
+    edit = {
+        "op": "fallback", "step": "implement", "kind": "code",
+        "text": FALLBACK_CODE,
+        "sealed": True,
+    }
+    return nn_edits.apply(edit, state)
+
+
+# ── Pattern J: sealed code branch ────────────────────────────────────────
+
+
+BRANCH_CODE = '''\
+import openpyxl
+
+def main(inp):
+    """Read input.xlsx via openpyxl and produce a summary."""
+    wb = openpyxl.load_workbook("input.xlsx")
+    return {"facts": {"branch_sheets": len(wb.sheetnames)}}
+'''
+
+
+def pattern_j(state: dict) -> dict:
+    """A sealed code step as a branch of a fork around implement.
+
+    First parallelizes implement to create a fork, then adds a sealed code
+    branch to that fork.  The branch reads input.xlsx (available before the
+    fork) rather than output.xlsx (written by implement, not yet available
+    to a parallel branch).
+    """
+    state = nn_edits.apply(
+        {"op": "parallelize", "steps": ["implement"], "copies": 2},
+        state)
+    from refactory_dsh.nn.graph import Graph
+    graph = Graph.from_state(state["graph"])
+    fork = next(nid for nid, n in graph.nodes.items() if n.kind == "fork")
+    edit = {
+        "op": "branch", "fork": fork, "kind": "code",
+        "text": BRANCH_CODE,
+        "id": "sealed_branch",
+        "sealed": True,
+        "sees": ["input.xlsx"],
+        "produces": ["branch_sheets"],
+    }
+    return nn_edits.apply(edit, state)
+
+
 # ── probe logic ──────────────────────────────────────────────────────────
 
 def probe_pattern(name: str, label: str, build_fn, state: dict) -> bool:
@@ -377,6 +517,110 @@ def probe_pattern(name: str, label: str, build_fn, state: dict) -> bool:
             _fail("agent judge gate", "no gate found")
             passed = False
 
+    if name == "G":
+        guard = nodes.get("recheck_guard", {})
+        if "output.xlsx" in guard.get("writes", []):
+            _ok("recheck_guard writes output.xlsx")
+        else:
+            _fail("recheck_guard writes output.xlsx",
+                  f"writes: {guard.get('writes', [])}")
+            passed = False
+
+        impl = nodes.get("implement", {})
+        if "output.xlsx" in impl.get("writes", []):
+            _ok("implement keeps writing output.xlsx (verify's read source)")
+        else:
+            _fail("implement keeps output.xlsx",
+                  f"writes: {impl.get('writes', [])}")
+            passed = False
+
+        verify = nodes.get("verify", {})
+        if "output.xlsx" in verify.get("reads", []):
+            _ok("verify still reads output.xlsx (from implement)")
+        else:
+            _fail("verify reads output.xlsx",
+                  f"reads: {verify.get('reads', [])}")
+            passed = False
+
+        if "output.xlsx" not in verify.get("writes", []):
+            _ok("verify's write of output.xlsx is renamed (taken over)")
+        else:
+            _fail("verify's write renamed", "output.xlsx still in writes")
+            passed = False
+
+    if name == "H":
+        guard = nodes.get("openpyxl_guard", {})
+        if guard.get("sealed_script"):
+            _ok("openpyxl_guard is sealed")
+        else:
+            _fail("openpyxl_guard sealed", f"sealed_script: {guard.get('sealed_script')}")
+            passed = False
+        if "output.xlsx" in guard.get("writes", []):
+            _ok("openpyxl_guard writes output.xlsx")
+        else:
+            _fail("openpyxl_guard writes output.xlsx",
+                  f"writes: {guard.get('writes', [])}")
+            passed = False
+
+    if name == "I":
+        fallbacks = [nid for nid, n in nodes.items() if n.get("sealed_script")]
+        if fallbacks:
+            _ok(f"sealed fallback step: {fallbacks[0]}")
+        else:
+            _fail("sealed fallback step", "no sealed step found")
+            passed = False
+        fb_id = fallbacks[0] if fallbacks else None
+        fb = nodes.get(fb_id, {}) if fb_id else {}
+        if "output.xlsx" in fb.get("writes", []):
+            _ok("fallback writes implement's output.xlsx")
+        else:
+            _fail("fallback writes output.xlsx", f"writes: {fb.get('writes', [])}")
+            passed = False
+        fb_gate = None
+        if fb_id:
+            for nid, n in nodes.items():
+                if n.get("kind") != "gate":
+                    continue
+                edges = result["graph"].get("edges", [])
+                if any(e.get("target") == fb_id and e.get("source") == nid for e in edges):
+                    fb_gate = nid
+                    break
+        if fb_gate:
+            _ok(f"fallback gate wired to {fb_id}: {fb_gate}")
+        else:
+            _fail("fallback gate", f"no gate wired to {fb_id}")
+            passed = False
+
+    if name == "J":
+        branch = nodes.get("sealed_branch", {})
+        if branch.get("sealed_script"):
+            _ok("sealed_branch is sealed")
+        else:
+            _fail("sealed_branch sealed", f"sealed_script: {branch.get('sealed_script')}")
+            passed = False
+        if "input.xlsx" in branch.get("reads", []):
+            _ok("sealed_branch reads input.xlsx")
+        else:
+            _fail("sealed_branch reads input.xlsx", f"reads: {branch.get('reads', [])}")
+            passed = False
+        if "branch_sheets" in branch.get("produces", []):
+            _ok("sealed_branch produces branch_sheets")
+        else:
+            _fail("sealed_branch produces branch_sheets",
+                  f"produces: {branch.get('produces', [])}")
+            passed = False
+        fork_nodes = [nid for nid, n in nodes.items() if n.get("kind") == "fork"]
+        if fork_nodes:
+            fork_node = nodes[fork_nodes[0]]
+            if "sealed_branch" in fork_node.get("targets", []):
+                _ok(f"sealed_branch is a target of fork {fork_nodes[0]}")
+            else:
+                _fail("sealed_branch in fork", f"targets: {fork_node.get('targets', [])}")
+                passed = False
+        else:
+            _fail("fork node", "no fork found")
+            passed = False
+
     return passed
 
 
@@ -387,6 +631,10 @@ ALL_PATTERNS: list[tuple[str, str, Callable[[dict], dict]]] = [
     ("D", "route with one way taking over output.xlsx", pattern_d),
     ("E", "parallel fork (two copies of implement)", pattern_e),
     ("F", "loop with agent+tools judge", pattern_f),
+    ("G", "sealed code guard after verify (read-modify-write takeover)", pattern_g),
+    ("H", "sealed code step (openpyxl) passes code-run pre-check", pattern_h),
+    ("I", "sealed code fallback for implement", pattern_i),
+    ("J", "sealed code branch (after parallelizing implement)", pattern_j),
 ]
 
 

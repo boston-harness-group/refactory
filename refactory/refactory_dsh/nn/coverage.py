@@ -189,7 +189,8 @@ _FIELDS: dict[str, tuple[Aspect, Aspect]] = {
     # What a code step's run records its returned outputs under: set by an edit that gives
     # code new output names (a copy of a code step; 'takes_over' of one), never by hand.
     "renames": (("add_node", "insert", "split", "branch", "parallelize"), ("insert",)),
-    "sealed_script": (("insert", "loop", "route", "add_node"),
+    "sealed_script": (("insert", "loop", "route", "add_node", "branch", "merge",
+                       "fallback", "split", "parallelize", "map"),
                       Gap("excluded by decision", "not a configure setting")),
     "max_iterations": (_GATE_ADD, ("set_knob",)),
     "on_exhausted": (_GATE_ADD, _DEFERRED_SETTING),

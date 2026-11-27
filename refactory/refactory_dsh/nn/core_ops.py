@@ -553,11 +553,13 @@ def _step_nodes(graph: Graph, state: Mapping[str, Any], spec: dict, node_id: str
         node: dict[str, Any] = {
             "id": node_id, "kind": "agent", "prompt_template": text,
             "system_prompt_template": spec.get("system") or "You are one step of a pipeline.",
-            "writes": [f"{node_id}.txt"] if verdict else list(writes or [f"{node_id}.txt"]),
+            "writes": [f"{node_id}.txt"] if verdict else list(
+                writes or spec.get("writes") or [f"{node_id}.txt"]),
             "tool_policy": "none",
         }
         if not verdict:
-            node["produces"] = list(produces) if produces is not None else [node_id]
+            node["produces"] = (list(produces) if produces is not None
+                                else list(spec.get("produces") or [node_id]))
         if source is not None and source.kind == "agent":
             if source.role:
                 node["role"] = source.role
@@ -596,7 +598,10 @@ def _step_nodes(graph: Graph, state: Mapping[str, Any], spec: dict, node_id: str
         out.append(node)
         return out
     if kind == "code":
-        made = list(produces) if produces is not None else [node_id]
+        made = (list(produces) if produces is not None
+                else list(spec.get("produces") or [node_id]))
+        if writes is None:
+            writes = spec.get("writes")
         code = spec["text"] or _default_code(made, list(writes or ()))
         renames = None
         if like is not None and spec.get("_copied") is not None and code == spec["_copied"]:
@@ -1526,9 +1531,12 @@ def _writer_group(graph: Graph, state: Mapping[str, Any], target: Node,
     reader keeps its names: that reader reads it there."""
     flow = _forward_flow(graph)
     later = {n for n in after if n in graph.nodes and _consumed(graph.nodes[n], state) & taken}
+    target_reads = _consumed(target, state) & taken
     group = {target.id}
     for node_id, node in graph.nodes.items():
         if node_id in after or node_id == target.id or not _outputs(node) & taken:
+            continue
+        if target_reads and (_outputs(node) & target_reads) and target.id in _reach(flow, node_id):
             continue
         around = set() if node_id == anchor else _reach(flow, node_id, without=cut)
         if not around & later:
@@ -3669,6 +3677,8 @@ SEALED_CODE = ("; 'sealed' true on a code step: its code runs in the Task's tool
 #: The same for a code judge in loop or route.
 SEALED_JUDGE_CODE = ("; with 'sealed' true on a code judge, it runs in the Task's tool "
                      "environment sealed, as insert's 'sealed' on a code step")
+#: What the branch, merge and fallback lines say of 'sealed'.
+STEP_SEALED = "; 'sealed' as insert's on a code step"
 
 
 #: How a refusal ends that names tools as the other way to write several files (a
@@ -3690,7 +3700,7 @@ def without_tools(description: str, fields: Sequence[str]) -> tuple[str, list[st
     """An operator's request line and fields with no offer of tools: for a run where a new
     step has none (no seal, or ``new_step_tools`` off)."""
     for clause in (INSERT_TOOLS, MAP_TOOLS, JUDGE_TOOLS, ROUTE_JUDGE_TOOLS, MERGE_TOOLS,
-                   STEP_TOOLS, SEALED_CODE, SEALED_JUDGE_CODE, FALLBACK_TOOLS):
+                   STEP_TOOLS, SEALED_CODE, SEALED_JUDGE_CODE, STEP_SEALED, FALLBACK_TOOLS):
         description = description.replace(clause, "")
     return description, [f for f in fields if f not in ("tools", "sealed")]
 
@@ -3740,11 +3750,11 @@ OPERATORS: dict[str, dict[str, Any]] = {
     "branch": {
         "reads_as": ('parallel',),
         "fields": ("fork", "kind", "text", "system", "sees", "optional", "id", "to", "route",
-                   "tools"),
+                   "tools", "sealed", "produces", "writes"),
         "line": "a new step as another branch of a fork ('optional': true lets it fail "
                 "without failing the item; 'sees' names its inputs: \"task\", step ids, or "
                 "single fact or file names there before the fork; 'system' as insert's); "
-                + REACHES.format(where="after the join") + STEP_TOOLS,
+                + REACHES.format(where="after the join") + STEP_TOOLS + STEP_SEALED,
         "example": {"op": "branch", "fork": "<fork>", "kind": "agent",
                     "text": "<what this branch does>"},
     },
@@ -3806,22 +3816,23 @@ OPERATORS: dict[str, dict[str, Any]] = {
     },
     "merge": {
         "reads_as": ('step',),
-        "fields": ("steps", "kind", "text", "system", "id", "route", "tools"),
+        "fields": ("steps", "kind", "text", "system", "id", "route", "tools", "sealed"),
         "line": "two consecutive steps as one, with the first's inputs and the second's "
-                "outputs; 'system' as insert's" + MERGE_TOOLS,
+                "outputs; 'system' as insert's" + MERGE_TOOLS + STEP_SEALED,
         "example": {"op": "merge", "steps": ["<step>", "<next step>"],
                     "text": "<what the merged step does>"},
     },
     "fallback": {
         "reads_as": ('fallback',),
         "fields": ("step", "kind", "text", "system", "sees", "id", "call", "reads", "tools",
-                   "route"),
+                   "route", "sealed"),
         "line": "a step run instead when 'step' (one run per item) fails -- it raises, "
                 "crashes past its retries or hits its output or prompt limit; never for time or a "
                 "harness fault: it writes that step's outputs, so what reads them still "
                 "gets an answer; 'kind' as in insert; it sees what 'step' sees; when the step "
                 "writes more than one file, the fallback must be a code step"
-                + FALLBACK_TOOLS + " (a plain agent writes only its reply)",
+                + FALLBACK_TOOLS + " (a plain agent writes only its reply)"
+                + STEP_SEALED,
         "example": {"op": "fallback", "step": "<step>", "kind": "agent",
                     "text": "<a simpler way to the same output>"},
     },
@@ -4102,7 +4113,8 @@ def lost_inputs(before: Mapping[str, Any], after: Mapping[str, Any]) -> str | No
 
 #: What a new step written inside an operator ('new', 'into', a route's 'to') may say;
 #: anything else it would ignore, so it is refused (`_unknown_fields`).
-STEP_FIELDS = ("kind", "text", "system", "sees", "id", "to", "call", "reads", "tools", "route")
+STEP_FIELDS = ("kind", "text", "system", "sees", "id", "to", "call", "reads", "tools", "route",
+               "sealed", "produces", "writes")
 
 
 def _tools_refusal(tools: Any) -> str | None:

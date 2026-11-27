@@ -1731,3 +1731,252 @@ def test_a_smoke_that_hit_its_cpu_limit_is_uncertain_and_says_so(tmp_path, monke
         run_node("refactory_dsh.create_ops:smoke", workdir=workdir, node_id="smoke")
     receipt = json.loads((workdir / "smoke.json").read_text())
     assert receipt["status"] == "uncertain" and receipt["error"] == reason
+
+
+# ── safeguard 1: train/val/test overlap check ────────────────────────────
+
+
+def test_overlapping_manifest_refused_before_smoke(tmp_path, monkeypatch):
+    """A parts manifest whose train and val share items is refused before any
+    smoke runs, with ``SplitRefused``."""
+    manifest = json.dumps({"train": ["a", "b", "c"], "val": ["b", "d"]})
+    with pytest.raises(create_ops.SplitRefused, match="train and val share items"):
+        _livemath_smoke(tmp_path, monkeypatch, {"parts_manifest": "overlap.json"},
+                        extra={"overlap.json": manifest})
+    receipt = json.loads((tmp_path / "run" / "smoke.json").read_text())
+    assert receipt["status"] == "split_refused" and receipt["ok"] is False
+
+
+def test_overlapping_train_test_refused(tmp_path, monkeypatch):
+    """Train/test overlap is also refused."""
+    manifest = json.dumps({"train": ["x", "y"], "test": ["y", "z"]})
+    with pytest.raises(create_ops.SplitRefused, match="train and test share items"):
+        _livemath_smoke(tmp_path, monkeypatch, {"parts_manifest": "overlap.json"},
+                        extra={"overlap.json": manifest})
+
+
+def test_disjoint_manifest_accepted(tmp_path, monkeypatch):
+    """A manifest with disjoint train/val/test is accepted."""
+    from refactory_packages.livemath.manifest import build_parts_manifest
+    built = build_parts_manifest(Path(__file__).parent / "fixtures" / "livemath" / "split",
+                                 tmp_path / "built")
+    workdir = _livemath_smoke(tmp_path, monkeypatch,
+                              {"holdout": 0, "parts_manifest": "MANIFEST"})
+    receipt = json.loads((workdir / "smoke.json").read_text())
+    assert receipt["ok"] and receipt["status"] == "pass"
+
+
+# ── safeguard 2: harness-incident retry ──────────────────────────────────
+
+
+def test_transient_harness_incident_recovered_by_rerun(tmp_path, monkeypatch):
+    """A harness incident on the first run is retried; when the rerun succeeds
+    the smoke passes on the first gate iteration — the incident retry, not the
+    gate's own reloop, recovered it."""
+    from refactory_dsh.run import run_node
+    from refactory_dsh.sandbox import SandboxResult
+    from test_edit_design import _smoke_run
+
+    rerun_dirs: list[str] = []
+
+    def stub(identifier, workdir_, **kwargs):
+        workdir_ = Path(workdir_)
+        workdir_.mkdir(parents=True, exist_ok=True)
+        is_rerun = "incident_reruns" in str(workdir_)
+        rerun_dirs.append(str(workdir_)) if is_rerun else None
+        if not is_rerun:
+            records = [
+                {"id": "item_001", "score": 1.0, "error_text": ""},
+                {"id": "item_002", "score": 0.0, "error_text": "grader crashed",
+                 "error_kind": "harness_incident"},
+            ]
+            (workdir_ / "item_records.json").write_text(json.dumps(records))
+            return SandboxResult(ok=True, payload={
+                "exit_ok": True, "score": 0.5, "iterations": 2, "error": "grader crashed"})
+        records = [{"id": "item_002", "score": 1.0, "error_text": ""}]
+        (workdir_ / "item_records.json").write_text(json.dumps(records))
+        return SandboxResult(ok=True, payload={
+            "exit_ok": True, "score": 1.0, "iterations": 2})
+
+    workdir = _smoke_run(tmp_path, monkeypatch, revision="", scores={})
+    monkeypatch.setattr(sandbox, "smoke", stub)
+    run_node("refactory_dsh.create_ops:smoke", workdir=workdir, node_id="smoke")
+    receipt = json.loads((workdir / "smoke.json").read_text())
+    assert receipt["ok"] and receipt["status"] == "pass"
+    assert len(rerun_dirs) >= 1, "no incident rerun happened"
+
+
+def test_persistent_harness_incident_excluded_smoke_passes(tmp_path, monkeypatch):
+    """When a harness incident persists through all reruns, the item is excluded
+    from the failure decision: the smoke passes if remaining items are ok."""
+    from refactory_dsh.run import run_node
+    from refactory_dsh.sandbox import SandboxResult
+    from test_edit_design import _smoke_run
+
+    def stub(identifier, workdir_, **kwargs):
+        workdir_ = Path(workdir_)
+        workdir_.mkdir(parents=True, exist_ok=True)
+        records = [
+            {"id": "item_001", "score": 1.0, "error_text": ""},
+            {"id": "item_002", "score": 0.0, "error_text": "grader crashed",
+             "error_kind": "harness_incident"},
+        ]
+        (workdir_ / "item_records.json").write_text(json.dumps(records))
+        return SandboxResult(ok=True, payload={
+            "exit_ok": True, "score": 0.5, "iterations": 2, "error": "grader crashed"})
+
+    workdir = _smoke_run(tmp_path, monkeypatch, revision="", scores={})
+    monkeypatch.setattr(sandbox, "smoke", stub)
+    run_node("refactory_dsh.create_ops:smoke", workdir=workdir, node_id="smoke")
+    receipt = json.loads((workdir / "smoke.json").read_text())
+    assert receipt["ok"] and receipt["status"] == "pass"
+    assert receipt["incident_reruns"]["excluded"] == ["item_002"]
+
+
+def test_exit_ok_false_with_incident_not_retried(tmp_path, monkeypatch):
+    """When exit_ok is False and there is a harness incident, the incident is
+    not retried (matching the outer loop) and the smoke fails."""
+    from refactory_dsh.run import run_node
+    from refactory_dsh.sandbox import SandboxResult
+    from test_edit_design import _smoke_run
+
+    rerun_dirs: list[str] = []
+
+    def stub(identifier, workdir_, **kwargs):
+        workdir_ = Path(workdir_)
+        workdir_.mkdir(parents=True, exist_ok=True)
+        is_rerun = "incident_reruns" in str(workdir_)
+        if is_rerun:
+            rerun_dirs.append(str(workdir_))
+        records = [
+            {"id": "item_001", "score": 1.0, "error_text": ""},
+            {"id": "item_002", "score": 0.0, "error_text": "grader crashed",
+             "error_kind": "harness_incident"},
+        ]
+        (workdir_ / "item_records.json").write_text(json.dumps(records))
+        return SandboxResult(ok=True, payload={
+            "exit_ok": False, "score": 0.5, "iterations": 2})
+
+    workdir = _smoke_run(tmp_path, monkeypatch, revision="", scores={})
+    monkeypatch.setattr(sandbox, "smoke", stub)
+    with pytest.raises(ValueError, match="did not finish"):
+        run_node("refactory_dsh.create_ops:smoke", workdir=workdir, node_id="smoke")
+    receipt = json.loads((workdir / "smoke.json").read_text())
+    assert not receipt["ok"]
+    assert not rerun_dirs, "incidents should not be retried when exit_ok is False"
+
+
+def test_all_items_persistent_harness_incidents(tmp_path, monkeypatch):
+    """When every item is a persistent harness incident, the smoke fails with
+    an error saying every item was a harness incident."""
+    from refactory_dsh.run import run_node
+    from refactory_dsh.sandbox import SandboxResult
+    from test_edit_design import _smoke_run
+
+    def stub(identifier, workdir_, **kwargs):
+        workdir_ = Path(workdir_)
+        workdir_.mkdir(parents=True, exist_ok=True)
+        records = [
+            {"id": "item_001", "score": 0.0, "error_text": "grader crashed",
+             "error_kind": "harness_incident"},
+            {"id": "item_002", "score": 0.0, "error_text": "sandbox down",
+             "error_kind": "harness_incident"},
+        ]
+        (workdir_ / "item_records.json").write_text(json.dumps(records))
+        return SandboxResult(ok=True, payload={
+            "exit_ok": True, "score": 0.0, "iterations": 2})
+
+    workdir = _smoke_run(tmp_path, monkeypatch, revision="", scores={})
+    monkeypatch.setattr(sandbox, "smoke", stub)
+    with pytest.raises(ValueError, match="did not finish"):
+        run_node("refactory_dsh.create_ops:smoke", workdir=workdir, node_id="smoke")
+    receipt = json.loads((workdir / "smoke.json").read_text())
+    assert not receipt["ok"]
+    assert "every item was a harness incident" in receipt["error"]
+
+
+def test_real_code_failure_still_fails_with_incidents(tmp_path, monkeypatch):
+    """A real code failure (not a harness incident) still fails the smoke even
+    when other items are harness incidents."""
+    from refactory_dsh.run import run_node
+    from refactory_dsh.sandbox import SandboxResult
+    from test_edit_design import _smoke_run
+
+    def stub(identifier, workdir_, **kwargs):
+        workdir_ = Path(workdir_)
+        workdir_.mkdir(parents=True, exist_ok=True)
+        records = [
+            {"id": "item_001", "score": 0.0, "error_text": "data: RuntimeError: code bug"},
+            {"id": "item_002", "score": 0.0, "error_text": "grader crashed",
+             "error_kind": "harness_incident"},
+        ]
+        (workdir_ / "item_records.json").write_text(json.dumps(records))
+        return SandboxResult(ok=True, payload={
+            "exit_ok": False, "score": 0.0, "iterations": 2, "error": "code bug"})
+
+    workdir = _smoke_run(tmp_path, monkeypatch, revision="", scores={})
+    monkeypatch.setattr(sandbox, "smoke", stub)
+    with pytest.raises(ValueError, match="did not finish"):
+        run_node("refactory_dsh.create_ops:smoke", workdir=workdir, node_id="smoke")
+    receipt = json.loads((workdir / "smoke.json").read_text())
+    assert not receipt["ok"]
+    assert receipt["item_errors"] is not None
+
+
+# ── safeguard 3: per-item error check ────────────────────────────────────
+
+
+def test_exit_ok_with_item_error_fails_smoke(tmp_path, monkeypatch):
+    """A run that exits 0 with one item error is a failure: exit status alone
+    is not enough, as item-level errors make the score meaningless."""
+    from refactory_dsh.run import run_node
+    from refactory_dsh.sandbox import SandboxResult
+    from test_edit_design import _smoke_run
+
+    def stub(identifier, workdir_, **kwargs):
+        workdir_ = Path(workdir_)
+        workdir_.mkdir(parents=True, exist_ok=True)
+        records = [
+            {"id": "item_001", "score": 1.0, "error_text": ""},
+            {"id": "item_002", "score": 0.0,
+             "error_text": "data: SnippetError: the code raised ValueError"},
+        ]
+        (workdir_ / "item_records.json").write_text(json.dumps(records))
+        return SandboxResult(ok=True, payload={
+            "exit_ok": True, "score": 0.5, "iterations": 2})
+
+    workdir = _smoke_run(tmp_path, monkeypatch, revision="", scores={})
+    monkeypatch.setattr(sandbox, "smoke", stub)
+    with pytest.raises(ValueError, match="did not finish"):
+        run_node("refactory_dsh.create_ops:smoke", workdir=workdir, node_id="smoke")
+    receipt = json.loads((workdir / "smoke.json").read_text())
+    assert not receipt["ok"]
+    assert receipt["item_errors"] is not None
+    assert receipt["status"] == "code_failure"
+
+
+def test_clean_items_still_pass(tmp_path, monkeypatch):
+    """When every item is clean (no errors, no incidents), the smoke passes
+    as before: the new checks do not break the happy path."""
+    from refactory_dsh.run import run_node
+    from refactory_dsh.sandbox import SandboxResult
+    from test_edit_design import _smoke_run
+
+    def stub(identifier, workdir_, **kwargs):
+        workdir_ = Path(workdir_)
+        workdir_.mkdir(parents=True, exist_ok=True)
+        records = [
+            {"id": "item_001", "score": 1.0, "error_text": ""},
+            {"id": "item_002", "score": 0.8, "error_text": ""},
+        ]
+        (workdir_ / "item_records.json").write_text(json.dumps(records))
+        return SandboxResult(ok=True, payload={
+            "exit_ok": True, "score": 0.9, "iterations": 2})
+
+    workdir = _smoke_run(tmp_path, monkeypatch, revision="", scores={})
+    monkeypatch.setattr(sandbox, "smoke", stub)
+    run_node("refactory_dsh.create_ops:smoke", workdir=workdir, node_id="smoke")
+    receipt = json.loads((workdir / "smoke.json").read_text())
+    assert receipt["ok"] and receipt["status"] == "pass"
+    assert receipt["incident_reruns"] is None
+    assert receipt["item_errors"] is None
