@@ -270,17 +270,16 @@ Each of these happened, and the shape of the code is the response.
 - **Do not repair a state.** Refuse it and report the reason.
 - **Do not grow an oversized module.** Keep modules small and single-purpose: about
   1,500 lines per module and about 800 per class is the threshold past which a split
-  is due. The following modules are already well past that limit and must not grow
-  by more than a small, localised fix — new behaviour goes in a new or existing
-  focused module, imported from there:
+  is due. No module already past that limit may grow by more than a small, localised
+  fix — new behaviour goes in a new or existing focused module, imported from there.
+  Check the current list before adding to any large file:
 
-  | module | lines |
-  |---|---|
-  | `refactory_dsh/loop.py` | ~9,100 |
-  | `refactory_dsh/optim/base.py` | ~5,900 |
-  | `refactory_dsh/nn/core_ops.py` | ~4,700 |
-  | `refactory_dsh/nn/executor.py` | ~2,700 |
+  ```bash
+  find refactory/refactory_dsh -name '*.py' -exec wc -l {} + | awk '$1>=1500' | sort -rn
+  ```
 
+  For example, `loop.py` (~9,100), `optim/base.py` (~5,900), `nn/core_ops.py`
+  (~4,700), `design_ops.py` (~4,400) and `base_check.py` (~4,100) are the largest.
   A split is a pure move first: code moved verbatim, old import paths re-exported
   until callers migrate, the full suite and lowering snapshots unchanged. Behaviour
   changes go in separate PRs.
