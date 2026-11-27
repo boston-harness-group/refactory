@@ -466,8 +466,10 @@ def failure_kind(cause: str) -> str:
     ``output_limit``: the model used its whole output allowance without answering --
     the DSH runner's ``dsh: max-tokens:`` or the Claude Code adapter's
     ``category: output-limit``. ``turn_cap``: the agent used its whole turn cap without
-    finishing -- the Claude Code adapter's ``category: limit``. ``setup``
-    (`SETUP_FAILURE_MARKERS`): the next session would be refused the same way.
+    finishing -- the Claude Code adapter's ``category: limit`` (when ``maxTurns`` is not
+    set) or detected from the worker receipt's ``turn_limit_reached`` field (when it is;
+    the error text says ``category: unknown`` but the metadata is written first).
+    ``setup`` (`SETUP_FAILURE_MARKERS`): the next session would be refused the same way.
     ``transport``: the wire or the provider failed, also when a product result reports
     it (`PROVIDER_FAILURE_MARKERS`). Otherwise ``worker``: the worker or the product
     failed. ``output_limit``, ``turn_cap`` and ``worker`` are the kinds a node's retry
@@ -483,6 +485,17 @@ def failure_kind(cause: str) -> str:
     if is_transport_failure(lowered) or any(marker in lowered for marker in PROVIDER_FAILURE_MARKERS):
         return "transport"
     return "worker"
+
+
+def _receipt_turn_limit(receipt_path: "Path | None") -> bool:
+    """Whether the worker receipt says the session hit its turn cap."""
+    if receipt_path is None:
+        return False
+    try:
+        record = json.loads(receipt_path.read_text())
+        return bool(record.get("turn_limit_reached"))
+    except (OSError, json.JSONDecodeError, ValueError):
+        return False
 
 
 #: A worker failure in the teardown stage after the product CLI itself exited 0: the
@@ -1667,9 +1680,12 @@ class DshModelClient:
                         # The cause itself must be the wire's: a session that stopped for
                         # any other reason is not called a wire failure, whatever else its
                         # diagnostics mention.
+                        kind = failure_kind(cause)
+                        if kind == "worker" and _receipt_turn_limit(self._worker_receipt):
+                            kind = "turn_cap"
                         raise CompletionFailed(
                             f"model completion failed (exit {proc.returncode}): {cause}",
-                            kind=failure_kind(cause))
+                            kind=kind)
                     last = cause or f"exit {proc.returncode}"
                 if attempt >= self._attempts:
                     break
