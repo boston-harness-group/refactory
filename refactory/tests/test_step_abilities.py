@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import pytest
 
+from refactory_dsh import nn
 from refactory_dsh.nn import edits as nn_edits
 from refactory_dsh.nn.graph import Graph
 
@@ -238,19 +239,170 @@ def test_without_tools_strips_sealed():
         assert "'sealed'" not in line, f"{name}: sealed text still in line"
 
 
-# ── runtime sealed tests (SKIP locally: need a tool environment) ─────────
+# ── runtime sealed tests (Landlock/tool-environment) ─────────────────────
 
 
-@pytest.mark.skip(reason="needs a real tool environment (lab run)")
-def test_sealed_fallback_runs_in_tool_environment():
-    """A sealed code fallback runs openpyxl in the Task's tool environment."""
+def _seal_available() -> bool:
+    from refactory_dsh import seal
+    return seal.available()[0]
 
 
-@pytest.mark.skip(reason="needs a real tool environment (lab run)")
-def test_sealed_branch_runs_in_tool_environment():
-    """A sealed code branch runs openpyxl in the Task's tool environment."""
+_seal_reason = (
+    f"no seal: {__import__('refactory_dsh').seal.available()[1]}"
+    if not _seal_available() else "")
+needs_seal = pytest.mark.skipif(not _seal_available(), reason=_seal_reason)
+
+SEALED_WORKBOOK_CODE = (
+    "import openpyxl\n"
+    "def main(inp):\n"
+    "    wb = openpyxl.load_workbook('workbook.xlsx')\n"
+    "    ws = wb.active\n"
+    "    total = ws['A1'].value + ws['B1'].value\n"
+    "    with open('result.txt', 'w') as f:\n"
+    "        f.write(str(total))\n"
+    "    return {'facts': {'total': str(total)}}\n"
+)
+
+import item_files_ops as ifo
+import structure_fuzz as sf
+import structure_fuzz_graphs as fzg
 
 
-@pytest.mark.skip(reason="needs a real tool environment (lab run)")
-def test_sealed_merge_runs_in_tool_environment():
-    """A sealed code merged step runs openpyxl in the Task's tool environment."""
+class _WorkbookPass(ifo.ItemFilesMode):
+    """Data pass with WorkbookTask: each item gets workbook.xlsx (A1=10, B1=5)."""
+    task_ref = "item_files_ops:WorkbookTask"
+    data_writes = ("current_item.json", "item/input.bin", "workbook.xlsx")
+
+
+class _FallbackPassBase(_WorkbookPass):
+    """An op that always fails, then a reader: the fallback replaces the failure."""
+    name = "sealed_ability_fallback"
+
+    def build(self) -> Graph:
+        graph = Graph()
+        graph.add(nn.Node("data", "data", subgraph_entry="doomed",
+                          subgraph_exit="reader", task_ref=self.task_ref,
+                          writes=self.data_writes,
+                          produces=("item_scores", "total"),
+                          parallelism_knob="data_parallelism",
+                          knobs=("data_parallelism",)))
+        graph.add(nn.Node("doomed", "op", call=fzg.FAIL,
+                          reads=("workbook.xlsx",),
+                          writes=("result.txt",), produces=("total",)))
+        graph.add(nn.Node("reader", "op", call=fzg.STEP,
+                          reads=("result.txt",), produces=("checked",)))
+        graph.connect("doomed", "reader")
+        return graph
+
+
+class _BranchPassBase(_WorkbookPass):
+    """A fork of one agent branch, then a reader: the branch adds a sealed step."""
+    name = "sealed_ability_branch"
+
+    def build(self) -> Graph:
+        graph = Graph()
+        graph.add(nn.Node("data", "data", subgraph_entry="solve_fork",
+                          subgraph_exit="reader", task_ref=self.task_ref,
+                          writes=self.data_writes,
+                          produces=("item_scores", "total"),
+                          parallelism_knob="data_parallelism",
+                          knobs=("data_parallelism",)))
+        graph.add(nn.Node("solve_fork", "fork", targets=("solve",)))
+        graph.add(nn.Node("solve", "agent", prompt_template="Write your answer.",
+                          writes=("answer.txt",), tool_policy="none", role="solver"))
+        graph.add(nn.Node("solve_join", "join", sources=("solve",)))
+        graph.add(nn.Node("reader", "op", call=fzg.STEP,
+                          reads=("result.txt",), produces=("checked",)))
+        graph.connect("solve_fork", "solve_join")
+        graph.connect("solve", "solve_join")
+        graph.connect("solve_join", "reader")
+        return graph
+
+
+class _MergePassBase(_WorkbookPass):
+    """Two adjacent agents, then a reader: merge combines them into one sealed step."""
+    name = "sealed_ability_merge"
+
+    def build(self) -> Graph:
+        graph = Graph()
+        graph.add(nn.Node("data", "data", subgraph_entry="step_a",
+                          subgraph_exit="reader", task_ref=self.task_ref,
+                          writes=self.data_writes,
+                          produces=("item_scores", "total"),
+                          parallelism_knob="data_parallelism",
+                          knobs=("data_parallelism",)))
+        graph.add(nn.Node("step_a", "agent", prompt_template="Step A.",
+                          reads=("workbook.xlsx",),
+                          writes=("partial.txt",), tool_policy="none", role="solver"))
+        graph.add(nn.Node("step_b", "agent", prompt_template="Step B.",
+                          reads=("partial.txt",), writes=("result.txt",),
+                          produces=("total",), tool_policy="none", role="solver"))
+        graph.add(nn.Node("reader", "op", call=fzg.STEP,
+                          reads=("result.txt",), produces=("checked",)))
+        graph.connect("step_a", "step_b")
+        graph.connect("step_b", "reader")
+        return graph
+
+
+@needs_seal
+def test_sealed_fallback_runs_in_tool_environment(tmp_path):
+    """A sealed code fallback for a failing op reads workbook.xlsx with openpyxl
+    in the Task's tool environment.  The original step raises; the fallback gate
+    routes to the sealed fallback, which writes result.txt; the downstream reader
+    reads it."""
+    base = _FallbackPassBase()
+    state = base.state_dict()
+    edited = nn_edits.apply(
+        {"op": "fallback", "step": "doomed", "kind": "code",
+         "text": SEALED_WORKBOOK_CODE, "sealed": True},
+        state)
+    result = _FallbackPassBase(state=edited).run(tmp_path / "walker")
+    assert result.exit_ok, result.error
+    assert result.facts.get("total") == "15"
+    items = result.facts.get("item_scores", [])
+    assert items, "data pass produced no item scores"
+    for item_dir in (tmp_path / "walker").rglob("result.txt"):
+        assert item_dir.read_text() == "15"
+
+
+@needs_seal
+def test_sealed_branch_runs_in_tool_environment(tmp_path):
+    """A sealed code branch added to a fork reads workbook.xlsx with openpyxl
+    in the Task's tool environment.  After the join, the downstream reader reads
+    result.txt written by the sealed branch."""
+    base = _BranchPassBase()
+    state = base.state_dict()
+    edited = nn_edits.apply(
+        {"op": "branch", "fork": "solve_fork", "kind": "code",
+         "text": SEALED_WORKBOOK_CODE, "id": "sealed_branch",
+         "sealed": True, "produces": ["total"], "writes": ["result.txt"],
+         "sees": ["workbook.xlsx"]},
+        state)
+    model = sf.ScriptedModel({"solve": "<answer>42</answer>"})
+    result = _BranchPassBase(state=edited).run(tmp_path / "walker", model=model)
+    assert result.exit_ok, result.error
+    assert result.facts.get("total") == "15"
+    items = result.facts.get("item_scores", [])
+    assert items, "data pass produced no item scores"
+    for item_dir in (tmp_path / "walker").rglob("result.txt"):
+        assert item_dir.read_text() == "15"
+
+
+@needs_seal
+def test_sealed_merge_runs_in_tool_environment(tmp_path):
+    """Two adjacent agents merged into a sealed code step that reads workbook.xlsx
+    with openpyxl in the Task's tool environment.  The downstream reader reads
+    result.txt written by the merged step."""
+    base = _MergePassBase()
+    state = base.state_dict()
+    edited = nn_edits.apply(
+        {"op": "merge", "steps": ["step_a", "step_b"], "kind": "code",
+         "text": SEALED_WORKBOOK_CODE, "sealed": True},
+        state)
+    result = _MergePassBase(state=edited).run(tmp_path / "walker")
+    assert result.exit_ok, result.error
+    assert result.facts.get("total") == "15"
+    items = result.facts.get("item_scores", [])
+    assert items, "data pass produced no item scores"
+    for item_dir in (tmp_path / "walker").rglob("result.txt"):
+        assert item_dir.read_text() == "15"
