@@ -136,6 +136,7 @@ def state(root: Path, *, exclude: tuple[Path, ...] = ()) -> dict[str, Any]:
         if listing is None:
             raise ValueError(f"git cannot report the state of the target {root}")
         head, entries = _porcelain_v2(listing)
+        entries = [e for e in entries if not any(c in UNWATCHED for c in e.split("/"))]
         paths = [os.path.relpath(top / path, root) for path in entries]
         prefix = "" if root == top else root.relative_to(top).as_posix()
         found.update(git=True, head=head, branch=_v2_branch(listing, root),
