@@ -238,8 +238,8 @@ Each of these happened, and the shape of the code is the response.
 - Any helper it duplicated from core, or that other methods could use, is moved to
   core (one copy) and imported by the method.
 - A faithful port pins its behaviour with a fixed-seed identical-trace test.
-- Growth of an oversized module (see [What not to do](#what-not-to-do)), or a new
-  module past the 1,500-line limit, is a finding.
+- New behaviour added to a module that already does several jobs, or a module given
+  a second job, is a finding (see [What not to do](#what-not-to-do)).
 
 ## Documentation
 
@@ -268,18 +268,27 @@ Each of these happened, and the shape of the code is the response.
   name rather than guessing a package, and the registry refuses a name that exists
   in both roots rather than picking one.
 - **Do not repair a state.** Refuse it and report the reason.
-- **Do not grow an oversized module.** Keep modules small and single-purpose: about
-  1,500 lines per module and about 800 per class is the threshold past which a split
-  is due. No module already past that limit may grow by more than a small, localised
-  fix — new behaviour goes in a new or existing focused module, imported from there.
-  Check the current list before adding to any large file:
+- **A module has one job.** Before adding to a module, check that what you add is
+  that job; if it is a different job, it goes in its own module. Signs a module
+  needs splitting, in order of weight:
+
+  1. It does several jobs (e.g. one class that evaluates, selects, reports and
+     resumes).
+  2. Most changes to the area land in it (`git log --since=1.month --format=
+     --name-only | sort | uniq -c | sort -rn | head`).
+  3. A class has grown so many methods that a change needs reading far beyond the
+     code it touches.
+
+  Size is a prompt, not the test: past about 1,500 lines, stop and check the signs
+  above before adding. List the modules past that threshold with:
 
   ```bash
   find refactory/refactory_dsh -name '*.py' -exec wc -l {} + | awk '$1>=1500' | sort -rn
   ```
 
   For example, `loop.py` (~9,100), `optim/base.py` (~5,900), `nn/core_ops.py`
-  (~4,700), `design_ops.py` (~4,400) and `base_check.py` (~4,100) are the largest.
+  (~4,700), `design_ops.py` (~4,400) and `base_check.py` (~4,100) show these signs
+  today and may take only small fixes; new behaviour goes in a new focused module.
   A split is a pure move first: code moved verbatim, old import paths re-exported
   until callers migrate, the full suite and lowering snapshots unchanged. Behaviour
   changes go in separate PRs.
