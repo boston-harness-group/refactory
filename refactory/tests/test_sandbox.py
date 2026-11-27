@@ -1112,8 +1112,10 @@ _WORKING = {
 #: the run's (`run_on_dsh`), a little less than the sandbox's: 12 s gives the run 7 s,
 #: whose backstop (28 s) gives CI margin against load-induced slowdown.
 _LIMITS = {"spine": 12, "walker": 3}
-#: The run's own limit, either way: every working op above runs longer than this.
-_RUN_LIMIT_S = 3
+#: The run's own inactivity limit, by runtime: every working op above runs longer than
+#: this. The walker's is the sandbox's own; a model smoke's is `smoke_timeout_s`,
+#: `int(12 - min(5, 12 / 2))` = 7 for the spine's 12 s (`sandbox.smoke`).
+_RUN_LIMIT_S = {"spine": 7, "walker": 3}
 
 
 def _smoke(tmp_path: Path, mode: str, runtime: str) -> sandbox.SandboxResult:
@@ -1150,7 +1152,7 @@ def test_a_smoke_that_keeps_working_outlives_its_inactivity_limit(
     result = _smoke(tmp_path, mode, runtime)
     assert not result.timed_out, result.stdout + result.stderr
     assert result.ok and result.payload.get("exit_ok"), result.stdout + result.stderr
-    assert result.elapsed_s is not None and result.elapsed_s > _RUN_LIMIT_S + 1
+    assert result.elapsed_s is not None and result.elapsed_s > _RUN_LIMIT_S[runtime]
 
 
 @pytest.mark.parametrize("runtime", ["spine", "walker"])
