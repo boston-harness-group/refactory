@@ -401,7 +401,7 @@ NAMES = re.compile(r"\btraces\b|\bitem\.json\b|\bsteps\.json\b")
 #: trace files: prose ("the traces" the optimizer reads) or a Task's own ``item.json`` in
 #: a pass. Counted per file, so a new literal anywhere fails the test.
 OTHER_USES = {
-    ("refactory_dsh/nn/executor.py", "item.json"): 2,
+    ("refactory_dsh/nn/executor/items.py", "item.json"): 2,
     ("refactory_dsh/optim/base.py", "traces"): 2,
     # Prompt prose, no file names: "both full traces", split-evidence #655; #705's memory
     # prompt ("from the comparison and the traces"), the rejected-change comparison ("their
