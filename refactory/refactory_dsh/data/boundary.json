@@ -69,6 +69,7 @@
     "refactory_dsh.optim.policies",
     "refactory_dsh.optim.random_optimizer",
     "refactory_dsh.optim.repair",
+    "refactory_dsh.optim.request_summary",
     "refactory_dsh.outerloop",
     "refactory_dsh.owned_process",
     "refactory_dsh.package_rewrite",

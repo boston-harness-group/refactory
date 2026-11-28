@@ -436,7 +436,7 @@ class AutoresearchOptimizer(Optimizer):
         from concurrent.futures import ThreadPoolExecutor
         from pathlib import Path
 
-        from . import analysts, feedback
+        from . import feedback
         from .base import compute_policy
 
         cache: dict[str, dict[str, Any]] = self.__dict__.setdefault("_review_cache", {})
@@ -932,10 +932,35 @@ class AutoresearchOptimizer(Optimizer):
             with ThreadPoolExecutor(max_workers=max(1, min(analysts.CONCURRENCY,
                                                            len(plan)))) as pool:
                 done[:] = list(pool.map(self._guarded(analyse), plan))
+            # Flip-item contrast: items that passed under one candidate and failed under
+            # another, the passing and failing traces side by side. Run as one analyst
+            # call; its findings join the failure side before merging.
+            contrast_findings: list[dict[str, Any]] = []
+            if ctx.flip_items:
+                result = analysts.contrast_batch(ctx, ctx.flip_items, pipeline)
+                if result is not None:
+                    prompt, clip = result
+                    items = [str(fi["item"]) for fi in ctx.flip_items]
+                    found, error, retried, cached = self._ask(
+                        ctx, analysts.CONTRAST_SYSTEM, prompt,
+                        {"kind": "analyst_contrast", "items": items},
+                        lambda payload: analysts.parse_findings(payload, "failure", items),
+                        counts)
+                    done.append({"kind": "contrast", "index": 1, "items": items,
+                                 "found": found or [], "findings": len(found or ()),
+                                 "clipped": clip["items"], "clipped_chars": clip["chars"],
+                                 **({"context_retry": True} if retried else {}),
+                                 **({"cached": True} if cached else {}),
+                                 "error": error})
+                    contrast_findings = found or []
             with ThreadPoolExecutor(max_workers=2) as pool:
+                # The contrast batch's findings are failure findings: merged with the
+                # failure batches' like any other list, not appended unmerged after.
                 failure_side, success_side = pool.map(
                     lambda kind: merge_lists(kind, [b["found"] for b in done
-                                                    if b["kind"] == kind]),
+                                                    if b["kind"] == kind]
+                                             + ([contrast_findings] if kind == "failure"
+                                                and contrast_findings else [])),
                     analysts.KINDS)
             if failure_side and success_side:
                 found, error, retried, cached = self._ask(
@@ -1048,6 +1073,47 @@ class AutoresearchOptimizer(Optimizer):
             self.record_call(**call, reply=text, proposals=0, unreadable=len(unreadable),
                              diagnosis="", considered="", error=f"malformed answer: {malformed}")
             return unreadable
+        # need_traces follow-up: when analysts ran and the proposer asks for item traces,
+        # send them in one follow-up turn and take the final answer from that turn.
+        need_traces = payload.get("need_traces") if isinstance(payload, dict) else None
+        if (isinstance(need_traces, list) and need_traces and ctx.analysis is not None
+                and ctx.item_records):
+            asked = [str(item_id) for item_id in need_traces[:3]]
+            self.record_call(**call, reply=text, proposals=0, error=None,
+                             diagnosis=str(payload.get("diagnosis", "") or ""),
+                             considered=considered_text(payload.get("considered")),
+                             need_traces=asked)
+            from .base import render_traces_for_items
+
+            # The follow-up is the same conversation, not a new one: the original request
+            # (pipeline, summary, findings, operations, answer format), the first reply,
+            # then the traces. Sent alone, the traces left the model without the
+            # pipeline or the answer format, and its reply had no proposals (a real
+            # replay: four unreadable entries, a per-item issue list as the diagnosis).
+            traces_text = (f"{question}\n\n## Your first reply\n\n{text.strip()}\n\n"
+                           f"{render_traces_for_items(asked, ctx.item_records)}")
+            follow_call = {"kind": "proposal_traces", "epoch": ctx.epoch,
+                           "generation": ctx.generation, "system": self._system,
+                           "prompt": traces_text, "need_traces": asked,
+                           **({"parent": ctx.parent} if ctx.parent else {})}
+            try:
+                text, payload, malformed, attempt = self._ask_proposal(follow_call, traces_text)
+            except Exception:
+                # The follow-up failed; fall through with the original answer.
+                payload = payload  # noqa: PLW0127
+                malformed = ""
+            else:
+                call = follow_call
+                call["attempt"] = attempt
+                if malformed:
+                    self.last_diagnosis = self.last_considered = ""
+                    why = (f"your follow-up answer was not valid JSON ({malformed})")
+                    unreadable = [Proposal(edit={UNREADABLE_PROPOSAL: why})
+                                  for _ in range(max(1, n))]
+                    self.record_call(**call, reply=text, proposals=0,
+                                     unreadable=len(unreadable), error=f"malformed: {malformed}")
+                    return unreadable
+
         self.last_diagnosis = str(payload.get("diagnosis", "") or "")
         self.last_considered = considered_text(payload.get("considered"))
         parent_ids = {parent.id for parent in parents}

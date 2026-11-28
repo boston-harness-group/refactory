@@ -37,7 +37,8 @@ from test_gate_aware_context import _passes_by_level, _val
 from test_skillopt import TEST_IDS, VAL_IDS, _patch_mode
 from test_val_gate import LevelProbe, _loop
 
-ANALYST_SYSTEMS = (analysts.FAILURE_SYSTEM, analysts.SUCCESS_SYSTEM)
+ANALYST_SYSTEMS = (analysts.FAILURE_SYSTEM, analysts.SUCCESS_SYSTEM,
+                   analysts.CONTRAST_SYSTEM)
 MERGE_SYSTEMS = (analysts.MERGE_FAILURE_SYSTEM, analysts.MERGE_SUCCESS_SYSTEM,
                  analysts.MERGE_FINAL_SYSTEM)
 
@@ -417,7 +418,7 @@ def test_the_analysts_take_the_readers_place_when_items_do_not_fit_one_call():
     AutoresearchOptimizer(client).propose(ctx, 1, [])
     assert not any(p.startswith("# Reading trajectories") for _s, p in client.calls), "no reader"
     request = client.proposal()
-    assert "The analysts' ranked findings above cover them" in request
+    assert "The analysts' ranked findings above cover every item in full" in request
     assert "### What the readers found" not in request
     assert request.index("## What the analysts found") < request.index("## Trajectories")
     # Off, the readers read them as before.
@@ -802,9 +803,10 @@ def test_a_level_merge_drops_ids_no_analyst_read():
     assert "v9" not in client.proposal() and "x1" not in client.proposal()
 
 
-def test_the_items_the_analysts_cite_are_shown_in_full_first():
+def test_the_items_the_analysts_cite_appear_in_the_table():
     """Twelve failed items that do not fit one request; the analysts cite only f9:
-    it is the first item shown in full, before f0 (first in the usual order)."""
+    with inline traces off (analysts ran), the table lists all items, and the proposer
+    may ask for specific traces via need_traces."""
     def merge(system: str, prompt: str) -> str:
         return json.dumps({"findings": [{"finding": "CITED", "items": ["f9"]}]})
 
@@ -813,10 +815,10 @@ def test_the_items_the_analysts_cite_are_shown_in_full_first():
     ctx = replace(_ctx(records, group_size=4), evidence_budget=8000)
     AutoresearchOptimizer(client).propose(ctx, 1, [])
     request = client.proposal()
-    shown = request[request.index("### Some items in full"):]
-    assert "the analysts cited, one per finding in rank order" in shown
-    assert shown.split("### Item ")[1].startswith("f9 ")
-    assert shown.count("### Item ") == 1, "one failure per finding, and no passes to show"
+    assert "### Some items in full" not in request, "inline traces off when analysts ran"
+    assert "### Every item" in request, "the table must appear"
+    assert "need_traces" in request, "need_traces offered when analysts ran"
+    assert "f9" in request, "the cited item appears in the table"
 
 
 def test_at_most_the_concurrency_cap_of_calls_run_at_once_merges_included():
