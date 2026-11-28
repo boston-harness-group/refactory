@@ -23,7 +23,7 @@ from typing import Any
 
 import pytest
 
-from tests.proposer_replay import (
+from proposer_replay import (
     _mode_protection,
     _resolve_mode,
     render_sections,
@@ -229,7 +229,7 @@ def test_sabotage_refusal_message(fixtures: dict) -> None:
 def test_sabotage_loosen_check(fixtures: dict) -> None:
     """Monkeypatching a limit so a recorded refusal is accepted breaks the replay."""
     import refactory_dsh.optim.base as base_mod
-    import tests.proposer_replay as replay_mod
+    import proposer_replay as replay_mod
 
     hit = _find_refused_by_code("E-too-many-edits", fixtures)
     if hit is None:
