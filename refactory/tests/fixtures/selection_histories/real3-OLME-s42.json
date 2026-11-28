@@ -1,0 +1,127 @@
+{
+  "early_stop_at_full_val": false,
+  "early_stop_patience": 0,
+  "label": "real_real3-OLME-s42",
+  "rounds": [
+    {
+      "candidates": [
+        {
+          "exit_ok": true,
+          "label": "e233b3788b18",
+          "train_score": 0.2727272727272727,
+          "val_score": 0.3684210526315789
+        }
+      ]
+    },
+    {
+      "candidates": [
+        {
+          "exit_ok": true,
+          "label": "6c990185d62d",
+          "parent_label": "e233b3788b18",
+          "train_score": 0.25757575757575757,
+          "val_score": 0.3157894736842105
+        }
+      ]
+    },
+    {
+      "candidates": [
+        {
+          "exit_ok": true,
+          "label": "78c1af0f411e",
+          "parent_label": "e233b3788b18",
+          "train_score": 0.24242424242424243,
+          "val_score": 0.3684210526315789
+        }
+      ]
+    },
+    {
+      "candidates": [
+        {
+          "exit_ok": true,
+          "label": "d6aa5d5885ba",
+          "parent_label": "e233b3788b18",
+          "train_score": 0.24242424242424243,
+          "val_score": 0.4473684210526316
+        }
+      ]
+    },
+    {
+      "candidates": [
+        {
+          "exit_ok": true,
+          "label": "4515b5721578",
+          "parent_label": "e233b3788b18",
+          "train_score": 0.2878787878787879,
+          "val_score": 0.39473684210526316
+        }
+      ]
+    },
+    {
+      "candidates": [
+        {
+          "exit_ok": true,
+          "label": "341e4acc0e24",
+          "parent_label": "e233b3788b18",
+          "train_score": 0.22727272727272727,
+          "val_score": 0.34210526315789475
+        }
+      ]
+    },
+    {
+      "candidates": [
+        {
+          "exit_ok": true,
+          "label": "2d944a726d8a",
+          "parent_label": "d6aa5d5885ba",
+          "train_score": null,
+          "val_score": null
+        }
+      ]
+    },
+    {
+      "candidates": [
+        {
+          "exit_ok": true,
+          "label": "6156e7c38a35",
+          "parent_label": "d6aa5d5885ba",
+          "train_score": null,
+          "val_score": null
+        }
+      ]
+    },
+    {
+      "candidates": [
+        {
+          "exit_ok": true,
+          "label": "6987cd036fc7",
+          "parent_label": "d6aa5d5885ba",
+          "train_score": null,
+          "val_score": null
+        }
+      ]
+    },
+    {
+      "candidates": [
+        {
+          "exit_ok": true,
+          "label": "84cfc7511e43",
+          "parent_label": "d6aa5d5885ba",
+          "train_score": null,
+          "val_score": null
+        }
+      ]
+    },
+    {
+      "candidates": [
+        {
+          "exit_ok": true,
+          "label": "f6e6cdd0fd51",
+          "parent_label": "d6aa5d5885ba",
+          "train_score": null,
+          "val_score": null
+        }
+      ]
+    }
+  ]
+}

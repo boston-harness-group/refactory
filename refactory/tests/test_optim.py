@@ -10,6 +10,8 @@ from pathlib import Path
 
 import pytest
 
+from conftest import patch_in_package
+
 from refactory_dsh import nn, optim, registry
 from refactory_dsh.optim import Candidate, Optimizer, Proposal, ProposalContext
 
@@ -1058,7 +1060,7 @@ def test_no_tools_agent_nodes_and_the_optimizer_get_a_no_tools_client(tmp_path, 
         seen["policy"], seen["attempts"] = model._tool_policy, model.retry_attempts()
         return "A"
 
-    monkeypatch.setattr(nn_executor, "_ask_model", ask)
+    patch_in_package(monkeypatch, "refactory_dsh.nn.executor", "_ask_model", ask)
     from refactory_dsh.nn.graph import Graph, Node
 
     node = Node(id="answer", kind="agent", prompt_template="q", tool_policy="none",

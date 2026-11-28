@@ -30,6 +30,7 @@ from .failures import (
 )
 from .items import CURRENT_ITEM, load_items
 from .op_child import (
+    _ask_model,
     _emit_run_warnings,
     _ensure_forkserver_preload,
     _finish_op_child,
@@ -1438,8 +1439,7 @@ class Executor:
         def ask(attempt: Any, sent: str, place: Any) -> str:
             self.model_calls += 1
             if place is None:
-                import refactory_dsh.nn.executor as _pkg
-                response = _pkg._ask_model(attempt, sent, system=system, workdir=self.ctx.workdir)
+                response = _ask_model(attempt, sent, system=system, workdir=self.ctx.workdir)
             else:
                 response = workspaces.ask(place, attempt, sent, workdir=self.ctx.workdir, system=system)
             # Exchange-counting rule: one exchange per completed agent call.
