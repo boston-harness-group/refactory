@@ -39,6 +39,7 @@ from refactory_dsh.model import CompletionFailed, DshModelClient, is_retryable_f
 from refactory_dsh.optim import Candidate
 from refactory_dsh.outerloop import BudgetStopped, Run
 
+from conftest import patch_in_package
 from test_skillopt import MODE_ID, TEST_IDS, TRAIN_IDS, VAL_IDS, _patch_mode, _write_parts
 from test_val_gate import ScriptedLevels, _journal_events, _level
 
@@ -189,7 +190,7 @@ class Dsh:
 def quick_retries(monkeypatch):  # type: ignore[no-untyped-def]
     """The scripted plans start from the seed alone, and an in-run retry waits `WAITS`."""
     monkeypatch.setattr(Loop, "_seed_population", lambda self, seed: None)
-    monkeypatch.setattr(loop_module, "INTERRUPTED_RETRY_WAITS_S", WAITS)
+    patch_in_package(monkeypatch, "refactory_dsh.loop", "INTERRUPTED_RETRY_WAITS_S", WAITS)
 
 
 def _loop(tmp_path: Path, dsh: Dsh, plan: list[list[tuple[int, int]]], **overrides: Any) -> Loop:
