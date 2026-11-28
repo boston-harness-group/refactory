@@ -1085,7 +1085,13 @@ class AutoresearchOptimizer(Optimizer):
                              need_traces=asked)
             from .base import render_traces_for_items
 
-            traces_text = render_traces_for_items(asked, ctx.item_records)
+            # The follow-up is the same conversation, not a new one: the original request
+            # (pipeline, summary, findings, operations, answer format), the first reply,
+            # then the traces. Sent alone, the traces left the model without the
+            # pipeline or the answer format, and its reply had no proposals (a real
+            # replay: four unreadable entries, a per-item issue list as the diagnosis).
+            traces_text = (f"{question}\n\n## Your first reply\n\n{text.strip()}\n\n"
+                           f"{render_traces_for_items(asked, ctx.item_records)}")
             follow_call = {"kind": "proposal_traces", "epoch": ctx.epoch,
                            "generation": ctx.generation, "system": self._system,
                            "prompt": traces_text, "need_traces": asked,

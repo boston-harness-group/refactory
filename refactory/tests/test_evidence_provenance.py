@@ -303,7 +303,10 @@ def test_the_loop_annotates_the_analysts_the_proposer_and_memory(tmp_path, monke
         assert prompt.count("Ran as: LABEL work of 3 nodes") == 1, prompt
     memory_prompts = client.of((memory.MEMORY_SYSTEM,))
     assert memory_prompts and all("Ran as: LABEL work of 3 nodes" in p for p in memory_prompts)
-    assert "Ran as: LABEL work of 3 nodes" in client.proposal()
+    # The proposer no longer gets the items' traces inline when the analysts ran (they
+    # read every trace; #789): its request holds the item index and the findings, and a
+    # trace only arrives if it asks for one (`need_traces`).
+    assert "Ran as: LABEL work of 3 nodes" not in client.proposal()
     ctx = loop._context()
     assert ctx.item_records and all(r.get(evidence.STEP_SOURCES) for r in ctx.item_records)
     assert all(r.get(evidence.STEP_SOURCES) for r in ctx.parent_item_records)

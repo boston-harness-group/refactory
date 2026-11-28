@@ -516,3 +516,61 @@ def test_can_step_fix_it_in_finding_round_trips():
     assert parsed["can_step_fix_it"] == "yes", "reverting finding() drops can_step_fix_it"
     line = analysts.finding_line(1, parsed)
     assert "can the step fix it" in line, "reverting finding_line drops it"
+
+
+# ── need_traces follow-up, end to end through AutoresearchOptimizer.propose ──
+
+
+def _traces_client(second_reply: dict):
+    from test_analysts import ANALYST_SYSTEMS, MERGE_SYSTEMS, Client
+
+    class TracesClient(Client):
+        """Analysts as test_analysts.Client; the proposer asks for t1's trace first,
+        then answers with ``second_reply``."""
+
+        def complete(self, prompt, *, system="", **kw):
+            if system in ANALYST_SYSTEMS + MERGE_SYSTEMS:
+                return super().complete(prompt, system=system, **kw)
+            with self.lock:
+                self.calls.append((system, prompt))
+                n = sum(1 for s, _p in self.calls if s not in ANALYST_SYSTEMS + MERGE_SYSTEMS)
+            if n == 1:
+                return json.dumps({"diagnosis": "first", "proposals": [],
+                                   "need_traces": ["t1"]})
+            return json.dumps(second_reply)
+
+        def proposals(self):
+            return [p for s, p in self.calls if s not in ANALYST_SYSTEMS + MERGE_SYSTEMS]
+
+    return TracesClient()
+
+
+def test_need_traces_follow_up_keeps_the_original_request_and_yields_proposals():
+    """The follow-up turn carries the original request (pipeline, answer format) and the
+    first reply before the traces, so the final answer can propose: sent alone, the
+    traces left a real proposer without the pipeline or the answer format."""
+    from refactory_dsh.optim.random_optimizer import AutoresearchOptimizer
+    from test_analysts import _ctx, _rec
+
+    client = _traces_client({"diagnosis": "final", "proposals": [
+        {"edits": [{"op": "set_knob", "name": "style", "value": "NEW STYLE"}],
+         "rationale": "r"}]})
+    proposals = AutoresearchOptimizer(client).propose(_ctx([_rec("t1", False), _rec("t2", True)]),
+                                                      1, [])
+    asked = client.proposals()
+    assert len(asked) == 2
+    first, follow = asked
+    assert follow.startswith(first[:2000])
+    assert "## Your first reply" in follow and '"need_traces"' in follow
+    assert "QUESTION t1" in follow.split("## Your first reply", 1)[1]
+    assert len(proposals) == 1 and "set_knob" in json.dumps(proposals[0].edit)
+
+
+def test_need_traces_is_honoured_once():
+    """A second ask for traces in the follow-up answer gets no third call."""
+    from refactory_dsh.optim.random_optimizer import AutoresearchOptimizer
+    from test_analysts import _ctx, _rec
+
+    client = _traces_client({"diagnosis": "again", "proposals": [], "need_traces": ["t2"]})
+    AutoresearchOptimizer(client).propose(_ctx([_rec("t1", False), _rec("t2", True)]), 1, [])
+    assert len(client.proposals()) == 2
