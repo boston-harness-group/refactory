@@ -62,7 +62,7 @@ import tempfile
 from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Iterator
+from typing import Any, Iterator
 
 from refactory_dsh import lowering, nn
 from refactory_dsh.items import GRADER_FILES, PASS_RECORD
@@ -84,10 +84,13 @@ from refactory_dsh.workers import StepRoutes
 HERE = Path(__file__).resolve().parent
 CORPUS = HERE / "fixtures" / "structure_fuzz"
 INVARIANTS = ("lowering", "walker", "spine", "grader", "slots", "required", "knobs", "dataflow",
-              "forks", "protected", "tools", "code", "route")
+              "forks", "protected", "tools", "code", "route",
+              "refusal_raises", "refusal_names", "refusal_suggestion")
 #: Checks that run the real code (lowering, the walker, the spine) and look at what it
 #: did; the rest are spec checks, a second statement of the rules beside the validator.
 OBSERVED = ("lowering", "walker", "spine", "grader", "slots", "required")
+#: Invariants checked on refused edits rather than accepted states.
+REFUSAL_INVARIANTS = ("refusal_raises", "refusal_names", "refusal_suggestion")
 #: How both runtimes refuse a node whose required read is missing (`run.missing_inputs`).
 REQUIRED_MISSING = "required input is missing"
 #: Run facts the harness counts but does not call violations (an op's optional read
@@ -1100,6 +1103,375 @@ def check_routes_ran(state: dict[str, Any], model: "ScriptedModel") -> list[Viol
             if (graph.nodes[node].route if node in graph.nodes else None) != ran]
 
 
+# ── refusal invariants ────────────────────────────────────────────────────
+
+#: Patterns in refusal messages that assert facts about the graph.
+_RE_PRODUCED_BY = re.compile(r"produced by ([^;]+)")
+_RE_MISSING_EDGE_COND = re.compile(r"missing on the (\S+) --(\S+)--> (\S+)")
+_RE_MISSING_EDGE_PLAIN = re.compile(r"missing on the (\S+) --> (\S+)")
+_RE_AFTER_ANCHORS = re.compile(r'"after" one of \[([^\]]+)\] would reach it')
+_RE_THERE_LIST = re.compile(r"there: (.+?)$")
+_RE_IS_A_KIND = re.compile(r"'([^']+)' is a (fork|gate|join|data|op|agent)(?:[;: ,]|$)")
+_RE_EXISTING_NODES = re.compile(r"existing (?:steps|nodes): (.+)")
+_RE_GATE_VERDICTS = re.compile(r"its verdicts: (.+)")
+_RE_SEES_STEP = re.compile(r"step '([^']+)'s outputs are not there on every path")
+_RE_SEES_NAME = re.compile(r"'sees' names '([^']+)'")
+_RE_NO_OUTPUTS = re.compile(r"'([^']+)'[^']*\bno outputs\b")
+_RE_DOES_NOT_RUN_BEFORE = re.compile(
+    r"'([^']+)' does not run before the (?:new step|route) on every path")
+_RE_FORK_NO_JOIN = re.compile(r"fork '([^']+)' has no join")
+_RE_HAS_N_OUT_EDGES = re.compile(r"'([^']+)' has (\d+) out-edge\(s\) carrying verdicts")
+_RE_NO_STEP = re.compile(r"no (?:step|node) (.+?); existing (?:steps|nodes): (.+)")
+_RE_READS_WHICH_ONLY = re.compile(r"'([^']+)' reads \[(.+?)\], which only '([^']+)' ")
+_RE_WRITES_N_FILES = re.compile(r"'([^']+)' writes (\d+) files")
+_RE_COMPOUND_TAG = re.compile(r" \[edit \d+ of \d+: \w+\]$")
+#: Cap on how many suggested anchors to test per refusal.
+_SUGGESTION_CAP = 3
+
+
+def check_refusal_raises(outcome: list[str]) -> list[Violation]:
+    if not outcome:
+        return []
+    code = reason_code(outcome[0])
+    if code == "E-internal":
+        return [Violation("refusal_raises", f"attempt path crashed: {outcome[0][:300]}")]
+    return []
+
+
+def _all_names(graph: Graph, state: dict[str, Any]) -> set[str]:
+    """Every step id, fact name, and file name in the graph."""
+    names = set(graph.nodes)
+    for node in graph.nodes.values():
+        names |= set(node.writes)
+        names |= set(node.produces)
+        names |= set(node.reads)
+    for node in graph.nodes.values():
+        for f in ("prompt_template", "system_prompt_template"):
+            names |= set(SLOT.findall(str(getattr(node, f) or "")))
+    names |= set(state.get("knobs") or {})
+    return names
+
+
+def _parse_name_list(text: str) -> list[str]:
+    """Split a comma-separated list of names, stripping ``(+N more)`` suffixes."""
+    text = re.sub(r"\s*\(\+\d+ more\)", "", text).strip()
+    return [n.strip() for n in text.split(",") if n.strip()]
+
+
+def check_refusal_names(state: dict[str, Any], outcome: list[str]) -> list[Violation]:
+    graph = _graph_of(state)
+    all_names = _all_names(graph, state)
+    out: list[Violation] = []
+
+    for reason in outcome:
+        # "produced by X, Y": each should produce the resource
+        m = _RE_PRODUCED_BY.search(reason)
+        if m:
+            producers = _parse_name_list(m.group(1))
+            for p in producers:
+                if p not in graph.nodes:
+                    out.append(Violation("refusal_names",
+                                        f"refusal says produced by {p!r} but it is not a node"))
+
+        # "missing on the A --label--> B path": edge should exist
+        m = _RE_MISSING_EDGE_COND.search(reason)
+        if m:
+            source, label, target = m.group(1), m.group(2), m.group(3)
+            if source not in graph.nodes:
+                out.append(Violation("refusal_names",
+                                    f"refusal says missing on {source!r} edge but node absent"))
+            elif target not in graph.nodes:
+                out.append(Violation("refusal_names",
+                                    f"refusal says missing on edge to {target!r} but node absent"))
+            elif not any(e.target == target and (str(e.condition) == label or e.condition is None)
+                         for e in graph.out_edges(source)):
+                fork_node = graph.nodes.get(source)
+                is_branch = fork_node and fork_node.kind == "fork" and target in fork_node.targets
+                if not is_branch:
+                    out.append(Violation("refusal_names",
+                                        f"refusal says missing on {source} --{label}--> {target} "
+                                        "but that edge does not exist"))
+        else:
+            m = _RE_MISSING_EDGE_PLAIN.search(reason)
+            if m:
+                source, target = m.group(1), m.group(2)
+                if "(branch)" in reason:
+                    target = target.rstrip(")")
+                if source not in graph.nodes:
+                    out.append(Violation("refusal_names",
+                                        f"refusal says missing on {source!r} edge but node absent"))
+
+        # '"after" one of [X, Y] would reach it': each anchor should be a node
+        m = _RE_AFTER_ANCHORS.search(reason)
+        if m:
+            anchors = _parse_name_list(m.group(1))
+            for a in anchors:
+                if a not in graph.nodes:
+                    out.append(Violation("refusal_names",
+                                        f"refusal suggests anchor {a!r} but it is not a node"))
+
+        # "there: X, Y, Z": each should be in the graph
+        m = _RE_THERE_LIST.search(reason)
+        if m and m.group(1) != "nothing":
+            items = _parse_name_list(m.group(1))
+            for item in items:
+                if item not in all_names:
+                    out.append(Violation("refusal_names",
+                                        f"refusal lists {item!r} in 'there' but it is not "
+                                        "a step, fact, or file"))
+
+        # "'X' is a Y": node kind should match
+        for kind_match in _RE_IS_A_KIND.finditer(reason):
+            node_id, kind = kind_match.group(1), kind_match.group(2)
+            if node_id in graph.nodes and graph.nodes[node_id].kind != kind:
+                out.append(Violation("refusal_names",
+                                    f"refusal says {node_id!r} is a {kind} but it is a "
+                                    f"{graph.nodes[node_id].kind}"))
+
+        # "existing steps: X, Y": each should exist
+        m = _RE_EXISTING_NODES.search(reason)
+        if m:
+            names = _parse_name_list(m.group(1))
+            for name in names:
+                if name not in graph.nodes:
+                    out.append(Violation("refusal_names",
+                                        f"refusal lists {name!r} as existing but it is not"))
+
+        # "its verdicts: X, Y": gate should have those verdicts
+        m = _RE_GATE_VERDICTS.search(reason)
+        if m:
+            claimed = _parse_name_list(m.group(1))
+            gate_match = re.search(r"gate '([^']+)'", reason)
+            if gate_match and gate_match.group(1) in graph.nodes:
+                gate_id = gate_match.group(1)
+                actual = sorted({str(e.condition) for e in graph.out_edges(gate_id) if e.condition})
+                if sorted(claimed) != actual:
+                    out.append(Violation("refusal_names",
+                                        f"refusal says {gate_id!r} verdicts are {claimed} "
+                                        f"but actual are {actual}"))
+
+        # any "'X' ... no outputs" claim: check node has no writes and no produces
+        m = _RE_NO_OUTPUTS.search(reason)
+        if m:
+            node_id = m.group(1)
+            if node_id in graph.nodes:
+                node = graph.nodes[node_id]
+                if node.writes or node.produces:
+                    out.append(Violation("refusal_names",
+                                        f"refusal says {node_id!r} has no outputs but it has "
+                                        f"writes={list(node.writes)} produces={list(node.produces)}"))
+
+        # "'X' does not run before the new step on every path": should be true
+        m = _RE_DOES_NOT_RUN_BEFORE.search(reason)
+        if m:
+            node_id = m.group(1)
+            if node_id not in graph.nodes:
+                out.append(Violation("refusal_names",
+                                    f"refusal says {node_id!r} does not run before but node "
+                                    "does not exist"))
+
+        # "fork 'X' has no join": fork should exist and have no join
+        m = _RE_FORK_NO_JOIN.search(reason)
+        if m:
+            fork_id = m.group(1)
+            if fork_id not in graph.nodes:
+                out.append(Violation("refusal_names",
+                                    f"refusal says fork {fork_id!r} has no join but node absent"))
+            elif graph.nodes[fork_id].kind != "fork":
+                out.append(Violation("refusal_names",
+                                    f"refusal says fork {fork_id!r} has no join but it is a "
+                                    f"{graph.nodes[fork_id].kind}"))
+
+        # "'X' has N out-edge(s) carrying verdicts"
+        m = _RE_HAS_N_OUT_EDGES.search(reason)
+        if m:
+            node_id, claimed_count = m.group(1), int(m.group(2))
+            if node_id in graph.nodes:
+                actual_count = len(graph.out_edges(node_id))
+                if actual_count != claimed_count:
+                    out.append(Violation("refusal_names",
+                                        f"refusal says {node_id!r} has {claimed_count} out-edges "
+                                        f"but it has {actual_count}"))
+
+        # "no step X; existing steps: Y, Z"
+        m = _RE_NO_STEP.search(reason)
+        if m:
+            claimed_missing = m.group(1).strip().strip("'")
+            if claimed_missing in graph.nodes:
+                out.append(Violation("refusal_names",
+                                    f"refusal says no step {claimed_missing!r} but it exists"))
+            existing = _parse_name_list(m.group(2))
+            for name in existing:
+                if name not in graph.nodes:
+                    out.append(Violation("refusal_names",
+                                        f"refusal lists {name!r} as existing but it is not"))
+
+        # "'X' reads [Y, Z], which only 'W' produces"
+        m = _RE_READS_WHICH_ONLY.search(reason)
+        if m:
+            reader, producer = m.group(1), m.group(3)
+            if reader not in graph.nodes:
+                out.append(Violation("refusal_names",
+                                    f"refusal says {reader!r} reads but node absent"))
+            if producer not in graph.nodes:
+                out.append(Violation("refusal_names",
+                                    f"refusal says only {producer!r} produces but node absent"))
+
+        # "'X' writes N files"
+        m = _RE_WRITES_N_FILES.search(reason)
+        if m:
+            node_id, claimed = m.group(1), int(m.group(2))
+            if node_id in graph.nodes:
+                actual = len(graph.nodes[node_id].writes)
+                if actual != claimed:
+                    out.append(Violation("refusal_names",
+                                        f"refusal says {node_id!r} writes {claimed} files "
+                                        f"but it writes {actual}"))
+
+    return out
+
+
+def _refusal_sees_name(outcome: list[str]) -> str | None:
+    """The name a sees-path refusal complains about, or None."""
+    for reason in outcome:
+        m = _RE_SEES_STEP.search(reason)
+        if m:
+            return m.group(1)
+        m = _RE_SEES_NAME.search(reason)
+        if m:
+            return m.group(1)
+    return None
+
+
+def check_refusal_suggestion(applier: Applier, parent: "Candidate", edit: Any,
+                             outcome: list[str], seen: set[str]
+                             ) -> tuple[list[Violation], bool]:
+    """Check anchor suggestions; returns (violations, was_attempted)."""
+    if not isinstance(edit, dict):
+        return [], False
+    has_anchors = any(_RE_AFTER_ANCHORS.search(r) for r in outcome)
+    if not has_anchors:
+        return [], False
+    complained_name = _refusal_sees_name(outcome)
+    if edit.get("op") == "insert" and complained_name is not None:
+        return _check_insert_suggestion(applier, parent, edit, outcome,
+                                        seen, complained_name), True
+    if edit.get("op") == "insert" and edit.get("takes_over") is not None:
+        return _check_takeover_suggestion(applier, parent, edit, outcome, seen), True
+    if edit.get("op") == "route":
+        return _check_route_suggestion(applier, parent, edit, outcome, seen), True
+    return [], False
+
+
+def _check_insert_suggestion(applier: Applier, parent: "Candidate", edit: dict,
+                             outcome: list[str], seen: set[str],
+                             complained_name: str) -> list[Violation]:
+    for reason in outcome:
+        m = _RE_AFTER_ANCHORS.search(reason)
+        if not m:
+            continue
+        anchors = _parse_name_list(m.group(1))[:_SUGGESTION_CAP]
+        for anchor in anchors:
+            modified = dict(edit)
+            modified.pop("before", None)
+            modified["after"] = anchor
+            try:
+                new_outcome = applier.attempt(parent, modified, seen)
+            except Exception:  # noqa: BLE001
+                continue
+            if isinstance(new_outcome, list):
+                new_name = _refusal_sees_name(new_outcome)
+                if new_name == complained_name:
+                    return [Violation("refusal_suggestion",
+                                     f"suggested anchor {anchor!r} still refuses for "
+                                     f"{complained_name!r}: {new_outcome[0][:200]}")]
+    return []
+
+
+def _check_takeover_suggestion(applier: Applier, parent: "Candidate", edit: dict,
+                               outcome: list[str], seen: set[str]) -> list[Violation]:
+    for reason in outcome:
+        m = _RE_AFTER_ANCHORS.search(reason)
+        if not m:
+            continue
+        anchors = _parse_name_list(m.group(1))[:_SUGGESTION_CAP]
+        for anchor in anchors:
+            modified = dict(edit)
+            modified.pop("before", None)
+            modified["after"] = anchor
+            try:
+                new_outcome = applier.attempt(parent, modified, seen)
+            except Exception:  # noqa: BLE001
+                continue
+            if isinstance(new_outcome, list):
+                still_path = any(_RE_DOES_NOT_RUN_BEFORE.search(r) for r in new_outcome)
+                if still_path:
+                    return [Violation("refusal_suggestion",
+                                     f"suggested anchor {anchor!r} still refuses for "
+                                     f"takes_over: {new_outcome[0][:200]}")]
+    return []
+
+
+def _check_route_suggestion(applier: Applier, parent: "Candidate", edit: dict,
+                            outcome: list[str], seen: set[str]) -> list[Violation]:
+    to = edit.get("to")
+    if not isinstance(to, dict):
+        return []
+    complained = None
+    for reason in outcome:
+        m = _RE_DOES_NOT_RUN_BEFORE.search(reason)
+        if m:
+            complained = m.group(1)
+            break
+    if complained is None:
+        return []
+    for reason in outcome:
+        m = _RE_AFTER_ANCHORS.search(reason)
+        if not m:
+            continue
+        anchors = _parse_name_list(m.group(1))[:_SUGGESTION_CAP]
+        for anchor in anchors:
+            modified = {**edit, "after": anchor}
+            try:
+                new_outcome = applier.attempt(parent, modified, seen)
+            except Exception:  # noqa: BLE001
+                continue
+            if isinstance(new_outcome, list):
+                still = any(_RE_DOES_NOT_RUN_BEFORE.search(r)
+                            and _RE_DOES_NOT_RUN_BEFORE.search(r).group(1) == complained
+                            for r in new_outcome)
+                if still:
+                    return [Violation("refusal_suggestion",
+                                     f"suggested anchor {anchor!r} still refuses for "
+                                     f"route takes_over {complained!r}: "
+                                     f"{new_outcome[0][:200]}")]
+    return []
+
+
+def check_refusal(applier: Applier, parent: "Candidate", edit: Any,
+                  outcome: list[str], seen: set[str]) -> tuple[list[Violation], Counter]:
+    """All refusal invariants for one refused edit, and per-invariant hit counts."""
+    hits: Counter = Counter()
+    out: list[Violation] = []
+    raises = check_refusal_raises(outcome)
+    if raises:
+        hits["refusal_raises"] += 1
+        out += raises
+    names = check_refusal_names(parent.state, outcome)
+    if names:
+        hits["refusal_names"] += 1
+    else:
+        hits["refusal_names_checked"] += 1
+    out += names
+    suggestion, attempted = check_refusal_suggestion(applier, parent, edit, outcome, seen)
+    if suggestion:
+        hits["refusal_suggestion"] += 1
+    out += suggestion
+    if attempted:
+        hits["refusal_suggestion_checked"] += 1
+    return out, hits
+
+
 def check_static(seed_state: dict[str, Any], state: dict[str, Any],
                  protected: tuple[str, ...]) -> list[Violation]:
     return [*check_lowering(state), *check_knobs(state), *check_dataflow(state),
@@ -1164,6 +1536,7 @@ class EditGenerator:
     def __init__(self, rng: random.Random, *, code_nodes: bool = CODE_NODES) -> None:
         self.rng = rng
         self.route_rng = random.Random(f"route:{rng.getstate()[1][:4]}")
+        self.sees_rng = random.Random(f"sees:{rng.getstate()[1][:4]}")
         self.counter = 0
         #: Whether new code nodes are drawn (only where this machine can run them).
         self.code_nodes = code_nodes and CODE_NODES
@@ -1417,6 +1790,79 @@ class EditGenerator:
             current = after
         return {"edits": edits}
 
+    def sees_probe(self, state: dict[str, Any]) -> dict[str, Any]:
+        """An ``insert`` whose ``sees`` names a step, fact or file from the graph,
+        drawn from the sees stream so the main stream stays what it was.  Hits the
+        sees-path refusals (with their placement hints) on any seed with branching."""
+        graph = _graph_of(state)
+        ids = sorted(graph.nodes)
+        target = self.sees_rng.choice(ids) if ids else "x"
+        all_names = sorted({n for node in graph.nodes.values()
+                            for n in (*node.writes, *node.produces)} | set(ids))
+        pool = ["task", *all_names]
+        sees = self.sees_rng.sample(pool, k=min(len(pool), self.sees_rng.choice((1, 1, 2))))
+        side = self.sees_rng.choice(("after", "before"))
+        return {"op": "insert", side: target, "kind": "agent", "sees": sees}
+
+    def takeover_probe(self, state: dict[str, Any]) -> dict[str, Any]:
+        """An ``insert`` whose ``takes_over`` targets a mix of valid and invalid nodes:
+        gates, forks, data, ops with no outputs, unreachable steps, and valid ones."""
+        rng = self.sees_rng
+        graph = _graph_of(state)
+        ids = sorted(graph.nodes)
+        anchor = rng.choice(ids)
+        gates = [n for n, nd in graph.nodes.items() if nd.kind == "gate"]
+        forks = [n for n, nd in graph.nodes.items() if nd.kind in ("fork", "join", "data")]
+        no_out = [n for n, nd in graph.nodes.items()
+                  if nd.kind in ("agent", "op") and not nd.writes and not nd.produces]
+        with_out = [n for n, nd in graph.nodes.items()
+                    if nd.kind in ("agent", "op") and (nd.writes or nd.produces)]
+        pool = gates + forks + no_out + with_out + ["ghost"]
+        if not pool:
+            pool = ids
+        target = rng.choice(pool)
+        return {"op": "insert", "after": anchor, "kind": "agent", "takes_over": target}
+
+    def fork_probe(self, state: dict[str, Any]) -> dict[str, Any]:
+        """Serialize or branch targeting a fork without a join, or insert one to set up
+        a future trigger."""
+        rng = self.sees_rng
+        graph = _graph_of(state)
+        orphans = [n for n, nd in graph.nodes.items()
+                   if nd.kind == "fork"
+                   and (graph.fork_join(n) is None
+                        or graph.fork_join(n) not in graph.nodes
+                        or graph.nodes[graph.fork_join(n)].kind != "join")]
+        if orphans:
+            return {"op": rng.choice(("serialize", "branch")), "fork": rng.choice(orphans)}
+        ids = sorted(graph.nodes)
+        if not ids:
+            return {"op": "serialize", "fork": "ghost"}
+        new_id = self.fresh_id(graph, "pfork")
+        targets = rng.sample(ids, k=min(len(ids), 2))
+        return {"op": "add_node",
+                "node": {"id": new_id, "kind": "fork", "targets": targets},
+                "position": {"after": rng.choice(ids)}}
+
+    def edge_probe(self, state: dict[str, Any]) -> dict[str, Any]:
+        """Insert after a node with multiple/conditional out-edges (triggering ``_sole_out``),
+        or add a conditional edge to set up a future trigger."""
+        rng = self.sees_rng
+        graph = _graph_of(state)
+        multi = [n for n, nd in graph.nodes.items()
+                 if nd.kind not in ("fork", "gate")
+                 and (len(graph.out_edges(n)) > 1
+                      or any(e.condition is not None for e in graph.out_edges(n)))]
+        if multi:
+            return {"op": "insert", "after": rng.choice(multi), "kind": "agent"}
+        plain = [n for n, nd in graph.nodes.items()
+                 if nd.kind in ("agent", "op") and graph.out_edges(n)]
+        if not plain:
+            return {"op": "insert", "after": "ghost", "kind": "agent"}
+        return {"op": "add_edge", "source": rng.choice(plain),
+                "target": rng.choice(sorted(graph.nodes)),
+                "condition": rng.choice(("proceed", "revise"))}
+
     def edit(self, state: dict[str, Any]) -> Any:
         rng, graph = self.rng, _graph_of(state)
         if rng.random() < 0.08:
@@ -1535,6 +1981,15 @@ class EditGenerator:
                 return {"op": "insert", side: target}  # all defaults: a copy of the neighbour
             edit = {"op": "insert", side: target, **self.step_spec(state, kinds=(
                 "agent", "agent", "code", "op"))}
+            # Drawn from its own stream so the main stream stays the same: an insert that
+            # asks to see a step or name, often one not on every path, so the refusal
+            # invariants check the placement hints the edit layer writes.
+            if "sees" not in edit and self.sees_rng.random() < 0.5:
+                all_names = sorted({n for node in graph.nodes.values()
+                                    for n in (*node.writes, *node.produces)} | set(ids))
+                pool = ["task", *all_names]
+                edit["sees"] = self.sees_rng.sample(
+                    pool, k=min(len(pool), self.sees_rng.choice((1, 1, 2))))
             outputs = [n for n, node in graph.nodes.items()
                        if node.kind in ("agent", "op") and (node.writes or node.produces)]
             if outputs and rng.random() < 0.5:
@@ -1574,11 +2029,11 @@ class EditGenerator:
             succ = [e.target for e in graph.out_edges(target)]
             to: dict[str, Any] = {"proceed": succ[0] if succ else target,
                                   "other": self.step_spec(state, sees=False)}
+            if self.sees_rng.random() < 0.4:
+                to["other"]["takes_over"] = self.sees_rng.choice(ids)
             if rng.random() < 0.3 and len(ids) > 2:
                 to["skip"] = rng.choice(ids)
             if rng.random() < 0.5 and succ:
-                # A route straight to a later step: refused when a step it skips made an
-                # input a later step reads (`core_ops.lost_inputs`).
                 later = sorted(_downstream_ids(graph, succ[0]) - {succ[0], target})
                 if later:
                     to = {"long": succ[0], "short": rng.choice(later)}
@@ -1685,6 +2140,8 @@ class Stats:
     compound_named: int = 0
     #: How often the core operators' own checks were reached (`path_of`).
     paths: Counter = field(default_factory=Counter)
+    #: Per-invariant hit counts for the refusal invariants.
+    refusal_hits: Counter = field(default_factory=Counter)
 
     def summary(self) -> dict[str, Any]:
         observed = {k: v for k, v in self.violations.items() if k in OBSERVED or k == "attempt"}
@@ -1700,6 +2157,7 @@ class Stats:
                              "refused": dict(sorted(self.compound_refused.items())),
                              "refusals_naming_the_edit": self.compound_named},
                 "paths": dict(sorted(self.paths.items())),
+                "refusal_hits": dict(sorted(self.refusal_hits.items())),
                 "findings": len(self.findings)}
 
 
@@ -1765,13 +2223,25 @@ class Fuzzer:
                 return
             bundle = bool(self.compound) and rng.random() < self.compound
             edit = generator.compound(current.state) if bundle else generator.edit(current.state)
+            if not bundle:
+                probe_roll = generator.sees_rng.random()
+                ids = sorted(_graph_of(current.state).nodes)
+                if probe_roll < 0.08 and ids:
+                    edit = generator.sees_probe(current.state)
+                elif probe_roll < 0.14 and ids:
+                    edit = generator.takeover_probe(current.state)
+                elif probe_roll < 0.17 and ids:
+                    edit = generator.fork_probe(current.state)
+                elif probe_roll < 0.20 and ids:
+                    edit = generator.edge_probe(current.state)
             self.stats.tried += 1
             self.stats.compound_tried += int(bundle)
             try:
                 outcome = applier.attempt(current, edit, seen)
             except Exception as exc:  # noqa: BLE001 - the attempt path must never raise
                 self._record(seed, applier, [*accepted, edit],
-                             [Violation("attempt", f"raised {type(exc).__name__}: {exc}")])
+                             [Violation("refusal_raises",
+                                        f"raised {type(exc).__name__}: {exc}")])
                 continue
             if bundle:
                 wrong = check_compound(applier, current, edit["edits"], outcome)
@@ -1788,10 +2258,20 @@ class Fuzzer:
             if isinstance(outcome, list):
                 code = reason_code(outcome[0]) if outcome else "?"
                 self.stats.refused[code] += 1
-                if code == "E-internal":
-                    # An operator that raised is a bug in the edit layer, not a refusal.
-                    self._record(seed, applier, [*accepted, edit],
-                                 [Violation("attempt", outcome[0])])
+                if not bundle:
+                    refusal_found, refusal_hits = check_refusal(
+                        applier, current, edit, outcome, seen)
+                    self.stats.refusal_hits.update(refusal_hits)
+                    if refusal_found:
+                        self._record(seed, applier, [*accepted, edit], refusal_found,
+                                     minimize=False)
+                elif bundle and outcome:
+                    compound_refusal = _check_compound_refusal(
+                        applier, current, edit["edits"], outcome, seen)
+                    self.stats.refusal_hits.update(compound_refusal[1])
+                    if compound_refusal[0]:
+                        self._record(seed, applier, [*accepted, edit],
+                                     compound_refusal[0], minimize=False)
                 continue
             self.stats.accepted += 1
             accepted.append(edit)
@@ -1817,6 +2297,44 @@ class Fuzzer:
         if self.shrink and minimize:
             edits = shrink(applier, edits, found[0].invariant, spine=spine)
         self.stats.findings.append(Finding(seed.name, edits, found))
+
+
+def _check_compound_refusal(applier: Applier, parent: Candidate,
+                            edits: list[Any], outcome: list[str],
+                            seen: set[str]) -> tuple[list[Violation], Counter]:
+    """Check a compound edit's refusal by stripping the ``[edit N of M: op]`` tag and
+    checking the inner message against the intermediate state the failing edit was
+    applied to."""
+    hits: Counter = Counter()
+    if not outcome:
+        return [], hits
+    reason = outcome[0]
+    m = re.search(r"\[edit (\d+) of (\d+): \w+\]$", reason)
+    if not m:
+        names = check_refusal_names(parent.state, outcome)
+        if names:
+            hits["refusal_names"] += 1
+        else:
+            hits["refusal_names_checked"] += 1
+        return names, hits
+    failing_index = int(m.group(1)) - 1
+    stripped = [_RE_COMPOUND_TAG.sub("", r) for r in outcome]
+    state = parent.state
+    for i in range(min(failing_index, len(edits))):
+        edit = edits[i]
+        if not isinstance(edit, dict):
+            break
+        try:
+            after = nn_edits.apply(edit, state)
+        except Exception:  # noqa: BLE001
+            break
+        state = after
+    names = check_refusal_names(state, stripped)
+    if names:
+        hits["refusal_names"] += 1
+    else:
+        hits["refusal_names_checked"] += 1
+    return names, hits
 
 
 def _patch_missed(edit: Any, reports: list[dict[str, Any]]) -> bool:
@@ -1935,7 +2453,8 @@ def violations_of(applier: Applier, edits: list[Any], *, spine: bool = False,
     """The violations of the state ``edits`` reach, or None when one of them is refused.
 
     An edit list whose last edit makes the attempt path raise reports that as the
-    ``attempt`` violation.
+    ``refusal_raises`` violation.  When ``only`` includes a refusal invariant and the
+    last edit is refused, that edit's refusal is checked too.
     """
     current = Candidate.from_state(applier.seed_state)
     seen = {current.id}
@@ -1943,12 +2462,17 @@ def violations_of(applier: Applier, edits: list[Any], *, spine: bool = False,
         try:
             outcome = applier.attempt(current, edit, seen)
         except Exception as exc:  # noqa: BLE001
-            if index == len(edits) - 1:
-                return [Violation("attempt", f"raised {type(exc).__name__}: {exc}")]
+            if index == len(edits) - 1 and "refusal_raises" in only:
+                return [Violation("refusal_raises", f"raised {type(exc).__name__}: {exc}")]
             return None
         if isinstance(outcome, list):
-            if index == len(edits) - 1 and outcome and reason_code(outcome[0]) == "E-internal":
-                return [Violation("attempt", outcome[0])]
+            if index == len(edits) - 1:
+                refusal_only = set(only) & set(REFUSAL_INVARIANTS)
+                if refusal_only:
+                    found, _hits = check_refusal(applier, current, edit, outcome, seen)
+                    found = [v for v in found if v.invariant in only]
+                    if found:
+                        return found
             return None
         current = outcome
         seen.add(current.id)
@@ -2006,3 +2530,119 @@ def replay_case(path: Path, *, spine: bool = False) -> tuple[list[Violation], li
     for candidate in states[1:]:
         found += check_state(applier, candidate.state, walker=True, spine=spine)
     return found, refusal
+
+
+# ── the decision record ──────────────────────────────────────────────────
+
+RECORD_SEED = 20261131
+RECORD_EDITS_PER_WALK = 8
+RECORD_PATH = HERE / "fixtures" / "structure_fuzz_record.json"
+
+
+def _stable_edit(edit: Any) -> Any:
+    """A JSON-serialisable copy of an edit with sorted keys for determinism."""
+    if isinstance(edit, dict):
+        return {k: _stable_edit(v) for k, v in sorted(edit.items())}
+    if isinstance(edit, (list, tuple)):
+        return [_stable_edit(v) for v in edit]
+    return edit
+
+
+def generate_record(seed: int = RECORD_SEED,
+                    edits_per_walk: int = RECORD_EDITS_PER_WALK) -> list[dict[str, Any]]:
+    """Record every edit's decision for one fixed seed across all seed graphs."""
+    names = sorted(seeds())
+    decisions: list[dict[str, Any]] = []
+    walk = 0
+    for name in names:
+        s = seeds()[name]
+        rng = random.Random(f"{seed}:{s.name}:{walk}")
+        applier = Applier(s)
+        generator = EditGenerator(rng, code_nodes=CODE_NODES)
+        current = Candidate.from_state(applier.seed_state)
+        seen = {current.id}
+        for step_index in range(edits_per_walk):
+            edit = generator.edit(current.state)
+            probe_roll = generator.sees_rng.random()
+            ids = sorted(_graph_of(current.state).nodes)
+            if probe_roll < 0.08 and ids:
+                edit = generator.sees_probe(current.state)
+            elif probe_roll < 0.30 and ids:
+                edit = generator.takeover_probe(current.state)
+            elif probe_roll < 0.35 and ids:
+                edit = generator.fork_probe(current.state)
+            elif probe_roll < 0.40 and ids:
+                edit = generator.edge_probe(current.state)
+            try:
+                outcome = applier.attempt(current, edit, seen)
+            except Exception as exc:  # noqa: BLE001
+                decisions.append({
+                    "seed_name": name,
+                    "step": step_index,
+                    "edit": _stable_edit(edit),
+                    "decision": "error",
+                    "message": f"{type(exc).__name__}: {exc}",
+                })
+                continue
+            if isinstance(outcome, list):
+                decisions.append({
+                    "seed_name": name,
+                    "step": step_index,
+                    "edit": _stable_edit(edit),
+                    "decision": "refused",
+                    "reason_codes": sorted({reason_code(r) for r in outcome}),
+                    "reasons": list(outcome),
+                })
+            else:
+                decisions.append({
+                    "seed_name": name,
+                    "step": step_index,
+                    "edit": _stable_edit(edit),
+                    "decision": "accepted",
+                    "state_id": candidate_id(outcome.state),
+                })
+                current = outcome
+                seen.add(current.id)
+                if len(current.state["graph"]["nodes"]) > MAX_NODES:
+                    break
+        walk += 1
+    return decisions
+
+
+def save_record(decisions: list[dict[str, Any]], path: Path = RECORD_PATH) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"seed": RECORD_SEED,
+                                "edits_per_walk": RECORD_EDITS_PER_WALK,
+                                "decisions": decisions},
+                               indent=2, sort_keys=True, default=str) + "\n")
+    return path
+
+
+def load_record(path: Path = RECORD_PATH) -> list[dict[str, Any]]:
+    return json.loads(path.read_text())["decisions"]
+
+
+def diff_records(old: list[dict[str, Any]],
+                 new: list[dict[str, Any]]) -> list[str]:
+    """A human-readable per-edit diff of two decision records."""
+    diffs: list[str] = []
+    for index in range(max(len(old), len(new))):
+        o = old[index] if index < len(old) else {"decision": "(missing)"}
+        n = new[index] if index < len(new) else {"decision": "(missing)"}
+        if o == n:
+            continue
+        seed = o.get("seed_name") or n.get("seed_name", "?")
+        step = o.get("step", n.get("step", "?"))
+        parts = [f"edit {index} ({seed} step {step}):"]
+        if o.get("decision") != n.get("decision"):
+            parts.append(f"  decision: {o.get('decision')} -> {n.get('decision')}")
+        for key in ("state_id", "reason_codes"):
+            if o.get(key) != n.get(key):
+                parts.append(f"  {key}: {o.get(key)} -> {n.get(key)}")
+        if o.get("reasons") != n.get("reasons"):
+            old_msg = (o.get("reasons") or [""])[0][:200]
+            new_msg = (n.get("reasons") or [""])[0][:200]
+            parts.append(f"  reason: {old_msg!r}")
+            parts.append(f"      ->  {new_msg!r}")
+        diffs.append("\n".join(parts))
+    return diffs
