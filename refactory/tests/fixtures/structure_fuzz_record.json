@@ -1356,7 +1356,7 @@
         "takes_over": "finalize"
       },
       "seed_name": "fuzz_skip_path",
-      "state_id": "2bc064dac6b5",
+      "state_id": "8b417d7205fb",
       "step": 0
     },
     {
@@ -1379,29 +1379,32 @@
       "step": 1
     },
     {
-      "decision": "accepted",
+      "decision": "refused",
       "edit": {
         "node": {
           "blocking": true,
-          "call": "structure_fuzz_graphs:step",
+          "call": "",
           "evaluator": "",
           "id": "process_c3",
-          "kind": "op",
+          "kind": "agent",
           "knobs": [],
           "max_iterations": 1,
           "notes": "",
           "produces": [
             "result"
           ],
-          "prompt_template": "",
+          "prompt_template": "Process the brief: {{brief}}",
           "reads": [
             "brief.txt"
           ],
-          "role": "ceo",
+          "role": "solver",
           "score_effect": "affects",
+          "system_prompt_template": "You are copy process_c3.",
+          "timeout_s": 60,
+          "tool_policy": "none",
           "tools": [],
           "writes": [
-            "result.txt"
+            "process_c3.txt"
           ]
         },
         "op": "add_node",
@@ -1409,8 +1412,13 @@
           "start": true
         }
       },
+      "reason_codes": [
+        "V15"
+      ],
+      "reasons": [
+        "V15 [process_c3]: needs file 'brief.txt', {{brief}}, which some path to it does not produce first; an agent's inputs are required (a data pass's own files and facts stay inside its pass). A fact the runtime re-derives before each dispatch belongs in the node's feedback_keys, and an optional one goes inside {% if name %}...{% endif %}"
+      ],
       "seed_name": "fuzz_skip_path",
-      "state_id": "4c65babcce00",
       "step": 2
     },
     {
@@ -1438,13 +1446,13 @@
         "after": "finalize_next",
         "kind": "agent",
         "op": "insert",
-        "takes_over": "has_case"
+        "takes_over": "ghost"
       },
       "reason_codes": [
         "E-precondition"
       ],
       "reasons": [
-        "E-precondition: 'has_case' is a gate; only agent or op steps can be taken over"
+        "E-precondition: 'takes_over' names an existing step, not 'ghost'"
       ],
       "seed_name": "fuzz_skip_path",
       "step": 4
@@ -1452,27 +1460,14 @@
     {
       "decision": "refused",
       "edit": {
-        "node": {
-          "id": "pfork7",
-          "kind": "fork",
-          "targets": [
-            "process",
-            "has_case"
-          ]
-        },
-        "op": "add_node",
-        "position": {
-          "after": "process"
-        }
+        "fork": "finalize_next",
+        "op": "serialize"
       },
       "reason_codes": [
-        "V10",
-        "V16"
+        "E-precondition"
       ],
       "reasons": [
-        "V10: cycle through 'pfork7' avoids every gate; route every cycle through a gate with a bounded retry transition",
-        "V16 [pfork7]: a fork's one unconditional out-edge leads to its join, where its branches meet; this fork leads to 'finalize', which is not a join",
-        "V16 [pfork7]: fork 'pfork7': branches declare the same produced facts"
+        "E-precondition: 'finalize_next' is a agent, not a fork"
       ],
       "seed_name": "fuzz_skip_path",
       "step": 5
@@ -1480,51 +1475,36 @@
     {
       "decision": "refused",
       "edit": {
-        "condition": "revise",
-        "op": "add_edge",
-        "source": "start",
-        "target": "start"
+        "before": "process",
+        "kind": "agent",
+        "op": "insert",
+        "sees": [
+          "finalize"
+        ]
       },
       "reason_codes": [
-        "V10",
-        "V4"
+        "E-precondition"
       ],
       "reasons": [
-        "V10: cycle through 'start' avoids every gate; route every cycle through a gate with a bounded retry transition",
-        "V4 [start]: a non-gate node needs at most one out-edge, has 2"
+        "E-precondition: step 'finalize''s outputs are not there on every path to the new step, so it cannot see them (produced by finalize; missing on the has_case --skip--> finalize path; \"after\" one of [finalize, finalize_next, finalize_next_inputs] would reach it); 'sees' requires every path to carry the name, even when the step tolerates its absence"
       ],
       "seed_name": "fuzz_skip_path",
       "step": 6
     },
     {
-      "decision": "accepted",
+      "decision": "refused",
       "edit": {
-        "node": {
-          "blocking": true,
-          "call": "structure_fuzz_graphs:step",
-          "evaluator": "",
-          "id": "start_c8",
-          "kind": "op",
-          "knobs": [],
-          "max_iterations": 1,
-          "notes": "",
-          "produces": [
-            "brief"
-          ],
-          "prompt_template": "",
-          "reads": [],
-          "role": "ceo",
-          "score_effect": "affects",
-          "tools": [],
-          "writes": [
-            "brief.txt"
-          ]
-        },
-        "op": "insert_after",
-        "target": "process_c3"
+        "op": "remove_edge",
+        "source": "has_case",
+        "target": "finalize"
       },
+      "reason_codes": [
+        "V5"
+      ],
+      "reasons": [
+        "V5 [has_case]: a gate needs at least two conditioned out-edges, has 1"
+      ],
       "seed_name": "fuzz_skip_path",
-      "state_id": "844935276cba",
       "step": 7
     },
     {
