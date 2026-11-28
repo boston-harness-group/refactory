@@ -301,6 +301,18 @@ def test_mark_targeted_by_knob_overlap():
     assert "round 1" in result[0]["already_targeted"]
 
 
+def test_mark_targeted_ignores_shared_common_words():
+    """A finding whose text shares common words with an earlier target, but names no
+    step or knob that target edited, is not marked as already targeted."""
+    findings = [{"finding": "The output prompt produces errors in the final steps of the model",
+                 "where": {"nodes": ["draft"], "knobs": []}}]
+    targets = [{"round": 2, "change": "+0.01",
+                "targets": "output prompt errors in final steps of the model",
+                "edits": [{"op": "set_knob", "name": "review__task"}]}]
+    result = analysts._mark_targeted(findings, targets)
+    assert "already_targeted" not in result[0]
+
+
 def test_mark_targeted_no_match():
     findings = [{"finding": "draft step fails badly", "where": {"nodes": ["step_a"]},
                  "items": ["t1"]}]

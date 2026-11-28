@@ -852,16 +852,16 @@ def _mark_targeted(findings: list[dict[str, Any]],
     if not targets:
         return findings
     for f in findings:
-        text = str(f.get("finding", "")).lower()
         where = f.get("where") or {}
         nodes = {str(n).lower() for n in where.get("nodes") or ()}
         knobs = {str(k).lower() for k in where.get("knobs") or ()}
         for t in targets:
-            t_text = str(t.get("targets", "")).lower()
             t_edits = t.get("edits") or []
             t_round = t.get("round")
             t_change = t.get("change", "")
-            # Match by overlapping step/knob names or similar finding text.
+            # Match by overlapping step/knob names only: a word overlap between finding
+            # and target text matches unrelated findings on common words ("output",
+            # "prompt", "error") and would mark them targeted when they were not.
             t_names = set()
             for e in (t_edits if isinstance(t_edits, list) else [t_edits]):
                 if isinstance(e, dict):
@@ -872,8 +872,7 @@ def _mark_targeted(findings: list[dict[str, Any]],
                         elif isinstance(v, dict) and v.get("id"):
                             t_names.add(str(v["id"]).lower())
             overlap = bool(nodes & t_names or knobs & t_names)
-            if overlap or (len(text) > 20 and len(t_text) > 20
-                           and any(word in t_text for word in text.split()[:5] if len(word) > 4)):
+            if overlap:
                 label = f"round {t_round}" if t_round is not None else "earlier"
                 if t_change:
                     label += f"; score change: {t_change}"

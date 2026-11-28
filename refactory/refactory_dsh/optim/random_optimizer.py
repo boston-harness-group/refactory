@@ -436,7 +436,7 @@ class AutoresearchOptimizer(Optimizer):
         from concurrent.futures import ThreadPoolExecutor
         from pathlib import Path
 
-        from . import analysts, feedback
+        from . import feedback
         from .base import compute_policy
 
         cache: dict[str, dict[str, Any]] = self.__dict__.setdefault("_review_cache", {})
@@ -954,12 +954,14 @@ class AutoresearchOptimizer(Optimizer):
                                  "error": error})
                     contrast_findings = found or []
             with ThreadPoolExecutor(max_workers=2) as pool:
+                # The contrast batch's findings are failure findings: merged with the
+                # failure batches' like any other list, not appended unmerged after.
                 failure_side, success_side = pool.map(
                     lambda kind: merge_lists(kind, [b["found"] for b in done
-                                                    if b["kind"] == kind]),
+                                                    if b["kind"] == kind]
+                                             + ([contrast_findings] if kind == "failure"
+                                                and contrast_findings else [])),
                     analysts.KINDS)
-            if contrast_findings:
-                failure_side = [*failure_side, *contrast_findings]
             if failure_side and success_side:
                 found, error, retried, cached = self._ask(
                     ctx, analysts.merge_system("final"),

@@ -22,9 +22,27 @@ from pathlib import Path
 from typing import Any, Sequence
 
 
+def _val_test_ids(run_dir: Path) -> set[str]:
+    """The val and test item ids of the run's parts (``parts.json``): none may appear in a
+    request, which only ever describes train items."""
+    try:
+        parts = json.loads((run_dir / "parts.json").read_text())
+    except (OSError, json.JSONDecodeError):
+        return set()
+    parts = parts.get("parts", parts) if isinstance(parts, dict) else {}
+    ids: set[str] = set()
+    for name in ("val", "test"):
+        for item in parts.get(name) or ():
+            item_id = item if isinstance(item, str) else (item or {}).get("id")
+            if isinstance(item_id, str) and len(item_id) >= 6:
+                ids.add(item_id)
+    return ids
+
+
 def _load_val_test_content(run_dir: Path) -> set[str]:
-    """Collect val/test item content strings from the run's data to guard against leakage."""
-    tokens: set[str] = set()
+    """Collect val/test item content strings and ids from the run's data to guard against
+    leakage: the parts' val/test ids, and item content from any val/test item files."""
+    tokens: set[str] = set(_val_test_ids(run_dir))
     for name in ("val_items.json", "test_items.json"):
         path = run_dir / name
         if not path.exists():
