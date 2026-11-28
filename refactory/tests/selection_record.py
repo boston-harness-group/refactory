@@ -16,6 +16,10 @@ Usage::
     uv run python -m pytest tests/test_selection_record.py -x -q
 
 The record lives at ``tests/fixtures/selection_record.json``.
+
+Extracting a real run into a fixture (one-off, run from refactory/)::
+
+    python tests/selection_record.py /path/to/runs/real3-OL-s42
 """
 
 from __future__ import annotations
@@ -38,6 +42,8 @@ from test_validation_selection import FitProbe, _level
 
 FIXTURE = Path(__file__).parent / "fixtures" / "selection_record.json"
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
+_HISTORY_DIR = Path(__file__).parent / "fixtures" / "selection_histories"
+_REAL_HISTORY_NAMES = ["real3-OL-s42", "real3-OLME-s42"]
 
 # ---------------------------------------------------------------------------
 # ScenarioProbe: FitProbe that can simulate train failures
@@ -54,6 +60,17 @@ class ScenarioProbe(FitProbe):
     def run(self, workdir, **kwargs):  # type: ignore[no-untyped-def]
         level = int(self.values()["level"])
         if level in ScenarioProbe.FAIL_LEVELS:
+            score = ScenarioProbe.TRAIN.get(level)
+            if score is not None:
+                subset = Path(workdir) / "subset.json"
+                ids = VAL_IDS if subset.exists() and "val" in subset.read_text() else TRAIN_IDS
+                records = [{"id": iid, "score": float(score)} for iid in ids]
+                return RunResult(
+                    exit_ok=False, error="simulated partial failure",
+                    workdir=Path(workdir), score=float(score),
+                    item_records=records,
+                    facts={"item_scores": records},
+                )
             return RunResult(exit_ok=False, error="simulated train failure",
                              workdir=Path(workdir))
         score = float(ScenarioProbe.TRAIN.get(level, 0.0))
@@ -134,6 +151,7 @@ class DecisionRecord:
     incumbent: str | None
     leaderboard: list[str]
     parents_chosen: list[str]
+    picker_parents: list[str]
     picker_name: str
     early_stop: str
     val_evaluations: int
@@ -217,6 +235,24 @@ def _failed_train_scenario() -> ScenarioSpec:
     )
 
 
+def _partial_fail_scenario() -> ScenarioSpec:
+    """Partial failure: exit_ok=False WITH a non-None train score, so
+    checkpoint's exit_ok guard in ``_apply_round`` is exercised."""
+    return ScenarioSpec(
+        label="partial_fail",
+        rounds=[
+            RoundSpec(candidates=[{"label": "seed", "train_score": 0.4, "val_score": 0.4}]),
+            RoundSpec(candidates=[
+                {"label": "pf1", "parent_label": "seed",
+                 "train_score": 0.8, "exit_ok": False, "val_score": 0.8},
+            ]),
+            RoundSpec(candidates=[
+                {"label": "pf2", "parent_label": "seed", "train_score": 0.5, "val_score": 0.5},
+            ]),
+        ],
+    )
+
+
 def _structural_mix_scenario() -> ScenarioSpec:
     return ScenarioSpec(
         label="structural_mix",
@@ -265,6 +301,7 @@ SYNTHETIC_SCENARIOS = [
     _val_drop_scenario,
     _ties_scenario,
     _failed_train_scenario,
+    _partial_fail_scenario,
     _structural_mix_scenario,
     _early_stop_scenario,
     _perfect_val_scenario,
@@ -287,98 +324,27 @@ def _is_compatible(mode: str, picker: str, batch_size: int) -> bool:
 
 
 # ---------------------------------------------------------------------------
-# Real-run scenario extraction
+# Real-run scenario loading
 # ---------------------------------------------------------------------------
-
-_REAL_RUNS_DIR = Path(
-    "/tmp/claude-1000/-home-churwitz-remote-factory/"
-    "c6f7e470-53c1-40aa-8dd8-e7bcb5136076/scratchpad/r5/runs"
-)
-
-
-def _extract_real_scenario(run_name: str) -> ScenarioSpec | None:
-    """Extract a scenario from a real run's journal."""
-    run_dir = _REAL_RUNS_DIR / run_name / "run"
-    journal = run_dir / "journal.jsonl"
-    if not journal.exists():
-        return None
-
-    entries: list[dict[str, Any]] = []
-    with open(journal) as f:
-        for line in f:
-            entries.append(json.loads(line))
-
-    state_file = run_dir / "state.json"
-    if not state_file.exists():
-        return None
-    state = json.loads(state_file.read_text())
-    pop = state.get("population", [])
-    if not pop:
-        return None
-
-    val_cache: dict[str, float] = {}
-    for entry in reversed(entries):
-        if entry.get("event") == "strategy_state":
-            gate_state = (entry.get("state") or {}).get("val_gate") or {}
-            val_cache = {str(k): float(v) for k, v in (gate_state.get("val_cache") or {}).items()}
-            break
-
-    seed = pop[0]
-    seed_round = RoundSpec(candidates=[{
-        "label": seed["id"],
-        "train_score": seed.get("score"),
-        "val_score": val_cache.get(seed["id"]),
-        "exit_ok": seed.get("exit_ok", True),
-    }])
-
-    proposal_epochs: dict[int, list[str]] = {}
-    for entry in entries:
-        if entry.get("event") == "proposal":
-            cid = entry.get("candidate")
-            ep = entry.get("epoch")
-            if cid and ep is not None:
-                proposal_epochs.setdefault(ep, []).append(cid)
-
-    rounds = [seed_round]
-    seen_ids = {seed["id"]}
-    for ep in sorted(proposal_epochs):
-        epoch_cands = []
-        for cid in proposal_epochs[ep]:
-            cand = next((c for c in pop if c["id"] == cid), None)
-            if cand and cid not in seen_ids:
-                seen_ids.add(cid)
-                parent_id = cand.get("parent")
-                epoch_cands.append({
-                    "label": cid,
-                    "parent_label": parent_id or seed["id"],
-                    "train_score": cand.get("score"),
-                    "val_score": val_cache.get(cid),
-                    "exit_ok": cand.get("exit_ok", True),
-                })
-        if epoch_cands:
-            rounds.append(RoundSpec(candidates=epoch_cands))
-
-    for cand in pop:
-        if cand["id"] not in seen_ids:
-            seen_ids.add(cand["id"])
-            rounds.append(RoundSpec(candidates=[{
-                "label": cand["id"],
-                "parent_label": cand.get("parent") or seed["id"],
-                "train_score": cand.get("score"),
-                "val_score": val_cache.get(cand["id"]),
-                "exit_ok": cand.get("exit_ok", True),
-            }]))
-
-    return ScenarioSpec(label=f"real_{run_name}", rounds=rounds)
 
 
 def _real_scenarios() -> list[ScenarioSpec]:
-    """Load real run scenarios (best-effort)."""
+    """Load real run scenarios from committed fixtures."""
     result = []
-    for name in ("real3-OL-s42", "real3-OLME-s42"):
-        s = _extract_real_scenario(name)
-        if s is not None:
-            result.append(s)
+    for name in _REAL_HISTORY_NAMES:
+        path = _HISTORY_DIR / f"{name}.json"
+        if not path.exists():
+            raise FileNotFoundError(
+                f"Real run fixture {path} is missing. Regenerate with:\n"
+                f"  python {Path(__file__).name} /path/to/runs/{name}")
+        data = json.loads(path.read_text())
+        rounds = [RoundSpec(candidates=r["candidates"]) for r in data["rounds"]]
+        result.append(ScenarioSpec(
+            label=data["label"],
+            rounds=rounds,
+            early_stop_patience=data.get("early_stop_patience", 0),
+            early_stop_at_full_val=data.get("early_stop_at_full_val", False),
+        ))
     return result
 
 
@@ -409,7 +375,7 @@ def _map_scenario_simple(
             ts = cspec.get("train_score")
             if ts is not None:
                 train_map[level] = ts
-            elif not cspec.get("exit_ok", True):
+            if not cspec.get("exit_ok", True):
                 fail_levels.add(level)
             vs = cspec.get("val_score")
             if vs is not None:
@@ -445,6 +411,7 @@ def _patched_harness():  # type: ignore[no-untyped-def]
         "save_strat": Loop._save_strategy_state,
         "measure": Loop._measure,
         "context": Loop._context,
+        "evaluate": Loop._evaluate,
     }
 
     def _fast_measure(  # type: ignore[no-untyped-def]
@@ -493,6 +460,19 @@ def _patched_harness():  # type: ignore[no-untyped-def]
 
     Loop._context = _minimal_context  # type: ignore[assignment]
 
+    _original_evaluate = saved["evaluate"]
+
+    def _evaluate_keep_partial(self, candidate, **kwargs):  # type: ignore[no-untyped-def]
+        _original_evaluate(self, candidate, **kwargs)
+        if not candidate.exit_ok and "partial" in str(candidate.error or ""):
+            level = _level(candidate)
+            ts = ScenarioProbe.TRAIN.get(level)
+            if ts is not None:
+                candidate.score = float(ts)
+                candidate.raw_score = float(ts)
+
+    Loop._evaluate = _evaluate_keep_partial  # type: ignore[assignment]
+
     try:
         yield
     finally:
@@ -506,6 +486,7 @@ def _patched_harness():  # type: ignore[no-untyped-def]
         Loop._save_strategy_state = saved["save_strat"]  # type: ignore[assignment]
         Loop._context = saved["context"]  # type: ignore[assignment]
         Loop._measure = saved["measure"]  # type: ignore[assignment]
+        Loop._evaluate = saved["evaluate"]  # type: ignore[assignment]
 
 
 def _set_scenario_scores(
@@ -565,6 +546,22 @@ def _run_scenario(
     else:
         loop.optimizer = proposer
 
+    # Capture picker decisions via a wrapper on picker.select.
+    # picker.select() is called during optimizer_step (via choose_parent),
+    # AFTER _gate_population in the same epoch.  The picks from epoch N
+    # produce the candidates gated in epoch N+1, so each snapshot flushes
+    # the buffer of picks made since the last snapshot.
+    _picker_calls: list[str] = []
+    if picker_name and hasattr(loop.optimizer, "picker"):
+        _orig_select = loop.optimizer.picker.select
+
+        def _capturing_select(ctx, n, parents):  # type: ignore[no-untyped-def]
+            result = _orig_select(ctx, n, parents)
+            _picker_calls.extend(c.id for c in result)
+            return result
+
+        loop.optimizer.picker.select = _capturing_select  # type: ignore[assignment]
+
     snapshots: list[dict[str, Any]] = []
     _original_gate_pop = Loop._gate_population
 
@@ -596,7 +593,9 @@ def _run_scenario(
             "early_stop": early,
             "val_evaluations": len(gate.cache) - cache_before,
             "parents": [c.id for c in loop.select_parents(batch_size)],
+            "picker_parents": list(_picker_calls),
         })
+        _picker_calls.clear()
 
     loop._gate_population = _capturing_gate_pop  # type: ignore[assignment]
 
@@ -614,6 +613,7 @@ def _run_scenario(
             incumbent=s["incumbent"],
             leaderboard=s["leaderboard"],
             parents_chosen=s["parents"],
+            picker_parents=s["picker_parents"],
             picker_name=picker_name or "default",
             early_stop=s["early_stop"],
             val_evaluations=s["val_evaluations"],
@@ -645,6 +645,7 @@ def _result_to_dict(r: ScenarioResult) -> dict[str, Any]:
                 "incumbent": d.incumbent,
                 "leaderboard": d.leaderboard,
                 "parents_chosen": d.parents_chosen,
+                "picker_parents": d.picker_parents,
                 "picker_name": d.picker_name,
                 "early_stop": d.early_stop,
                 "val_evaluations": d.val_evaluations,
@@ -711,3 +712,109 @@ def save_record(record: dict[str, Any]) -> None:
     """Save the record (sorted, deterministic)."""
     FIXTURE.parent.mkdir(parents=True, exist_ok=True)
     FIXTURE.write_text(json.dumps(record, indent=2, sort_keys=True) + "\n")
+
+
+# ---------------------------------------------------------------------------
+# Real-run extraction helper (one-off, not used by tests)
+# ---------------------------------------------------------------------------
+
+
+def _extract_real_scenario(run_dir: Path) -> ScenarioSpec | None:
+    """Extract a scenario from a real run's directory.
+
+    ``run_dir`` is ``<runs>/<name>`` — it should contain ``run/journal.jsonl``
+    and ``run/state.json``."""
+    journal_path = run_dir / "run" / "journal.jsonl"
+    state_path = run_dir / "run" / "state.json"
+    if not journal_path.exists() or not state_path.exists():
+        return None
+
+    entries: list[dict[str, Any]] = []
+    with open(journal_path) as f:
+        for line in f:
+            entries.append(json.loads(line))
+
+    state = json.loads(state_path.read_text())
+    pop = state.get("population", [])
+    if not pop:
+        return None
+
+    val_cache: dict[str, float] = {}
+    for entry in reversed(entries):
+        if entry.get("event") == "strategy_state":
+            gate_state = (entry.get("state") or {}).get("val_gate") or {}
+            val_cache = {str(k): float(v)
+                         for k, v in (gate_state.get("val_cache") or {}).items()}
+            break
+
+    seed = pop[0]
+    seed_round = RoundSpec(candidates=[{
+        "label": seed["id"],
+        "train_score": seed.get("score"),
+        "val_score": val_cache.get(seed["id"]),
+        "exit_ok": seed.get("exit_ok", True),
+    }])
+
+    proposal_epochs: dict[int, list[str]] = {}
+    for entry in entries:
+        if entry.get("event") == "proposal":
+            cid = entry.get("candidate")
+            ep = entry.get("epoch")
+            if cid and ep is not None:
+                proposal_epochs.setdefault(ep, []).append(cid)
+
+    rounds = [seed_round]
+    seen_ids = {seed["id"]}
+    for ep in sorted(proposal_epochs):
+        epoch_cands = []
+        for cid in proposal_epochs[ep]:
+            cand = next((c for c in pop if c["id"] == cid), None)
+            if cand and cid not in seen_ids:
+                seen_ids.add(cid)
+                parent_id = cand.get("parent")
+                epoch_cands.append({
+                    "label": cid,
+                    "parent_label": parent_id or seed["id"],
+                    "train_score": cand.get("score"),
+                    "val_score": val_cache.get(cid),
+                    "exit_ok": cand.get("exit_ok", True),
+                })
+        if epoch_cands:
+            rounds.append(RoundSpec(candidates=epoch_cands))
+
+    for cand in pop:
+        if cand["id"] not in seen_ids:
+            seen_ids.add(cand["id"])
+            rounds.append(RoundSpec(candidates=[{
+                "label": cand["id"],
+                "parent_label": cand.get("parent") or seed["id"],
+                "train_score": cand.get("score"),
+                "val_score": val_cache.get(cand["id"]),
+                "exit_ok": cand.get("exit_ok", True),
+            }]))
+
+    name = run_dir.name
+    return ScenarioSpec(label=f"real_{name}", rounds=rounds)
+
+
+if __name__ == "__main__":
+    import sys
+
+    if len(sys.argv) != 2:
+        print(f"Usage: python {sys.argv[0]} /path/to/runs/<name>")
+        sys.exit(1)
+    run_path = Path(sys.argv[1])
+    spec = _extract_real_scenario(run_path)
+    if spec is None:
+        print(f"Could not extract scenario from {run_path}", file=sys.stderr)
+        sys.exit(1)
+    data = {
+        "label": spec.label,
+        "rounds": [{"candidates": r.candidates} for r in spec.rounds],
+        "early_stop_patience": spec.early_stop_patience,
+        "early_stop_at_full_val": spec.early_stop_at_full_val,
+    }
+    out = _HISTORY_DIR / f"{run_path.name}.json"
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n")
+    print(f"Wrote {out}")

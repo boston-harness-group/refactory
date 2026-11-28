@@ -1,0 +1,83 @@
+{
+  "early_stop_at_full_val": false,
+  "early_stop_patience": 0,
+  "label": "real_real3-OL-s42",
+  "rounds": [
+    {
+      "candidates": [
+        {
+          "exit_ok": true,
+          "label": "e233b3788b18",
+          "train_score": 0.25757575757575757,
+          "val_score": 0.34210526315789475
+        }
+      ]
+    },
+    {
+      "candidates": [
+        {
+          "exit_ok": true,
+          "label": "a97344c5df20",
+          "parent_label": "e233b3788b18",
+          "train_score": 0.2727272727272727,
+          "val_score": 0.3684210526315789
+        }
+      ]
+    },
+    {
+      "candidates": [
+        {
+          "exit_ok": true,
+          "label": "d38bfdf59eb7",
+          "parent_label": "a97344c5df20",
+          "train_score": 0.2727272727272727,
+          "val_score": 0.34210526315789475
+        }
+      ]
+    },
+    {
+      "candidates": [
+        {
+          "exit_ok": true,
+          "label": "9ae12db3b2d4",
+          "parent_label": "d38bfdf59eb7",
+          "train_score": 0.2878787878787879,
+          "val_score": 0.3157894736842105
+        }
+      ]
+    },
+    {
+      "candidates": [
+        {
+          "exit_ok": true,
+          "label": "261e6b21c082",
+          "parent_label": "9ae12db3b2d4",
+          "train_score": 0.25757575757575757,
+          "val_score": 0.34210526315789475
+        }
+      ]
+    },
+    {
+      "candidates": [
+        {
+          "exit_ok": true,
+          "label": "a25807df2198",
+          "parent_label": "261e6b21c082",
+          "train_score": 0.24242424242424243,
+          "val_score": 0.3157894736842105
+        }
+      ]
+    },
+    {
+      "candidates": [
+        {
+          "exit_ok": true,
+          "label": "287c37436626",
+          "parent_label": "a25807df2198",
+          "train_score": null,
+          "val_score": null
+        }
+      ]
+    }
+  ]
+}

@@ -54,7 +54,7 @@ def _diff_decisions(
     for i, (ed, ad) in enumerate(zip(exp_decisions, act_decisions)):
         for field in (
             "gate_accepted", "gate_rejected", "pool", "incumbent",
-            "leaderboard", "parents_chosen", "picker_name",
+            "leaderboard", "parents_chosen", "picker_parents", "picker_name",
             "early_stop", "val_evaluations",
         ):
             if ed.get(field) != ad.get(field):
@@ -206,4 +206,79 @@ def test_sabotage_pure_move_passes():
 
     assert _slice_matches(actual, expected), (
         "pure re-import should not change decisions"
+    )
+
+
+def test_sabotage_map_elites_fitness_reversed():
+    """Reverse the fitness comparison in ``MapElitesSelector.add``: the worst
+    candidate becomes each cell's champion, changing picker_parents."""
+    from refactory_dsh.optim.policies import MapElitesSelector
+
+    expected = load_record()
+    target = {"monotone|pool|map_elites|batch1"}
+
+    def reversed_add(self, candidate, fitness=None):  # type: ignore[no-untyped-def]
+        fitness = fitness or (lambda c: (c.score or 0.0))
+        key = self.features(candidate)
+        held = self.cells.get(key)
+        if held is None or fitness(candidate) < fitness(held):
+            self.cells[key] = candidate
+
+    with patch.object(MapElitesSelector, "add", reversed_add):
+        actual = generate_record(keys=target)
+
+    assert not _slice_matches(actual, expected), (
+        "sabotage: reversed map_elites fitness must change picker_parents"
+    )
+
+
+def test_sabotage_islands_max_min():
+    """Replace ``max`` with ``min`` in ``IslandsSelector.select``: the worst
+    member of each island is picked instead of the best."""
+    from refactory_dsh.optim.policies import IslandsSelector
+
+    expected = load_record()
+    target = {"real_real3-OL-s42|pool|islands|batch1"}
+
+    def min_select(self, ctx, n, parents):  # type: ignore[no-untyped-def]
+        islands: dict[int, list] = {}
+        for candidate in parents:
+            islands.setdefault(self.island_of(candidate), []).append(candidate)
+        populated = sorted(islands)
+        if not populated:
+            return []
+        fitness = self.fitness(ctx)
+        chosen = []
+        for offset in range(n):
+            island = populated[(self._turn + offset) % len(populated)]
+            members = islands[island]
+            chosen.append(min(members, key=fitness))
+        self._turn += 1
+        return chosen
+
+    with patch.object(IslandsSelector, "select", min_select):
+        actual = generate_record(keys=target)
+
+    assert not _slice_matches(actual, expected), (
+        "sabotage: islands min-instead-of-max must change picker_parents"
+    )
+
+
+def test_sabotage_exit_ok_guard_removed():
+    """Remove the ``exit_ok`` guard in ``_apply_round``: a partial-failure
+    candidate (exit_ok=False, non-None score) gets applied."""
+    expected = load_record()
+    target = {"partial_fail|checkpoint|none|batch1"}
+    original = Loop._apply_round
+
+    def sabotaged_apply(self, run, pending):  # type: ignore[no-untyped-def]
+        for c in pending:
+            c.exit_ok = True
+        original(self, run, pending)
+
+    with patch.object(Loop, "_apply_round", sabotaged_apply):
+        actual = generate_record(keys=target)
+
+    assert not _slice_matches(actual, expected), (
+        "sabotage: removing exit_ok guard must let the partial failure through"
     )
