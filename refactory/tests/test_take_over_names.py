@@ -34,6 +34,7 @@ import pytest
 
 import structure_fuzz as sf
 import structure_fuzz_graphs as fg
+from conftest import patch_core_op
 from refactory_dsh.nn import core_ops
 from refactory_dsh.nn import edits as nn_edits
 from refactory_dsh.optim import Candidate
@@ -79,7 +80,7 @@ def reach_off(monkeypatch):
     """These build a take-over that nothing after the new step reads, to hold the renamed
     reads of the steps before it to their runs; an attempt refuses such a take-over as
     changing nothing (`core_ops._unscored_take_over`), which is turned off here."""
-    monkeypatch.setattr(core_ops, "_unscored_take_over", lambda *args, **kwargs: "")
+    patch_core_op(monkeypatch, "_unscored_take_over", lambda *args, **kwargs: "")
 
 
 @pytest.mark.parametrize("after", ["step_join", "step_join_join", "step_join_branch1"])

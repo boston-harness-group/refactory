@@ -28,6 +28,7 @@ import pytest
 import structure_fuzz as sf
 import structure_fuzz_graphs as fg
 from refactory_dsh import snippet
+from conftest import patch_core_op
 from refactory_dsh.nn import core_ops
 from refactory_dsh.nn import edits as nn_edits
 from refactory_dsh.nn.graph import Graph
@@ -623,7 +624,7 @@ def _breaks(monkeypatch, target: str, replacement: Any, seed: str, edit: dict | 
 
     applier, out = run()
     assert isinstance(out, Candidate) and holds(out), "the check holds without the mutation"
-    monkeypatch.setattr(core_ops, target, replacement)
+    patch_core_op(monkeypatch, target, replacement)
     _a, mutated = run()
     assert isinstance(mutated, list) or not holds(mutated) or sf.check_state(
         applier, mutated.state, walker=True) != []
