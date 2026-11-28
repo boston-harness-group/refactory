@@ -28,6 +28,16 @@
     "refactory_dsh.items",
     "refactory_dsh.live",
     "refactory_dsh.loop",
+    "refactory_dsh.loop.config",
+    "refactory_dsh.loop.context",
+    "refactory_dsh.loop.evaluate",
+    "refactory_dsh.loop.forward",
+    "refactory_dsh.loop.incidents",
+    "refactory_dsh.loop.parts",
+    "refactory_dsh.loop.report",
+    "refactory_dsh.loop.resume",
+    "refactory_dsh.loop.selection",
+    "refactory_dsh.loop.__main__",
     "refactory_dsh.lowering",
     "refactory_dsh.memory",
     "refactory_dsh.model",
@@ -131,6 +141,7 @@
     "refactory_dsh.tool_policy",
     "refactory_dsh.toolchain",
     "refactory_dsh.tools",
+    "refactory_dsh.tools.split_module",
     "refactory_dsh.traces",
     "refactory_dsh.worker_config",
     "refactory_dsh.worker_node",
@@ -338,6 +349,10 @@
       "path": "refactory_dsh/seal_close.sh",
       "classification": "core",
       "reason": "a sealed command's last step: closes and checks its descriptors, used by seal"
+    },
+    {
+      "path": "refactory_dsh/tools/splits/loop.json",
+      "purpose": "split_module mapping for loop.py -> loop/ package"
     }
   ]
 }

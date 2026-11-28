@@ -491,35 +491,13 @@ The optimizer loop, named like one.
 
 | kind | name | signature |
 |---|---|---|
-| class | `EpochSummary` | `(epoch: 'int', evaluated: 'int', best: 'float \| None', mean: 'float \| None', improved: 'bool', proposed: 'int', accepted: 'int', refused: 'int', population: 'int', refused_total: 'int', structural_in_population: 'int') -> None` |
-| class | `EvaluationInterrupted` | `` |
 | class | `Loop` | `(mode_id: 'str', config: 'LoopConfig \| None' = None, *, project: 'Path \| None' = None, model: 'Any' = None, optimizer: 'Optimizer \| None' = None) -> 'None'` |
-| class | `LoopConfig` | `(epochs: 'int' = 2, batch_size: 'int' = 4, optimizer: 'str' = 'autoresearch', edit_preset: 'str' = 'broad', seed: 'int' = 0, elite: 'int' = 3, max_evaluations: 'int' = 64, holdout: 'float' = 0.3, parsimony: 'float' = 0.01, runs_root: 'Path' = PosixPath('.factory/loop'), max_steps: 'int' = 2000, attempts: 'int' = 3, frozen: 'tuple[str, ...]' = (), intent: 'str' = '', knobs: 'dict[str, Any]' = <factory>, history_limit: 'int' = 200, prior_runs: 'int' = 3, memory_global_root: 'Path \| None' = None, evaluator: 'str' = 'walker', omit_steering: 'bool' = False, dsh_timeout_s: 'int' = 900, resume: 'bool' = False, progress: 'bool' = True, print_events: 'bool' = False, verbose: 'bool' = False, control_poll_s: 'float' = 1.0, strategy: 'str' = 'default', repeats: 'int' = 1, allowed_ops: 'tuple[str, ...]' = (), worker_backend: 'str' = 'dsh', provider: 'str' = '', model: 'str' = '', effort: 'str' = '', permission_mode: 'str' = 'skip', setting_sources: 'str' = '', claude_executable: 'str' = '', role_routes: 'dict[str, Any]' = <factory>, node_routes: 'dict[str, Any]' = <factory>, provider_config: 'dict[str, Any]' = <factory>, max_elapsed_s: 'float \| None' = None, max_tokens: 'int \| None' = None, validation_reserve_s: 'float' = 0, validation_reserve_tokens: 'int' = 0, max_rollouts: 'int \| None' = None, max_concurrent_evaluations: 'int' = 4, max_items_in_flight: 'int \| None' = None, parts_manifest: 'str \| None' = None, seed_results: 'str \| None' = None, val_gate: 'bool \| None' = None, train_minibatch: 'int' = 0, allow_code_nodes: 'bool' = True, new_step_tools: 'bool' = True, early_stop_patience: 'int' = 0, early_stop_at_full_val: 'bool' = False, resolved_profile: 'dict[str, Any]' = <factory>, strategy_options: 'dict[str, Any]' = <factory>, parent_picker: 'str' = '', portfolio: 'str' = '', selection: 'str' = '', pool_size: 'int' = 8, run_ledger: 'bool' = True, lessons: 'bool' = True, step_review: 'bool' = True, structure_guidance: 'bool' = False, analysts: 'bool' = False, analyst_group_size: 'int' = 8, analyst_merge_batch_size: 'int' = 8, analyst_max_batches: 'int' = 0, integrity_judge: 'str \| dict[str, Any]' = 'off') -> None` |
-| class | `LoopError` | `` |
-| function | `default_selection` | `(strategy: 'str', optimizer: 'str', picker: 'str' = '', project: 'Path \| None' = None) -> 'str'` |
-| function | `gap_standard_error` | `(first: 'float', first_items: 'int', second: 'float', second_items: 'int') -> 'float \| None'` |
-| function | `item_time_spread` | `(records: 'Sequence[Mapping[str, Any]]') -> 'dict[str, Any]'` |
 | function | `main` | `(argv: 'list[str] \| None' = None, *, _client_factory: 'Any' = None) -> 'int'` |
-| function | `node_count` | `(state: 'dict[str, Any]') -> 'int'` |
-| function | `opaque_item_key` | `(item_id: 'str', secret: 'str') -> 'str'` |
 | function | `run` | `(mode_id: 'str', *, config: 'LoopConfig \| None' = None, project: 'Path \| None' = None, model: 'Any' = None) -> 'dict[str, Any]'` |
-| function | `single_parent` | `(strategy: 'str', optimizer: 'str', picker: 'str' = '', project: 'Path \| None' = None) -> 'bool'` |
-| function | `uncapped_sealed_steps` | `(runs: 'Path') -> 'dict[str, Any]'` |
 
-- **`EpochSummary`** — One epoch, as the report and the scheduler describe it.
-- **`EvaluationInterrupted`** — An evaluation whose items died with the run's own processes, not on their answers.
 - **`Loop`** — The default outer loop: the eight steps over one mode.
-- **`LoopConfig`** — How a run is shaped.
-- **`LoopError`** — The run cannot proceed. Always names what is wrong with the mode.
-- **`default_selection`** — The ``selection`` a ``val_gate`` run gets when it names none: ``checkpoint`` for
-- **`gap_standard_error`** — The standard error of a gap between two scores, for information only.
-- **`item_time_spread`** — How long train items took each, from their records' ``duration_s``: ``per_item_median_s``,
 - **`main`** — ``python -m refactory_dsh.loop <package>/<mode> [options]``.
-- **`node_count`** — How many nodes a candidate's graph holds, which is what the size cost counts.
-- **`opaque_item_key`** — The key `Loop.part_item_scores` gives an item: an HMAC of its id under the run's
 - **`run`** — Build a loop and run it to its bound.
-- **`single_parent`** — Whether a run is the default loop with a single-parent optimizer and no
-- **`uncapped_sealed_steps`** — The sealed steps under ``runs`` (a run's candidate runs) whose dispatch record says
 
 
 <a id="refactory_dsh-history"></a>

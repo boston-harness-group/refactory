@@ -26,7 +26,6 @@ from typing import Any
 
 import pytest
 
-from refactory_dsh import loop as loop_module
 from refactory_dsh import nn
 from refactory_dsh import task as task_module
 from refactory_dsh.events import render
@@ -39,6 +38,7 @@ from refactory_dsh.model import CompletionFailed, DshModelClient, is_retryable_f
 from refactory_dsh.optim import Candidate
 from refactory_dsh.outerloop import BudgetStopped, Run
 
+from conftest import patch_in_package
 from test_skillopt import MODE_ID, TEST_IDS, TRAIN_IDS, VAL_IDS, _patch_mode, _write_parts
 from test_val_gate import ScriptedLevels, _journal_events, _level
 
@@ -189,7 +189,7 @@ class Dsh:
 def quick_retries(monkeypatch):  # type: ignore[no-untyped-def]
     """The scripted plans start from the seed alone, and an in-run retry waits `WAITS`."""
     monkeypatch.setattr(Loop, "_seed_population", lambda self, seed: None)
-    monkeypatch.setattr(loop_module, "INTERRUPTED_RETRY_WAITS_S", WAITS)
+    patch_in_package(monkeypatch, "refactory_dsh.loop", "INTERRUPTED_RETRY_WAITS_S", WAITS)
 
 
 def _loop(tmp_path: Path, dsh: Dsh, plan: list[list[tuple[int, int]]], **overrides: Any) -> Loop:
@@ -311,7 +311,10 @@ def test_an_evaluation_interrupted_at_every_resume_is_recorded_failed_at_the_cap
     """The same evaluation dies in every attempt of every resume. The first
     INTERRUPTION_CAP - 1 stops stop the run; the cap's records it as failed, naming why,
     and the run goes on. In-run retries are not stops; the count survives a resume."""
-    assert (INTERRUPTION_CAP, loop_module.INTERRUPTED_RETRY_WAITS_S) == (3, WAITS)
+    # The copy the retry code reads (loop/evaluate.py), so an unpatched copy fails
+    # here at once instead of waiting the real retry delays.
+    from refactory_dsh.loop import evaluate as loop_evaluate
+    assert (INTERRUPTION_CAP, loop_evaluate.INTERRUPTED_RETRY_WAITS_S) == (3, WAITS)
     assert INTERRUPTED_RETRY_WAITS_S == (120.0, 300.0), "the shipped waits: 2 min, then 5 min"
     dsh = Dsh(tmp_path / "dsh")
     # Its train run dies every time; its val and test rollouts (a failed train run is

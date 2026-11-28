@@ -28,6 +28,29 @@ def _judge():
     return LiveMathTask.__new__(LiveMathTask).reply_correct
 
 
+def _patch_loop_global(monkeypatch, name, value):
+    """Patch a name on ``refactory_dsh.loop`` and every submodule that has it.
+
+    After the loop-package split, callers import names from their submodule
+    (e.g. ``context.py`` imports ``_new_steps`` from ``config.py``).  A bare
+    ``monkeypatch.setattr("refactory_dsh.loop.<name>", ...)`` only patches
+    the re-export in ``__init__``; the actual call site's reference is
+    unchanged.  This helper patches every submodule that carries the name."""
+    import importlib
+    import refactory_dsh.loop as loop_pkg
+
+    monkeypatch.setattr(loop_pkg, name, value)
+    pkg_path = loop_pkg.__path__[0]
+    for child in Path(pkg_path).glob("*.py"):
+        mod_name = child.stem
+        if mod_name.startswith("__"):
+            continue
+        fqn = f"refactory_dsh.loop.{mod_name}"
+        mod = importlib.import_module(fqn)
+        if hasattr(mod, name):
+            monkeypatch.setattr(mod, name, value)
+
+
 def test_the_real_s1_s45_loop_broke_five_items_whose_first_solve_was_right():
     """The audit's finding, computed: of the 8 items the loop broke, the solver's first
     reply was right on 5 before the judge sent it back, and wrong on its last."""
@@ -123,7 +146,7 @@ def test_the_loop_gives_the_request_and_memory_each_structural_childs_effect(
     loop._train_item_records[parent.id] = REAL["parent"]
     monkeypatch.setattr(Loop, "_reply_judge", lambda self: _judge())
     # The probe's two candidates share a graph; the real loop's child added LOOP_STEPS.
-    monkeypatch.setattr("refactory_dsh.loop._new_steps", lambda p, c: set(LOOP_STEPS))
+    _patch_loop_global(monkeypatch, "_new_steps", lambda p, c: set(LOOP_STEPS))
     (pair,) = loop._edit_pairs(loop.leaderboard())
     assert pair["effect"]["broken"]["then_changed"] == {"solve": 5}
     monkeypatch.setattr(Candidate, "is_structural", lambda self: True)
@@ -298,7 +321,7 @@ def test_only_a_structural_candidate_gets_an_effect(tmp_path, monkeypatch):
     loop._train_item_records[child.id] = REAL["child"]
     loop._train_item_records[parent.id] = REAL["parent"]
     monkeypatch.setattr(Loop, "_reply_judge", lambda self: _judge())
-    monkeypatch.setattr("refactory_dsh.loop._new_steps", lambda p, c: set(LOOP_STEPS))
+    _patch_loop_global(monkeypatch, "_new_steps", lambda p, c: set(LOOP_STEPS))
     monkeypatch.setattr(Candidate, "is_structural", lambda self: False)
     round_ = (loop.proposals.get(child.id) or {}).get("epoch")
     (entry,) = loop._tried_in_round(round_)[0]
