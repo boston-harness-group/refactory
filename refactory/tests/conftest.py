@@ -838,18 +838,31 @@ def pytest_runtest_makereport(item: pytest.Item, call: pytest.CallInfo[None]) ->
 # ── core_ops monkeypatch helper ──────────────────────────────────────────────
 
 
-def patch_core_op(monkeypatch: pytest.MonkeyPatch, name: str, value: Any) -> None:
-    """Patch ``name`` on ``core_ops`` and on every submodule that imported it.
+def patch_in_package(monkeypatch: pytest.MonkeyPatch, package: str, name: str,
+                     value: Any) -> None:
+    """Patch ``name`` on the module ``package`` and on every loaded module inside it
+    that has an attribute ``name``.
 
-    Tests monkeypatch ``core_ops.X`` to sabotage a helper and check that the
-    operator's precondition or the validator catches it.  After the split into a
-    package, callers inside the package import ``X`` directly from its submodule,
-    so a patch on the package alone is not seen.  This helper patches both.
+    A pure-move split turns one module into a package whose submodules import each
+    other's names directly, so a patch set only on the package (the old module path)
+    is not seen by a caller in a submodule. Tests that sabotage a helper or constant
+    to check that a safety net catches it use this, so the sabotage reaches every
+    module that looks the name up. Monkeypatch undoes every patch at teardown.
     """
-    from refactory_dsh.nn import core_ops
+    import importlib
+    import sys
 
-    monkeypatch.setattr(core_ops, name, value)
-    for attr in dir(core_ops):
-        mod = getattr(core_ops, attr, None)
-        if isinstance(mod, type(core_ops)) and hasattr(mod, name):
+    importlib.import_module(package)
+    patched = []
+    for mod_name, mod in list(sys.modules.items()):
+        if mod is None or not (mod_name == package or mod_name.startswith(package + ".")):
+            continue
+        if name in getattr(mod, "__dict__", {}):
             monkeypatch.setattr(mod, name, value)
+            patched.append(mod_name)
+    assert patched, f"no module in {package} defines or imports {name!r}"
+
+
+def patch_core_op(monkeypatch: pytest.MonkeyPatch, name: str, value: Any) -> None:
+    """``patch_in_package`` for ``refactory_dsh.nn.core_ops``."""
+    patch_in_package(monkeypatch, "refactory_dsh.nn.core_ops", name, value)
