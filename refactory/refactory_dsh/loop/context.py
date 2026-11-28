@@ -54,7 +54,7 @@ from refactory_dsh.outerloop import (
 from refactory_dsh.paths import project_for_nodes, project_root
 from refactory_dsh.workers import StepRoutes
 
-from refactory_dsh.loop.config import NOT_APPLIED, _train_key, _values_before, item_time_spread
+from refactory_dsh.loop.config import NOT_APPLIED, _new_steps, _train_key, _values_before, item_time_spread
 from refactory_dsh.loop.evaluate import _new_wiring_warnings, _wiring_warnings
 
 
@@ -287,7 +287,7 @@ class _ContextMixin:
             from refactory_dsh.optim.edit_effect import edit_effect
 
             effect = edit_effect(parent_records, child_records, self._reply_judge(),
-                                 new_steps=sys.modules["refactory_dsh.loop"]._new_steps(parent, child))
+                                 new_steps=_new_steps(parent, child))
             pairs.append({
                 "child": child.id, "parent": parent.id if parent else None,
                 "edit": child.own_edits(), "gate": self._gate_decision(child.id),
@@ -451,7 +451,7 @@ class _ContextMixin:
         from refactory_dsh.optim.feedback import added_steps
 
         effect = edit_effect(parent_records, records, self._reply_judge(),
-                             new_steps=sys.modules["refactory_dsh.loop"]._new_steps(parent, candidate))
+                             new_steps=_new_steps(parent, candidate))
         return {**({"effect": effect} if effect else {}),
                 "added": bool(added_steps(parent.state, candidate.state))}
 
@@ -901,7 +901,7 @@ class _ContextMixin:
             from refactory_dsh.optim.edit_effect import edit_effect
 
             effect = (edit_effect(parent_records, child_records, self._reply_judge(),
-                                  new_steps=sys.modules["refactory_dsh.loop"]._new_steps(by_id.get(candidate.parent or ""),
+                                  new_steps=_new_steps(by_id.get(candidate.parent or ""),
                                                        candidate))
                       if candidate.is_structural() else {})
             before = knob_values(parent.state if parent is not None else None)

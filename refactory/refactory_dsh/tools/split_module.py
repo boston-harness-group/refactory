@@ -106,12 +106,24 @@ MIXIN_CLASS_NAMES = {
 }
 
 
-PATCH_HAZARDS: dict[str, str] = {
-    # name -> the dotted module path tests patch it through
-    # Methods in other modules must access these through the package module
-    # object (sys.modules) so monkeypatch on the old path still lands.
-    "_new_steps": "refactory_dsh.loop",
-}
+def _parent_package(tree: ast.Module) -> str:
+    """Infer the parent package from relative + absolute imports in the source.
+
+    Finds a relative ``from .X`` and a matching absolute ``from PARENT.X``;
+    returns PARENT.  Works regardless of where the source file lives on disk."""
+    relative_roots: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom) and node.level == 1 and node.module:
+            relative_roots.add(node.module.split(".")[0])
+    absolute_roots: dict[str, str] = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+            parts = node.module.split(".")
+            if len(parts) >= 2 and parts[1] in relative_roots:
+                absolute_roots[parts[1]] = parts[0]
+    if absolute_roots:
+        return next(iter(absolute_roots.values()))
+    raise SystemExit("cannot infer parent package from imports")
 
 
 def _collect_top_level(tree: ast.Module) -> list[tuple[str, ast.AST]]:
@@ -350,10 +362,6 @@ def split_module(
         imports_by_source: dict[str, list[str]] = {}
         for ref_name in sorted(needed):
             ref_module = top_level_map[ref_name]
-            if ref_name in PATCH_HAZARDS:
-                # Patch-hazardous names: accessed through sys.modules at call time
-                # (handled inline in the method bodies)
-                continue
             imports_by_source.setdefault(ref_module, []).append(ref_name)
 
         for src_mod, names in sorted(imports_by_source.items()):
@@ -382,15 +390,6 @@ def split_module(
             lines.append("")
             lines.append(f"class {mixin_name}:")
 
-            # Determine if this mixin has any patch-hazardous globals
-            hazardous_in_mod = set()
-            for key, node in methods_for_mod:
-                if not key.startswith("VAR:"):
-                    if key in cross_refs:
-                        for ref in cross_refs[key]:
-                            if ref in PATCH_HAZARDS:
-                                hazardous_in_mod.add(ref)
-
             for key, node in methods_for_mod:
                 if key.startswith("VAR:"):
                     # Class variable
@@ -414,25 +413,6 @@ def split_module(
         lines.append("")
         content = "\n".join(lines)
 
-        # Handle patch-hazardous globals: replace direct name references with
-        # sys.modules lookup.  Only in method bodies of this module's mixin.
-        if methods_for_mod:
-            hazardous_used = set()
-            for key, _node in methods_for_mod:
-                if not key.startswith("VAR:") and key in cross_refs:
-                    for ref in cross_refs[key]:
-                        if ref in PATCH_HAZARDS:
-                            hazardous_used.add(ref)
-            for hname in hazardous_used:
-                pkg = PATCH_HAZARDS[hname]
-                # Replace bare calls to the hazardous name with a sys.modules
-                # lookup.  We only replace at call sites (name followed by '(')
-                # to avoid false positives.
-                content = content.replace(
-                    f"{hname}(",
-                    f'sys.modules["{pkg}"].{hname}(',
-                )
-
         # Fix relative imports inside method bodies: when the original file
         # was at refactory_dsh/loop.py, ``from .foo`` resolved to
         # ``refactory_dsh.foo``.  Now that the file is inside
@@ -440,7 +420,7 @@ def split_module(
         # ``refactory_dsh.loop.foo`` which is wrong.  Convert them to
         # absolute imports.  Only affects lazy imports in method bodies
         # (indented); the top-level import block is already absolute.
-        parent_package = source_path.parent.name  # "refactory_dsh"
+        parent_package = _parent_package(tree)
         # Match indented relative imports that are NOT to sibling modules
         sibling_names = "|".join(sorted(all_modules))
         content = re.sub(
