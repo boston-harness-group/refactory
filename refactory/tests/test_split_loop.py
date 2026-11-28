@@ -4,14 +4,13 @@ original monolithic loop.py, and rejects unmapped names."""
 from __future__ import annotations
 
 import subprocess
-import textwrap
 from pathlib import Path
 
 import pytest
 
 MAPPING = Path(__file__).resolve().parent.parent / "refactory_dsh" / "tools" / "splits" / "loop.json"
 COMMITTED = Path(__file__).resolve().parent.parent / "refactory_dsh" / "loop"
-BASE_REV = "origin/main"
+BASE_REV = "15914e84a709ec796e8844614cb57aa8af5512e3"  # the commit loop.py was split from (pinned: main no longer has loop.py)
 HAND_WRITTEN = {"__main__.py"}
 
 
