@@ -438,7 +438,7 @@ def _literal_names(source: str) -> list[str]:
 def test_nothing_but_the_writer_names_the_trace_files():
     """Write-only: outside `refactory_dsh.traces`, no string literal of the Python
     package names the folder or its file names (beyond ``OTHER_USES``), no module but
-    the loop imports the writer and the loop only calls it, and the TypeScript sources
+    the loop package imports the writer and the loop only calls it, and the TypeScript sources
     do not name them at all."""
     from collections import Counter
 
@@ -456,9 +456,11 @@ def test_nothing_but_the_writer_names_the_trace_files():
         if re.search(r"TRACES_DIR|\bimport traces\b|refactory_dsh\.traces\b", source):
             importers.append(name)
     assert dict(found) == OTHER_USES, dict(found)
-    assert importers == ["refactory_dsh/loop.py"], importers
-    assert "TRACES_DIR" not in (package / "loop.py").read_text()
-    calls = re.findall(r"\btraces\.(\w+)", (package / "loop.py").read_text())
+    assert importers == ["refactory_dsh/loop/evaluate.py", "refactory_dsh/loop/resume.py"], \
+        importers
+    loop_source = "".join(p.read_text() for p in sorted((package / "loop").glob("*.py")))
+    assert "TRACES_DIR" not in loop_source
+    calls = re.findall(r"\btraces\.(\w+)", loop_source)
     assert sorted(calls) == ["clear", "write_evaluation"], calls
 
     repo = top.parent
