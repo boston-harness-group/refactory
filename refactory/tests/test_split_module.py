@@ -50,6 +50,22 @@ def split_dir(tmp_path: Path) -> Path:
     return work
 
 
+def _ruff_available() -> bool:
+    import shutil
+    import subprocess
+    import sys
+
+    if shutil.which("ruff"):
+        return True
+    return subprocess.run([sys.executable, "-m", "ruff", "--version"],
+                          capture_output=True).returncode == 0
+
+
+# The split script removes the imports a split leaves unused by running ruff, which is
+# not a project dependency (CI lints with `uvx ruff` in its own job, so the test jobs
+# have none). The script refuses to run without it; where ruff is missing, this test
+# cannot reproduce the split and says so instead of comparing a different output.
+@pytest.mark.skipif(not _ruff_available(), reason="ruff not installed: the split script needs it")
 def test_split_reproduces_committed_modules(split_dir: Path) -> None:
     mapping = json.loads(MAPPING.read_text())
     modules = mapping["modules"]

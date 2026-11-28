@@ -723,6 +723,12 @@ def main() -> None:
     )
     if result.stdout.strip():
         print(result.stdout.strip())
+    # ruff exits 1 when it reports (and fixed) findings; anything else, or ruff missing,
+    # means unused imports were NOT removed and the output would differ from a run where
+    # it worked: stop rather than write a different split.
+    if result.returncode not in (0, 1) or "No module named ruff" in result.stderr:
+        sys.exit(f"split_module: ruff could not run ({result.stderr.strip()[:300]}); "
+                 "install ruff (it removes the unused imports the split leaves) and re-run")
 
     total = sum(len(v) for v in groups.values())
     print(f"\nDone: {total} names across {len(groups)} modules.")
