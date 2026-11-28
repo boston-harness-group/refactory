@@ -1,818 +1,42 @@
-"""Execute a built graph in this process.
-
-One node per branch at a time, with independent fork branches scheduled concurrently
-and every control-flow branch decided by a gate's verdict. That model is why the
-validator can make promises a free-for-all executor could not: fan-out is forbidden on a non-gate node, every
-cycle passes through a gate, and a gate carries the iteration bound that stops
-it.
-
-The executor also holds the dataflow model to its word. A node declares what it
-writes; an op that writes anything else is refused, because the validator's
-"every read is produced by some node" promise is only true if the declarations
-are.
-"""
+"""The Executor class (the walker) and the top-level ``execute`` function."""
 
 from __future__ import annotations
 
 import copy
-import importlib
-import io
 import json
-import multiprocessing
-import os
 import signal
 import sys
 import threading
 import time
-import traceback as traceback_mod
 import warnings
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Callable, Mapping, Protocol, Sequence
-
-from refactory_dsh import activity
-
-from .graph import PROCEED, Edge, Graph, Node, op_io
-from .loops import loop_edges
-from .mode import RunResult
-from .record import RunRecord
-from .resolve import resolve
-
-if TYPE_CHECKING:
-    from refactory_dsh.task import Task
-
-# Sentinel for SWEEP-6 refilled feedback cleanup.
-_SENTINEL = object()
-
-# Gap 20 / correction C: the spine's RUN_WARNING pattern (execute.ts:166).
-import re as _re_mod
-_RUN_WARNING_RE = _re_mod.compile(r"^(?:[\w.-]+:\s*)?run warning:\s*\S", _re_mod.IGNORECASE)
-
-
-def _emit_run_warnings(workdir: Path, node_id: str, stderr: str) -> None:
-    """Emit ``run_warning`` events for stderr lines that match the spine's pattern.
-
-    The spine (execute.ts:177-178, index.ts:1681-1683) scans an op's stderr for
-    lines matching ``/^(?:[\\w.-]+:\\s*)?run warning:\\s*\\S/i`` and journals each as
-    a ``run_warning`` event.  The walker captures stderr from child-process ops
-    and calls this helper after a successful dispatch.
-    """
-    if not stderr:
-        return
-    from refactory_dsh.live import emit as _emit_event
-    for line in stderr.split("\n"):
-        stripped = line.strip()
-        if _RUN_WARNING_RE.match(stripped):
-            _emit_event(workdir, "run_warning", node_id=node_id,
-                        state="warning", summary=stripped)
-
-
-# ── forkserver context (module-level, shared across all Executor instances) ──
-_forkserver_ctx = multiprocessing.get_context("forkserver")
-_forkserver_modules: set[str] = set()
-# Lock for thread-safe manipulation of __main__.__file__ during child.start().
-# Concurrent fork-branch threads must not race on the process-wide global.
-_main_file_lock = threading.Lock()
-
-
-def _ensure_forkserver_preload(graph: Graph) -> None:
-    """Collect modules from the graph's ops and fn gates and preload them.
-
-    The forkserver is a separate single-threaded process; forking from it is
-    safe while the walker runs fork branches on threads.  It has the same
-    picklable-arguments contract as spawn.
-
-    ``set_forkserver_preload`` is idempotent before the server starts and is a
-    hint afterwards (the server restarts with the updated list if it dies).
-    """
-    global _forkserver_modules
-    modules: set[str] = {"refactory_dsh.nn.executor", "refactory_dsh.run"}
-    for node in graph.nodes.values():
-        for target in (node.call, node.evaluator):
-            if not target:
-                continue
-            if ":" in target:
-                mod_name = target.partition(":")[0]
-            else:
-                mod_name = target.rpartition(".")[0]
-            if mod_name:
-                modules.add(mod_name)
-    if not modules.issubset(_forkserver_modules):
-        _forkserver_modules = _forkserver_modules | modules
-        _forkserver_ctx.set_forkserver_preload(sorted(_forkserver_modules))
-
-
-class _BranchFailed(Exception):
-    """A branch error string wrapped so it flows through the per-item try/except."""
-
-
-class _ItemDeadlineError(Exception):
-    """An item's lifecycle (setup + branch + verify) exceeded its deadline."""
-
-    def __init__(self, node_id: str, item_id: str, deadline_s: float):
-        self.node_id = node_id
-        self.item_id = item_id
-        self.deadline_s = deadline_s
-        super().__init__(
-            f"item '{item_id}' of '{node_id}' timed out after {deadline_s:.1f}s"
-        )
-
-
-class ExecutionError(RuntimeError):
-    """A run could not be carried out."""
-
-
-class OpOutcomeUnknown(ExecutionError):
-    """A child exited after dispatch without reporting its side effects."""
-
-
-class OpTimeoutError(RuntimeError):
-    """An op or fn gate exceeded its per-node timeout."""
-
-    def __init__(self, node_id: str, timeout_s: float):
-        self.node_id = node_id
-        self.timeout_s = timeout_s
-        super().__init__(f"op '{node_id}' timed out after {timeout_s:.1f}s")
-
-
-class GateStop(Exception):
-    """The walker stopped at a user gate that needs a person's answer."""
-
-    def __init__(self, gate: str, reads: list[str], edges: list[Edge]):
-        self.gate = gate
-        self.reads = reads
-        self.edges = edges
-        super().__init__(f"gate {gate!r} is waiting for a person")
-
-
-class HaltStop(Exception):
-    """A halt verdict ended the run."""
-
-    def __init__(self, gate: str, reason: str = "verdict"):
-        self.gate = gate
-        self.reason = reason
-        super().__init__(f"gate {gate!r} halted the run")
-
-    def detail(self) -> str:
-        """What the run's status says of this halt: which gate, and the reason it gave
-        (a halt verdict's own reason, or the cap that refused a retry), as the spine
-        keeps it. A plain ``halt`` with no reason says only which gate."""
-        return f"{self}: {self.reason}" if self.reason and self.reason != "verdict" else str(self)
-
-
-def route_verdict(verdict: str, edges: list[Edge], gate_kind: str) -> tuple[Edge | None, str]:
-    """Route a verdict to an edge, matching the spine's ``Spine.verdict()``.
-
-    Returns ``(edge, reason)``. When the edge is ``None``, the run is halted
-    with the given reason (``"verdict"``).
-
-    - Match labels case-insensitively.
-    - ``proceed`` with no proceed edge falls through to the unconditional edge.
-    - ``halt`` follows a halt edge if there is one; otherwise returns
-      ``(None, "verdict")`` — terminal halt.
-    - An unknown verdict raises :class:`ExecutionError`.
-    """
-    lower = verdict.lower()
-    # Direct match (case-insensitive)
-    for edge in edges:
-        if (edge.condition or "").lower() == lower:
-            return edge, ""
-    # proceed falls through to unconditional
-    if lower == "proceed":
-        for edge in edges:
-            if not edge.condition:
-                return edge, ""
-    # halt with no halt edge is terminal
-    if lower == "halt":
-        return None, "verdict"
-    raise ExecutionError(
-        f"verdict {verdict!r} is not one of {sorted(e.condition or '' for e in edges)}"
-    )
-
-
-class ModelClient(Protocol):
-    """The one thing an agent node needs: text in, text out."""
-
-    def complete(self, prompt: str, *, system: str = "") -> str: ...
-
-
-@dataclass
-class Step:
-    """One visited node."""
-
-    node: str
-    kind: str
-    duration_s: float
-    verdict: str | None = None
-    error: str | None = None
-    #: Why a gate gave its verdict, when it said: the same reason the spine reports
-    #: under ``ran``, so a headless run explains a reloop as a driven one does.
-    reason: str | None = None
-    #: A gate's ``proceed`` taken because it ran out of reloops (``on_exhausted:
-    #: continue``), not because the check passed.
-    exhausted: bool = False
-
-
-class RunContext:
-    """What a node's callable sees: a work directory, the knobs, and the facts.
-
-    Facts are the run's own numbers, and they are what ``score()`` reads. A write
-    is checked against the node's declaration so the graph's dataflow statements
-    stay true.
-    """
-
-    def __init__(
-        self,
-        workdir: Path,
-        *,
-        knobs: dict[str, Any] | None = None,
-        facts: dict[str, Any] | None = None,
-        verdicts: dict[str, str] | None = None,
-        model: ModelClient | None = None,
-        task: dict[str, Any] | None = None,
-        memory: Any = None,
-        enforce_writes: bool = True,
-    ) -> None:
-        self.workdir = Path(workdir)
-        self.workdir.mkdir(parents=True, exist_ok=True)
-        self.knobs: dict[str, Any] = dict(knobs or {})
-        self.facts: dict[str, Any] = dict(facts or {})
-        #: Verdicts for gates a person or an agent answers, by node id. Empty in a
-        #: headless run, which is why such a gate stops rather than deciding.
-        self.verdicts: dict[str, str] = dict(verdicts or {})
-        self.model = model
-        from refactory_dsh.budgets import RunBudget
-
-        self.budget = RunBudget.inherited(model)
-        self.task: dict[str, Any] = dict(task or {})
-        #: The mode's declared memory, for an op that has something to remember.
-        self.memory = memory
-        self.enforce_writes = enforce_writes
-        self.iteration = 0
-        self.node_id = ""
-        self._declared: tuple[str, ...] = ()
-        self._declared_reads: tuple[str, ...] = ()
-        self._declared_facts: tuple[str, ...] = ()
-        #: The name each built file is read under (`graph.Node.renames` ``reads``).
-        self.read_renames: dict[str, str] = {}
-        self._produced: set[str] = set()
-        self.writes_made: list[str] = []
-        #: A code or verdict node's declaration (`refactory_dsh.snippet.spec`): its code,
-        #: inputs and out-edge labels. ``None`` for every other node.
-        self.snippet: dict[str, Any] | None = None
-
-    # ── knobs ──────────────────────────────────────────────────────────────
-    def knob(self, name: str, default: Any = None) -> Any:
-        return self.knobs.get(name, default)
-
-    # ── files ──────────────────────────────────────────────────────────────
-    def path(self, name: str) -> Path:
-        """A file inside the work directory. Escaping it is refused."""
-        candidate = Path(name)
-        if candidate.is_absolute() or ".." in candidate.parts:
-            raise ExecutionError(f"{name!r} is not a relative path inside the work directory")
-        return self.workdir / candidate
-
-    def _note_write(self, name: str) -> None:
-        if not self.enforce_writes or not self._declared:
-            return
-        for declared in self._declared:
-            if name == declared or name.startswith(declared.rstrip("/") + "/"):
-                self.writes_made.append(name)
-                return
-        raise ExecutionError(
-            f"node {self.node_id!r} wrote {name!r}, which it does not declare; "
-            f"declared writes: {list(self._declared)}"
-        )
-
-    def _writable(self, name: str) -> Path:
-        """The path a write to *name* goes to, cut loose from any run-level input
-        a data pass reads through (items.detach_read_through): a pass must not
-        change the run's files, whatever the node declares."""
-        from refactory_dsh.items import detach_read_through
-
-        target = self.path(name)
-        detach_read_through(self.workdir, name)
-        return target
-
-    def write_text(self, name: str, text: str) -> Path:
-        self._note_write(name)
-        target = self._writable(name)
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(text)
-        # A watched run counts a node's writes as work (`activity`); others do nothing.
-        activity.mark()
-        return target
-
-    def append_text(self, name: str, text: str) -> Path:
-        self._note_write(name)
-        target = self._writable(name)
-        target.parent.mkdir(parents=True, exist_ok=True)
-        with target.open("a") as handle:
-            handle.write(text)
-        activity.mark()
-        return target
-
-    def read_text(self, name: str) -> str:
-        self._check_item_read(name)
-        return self.path(name).read_text()
-
-    def write_json(self, name: str, payload: Any) -> Path:
-        import json
-
-        return self.write_text(name, json.dumps(payload, indent=2, default=str))
-
-    def read_json(self, name: str, default: Any = None) -> Any:
-        import json
-
-        self._check_item_read(name)
-        target = self.path(name)
-        if not target.exists():
-            return default
-        try:
-            return json.loads(target.read_text())
-        except json.JSONDecodeError:
-            return default
-
-    def exists(self, name: str) -> bool:
-        self._check_item_read(name)
-        return self.path(name).exists()
-
-    def _pass_item_files(self) -> dict[str, str]:
-        """``{path: role}`` for the item files the Task of this item's pass lays in
-        (`Task.item_files`); empty outside a pass. Read from the pass's marker."""
-        import json
-
-        from refactory_dsh.items import PASS_MARKER
-        from refactory_dsh.task import TaskError, task_item_files
-
-        marker = self.workdir / PASS_MARKER
-        try:
-            ref = str(json.loads(marker.read_text()).get("task") or "")
-        except (OSError, ValueError, AttributeError):
-            return {}
-        if not ref:
-            return {}
-        try:
-            return {path: role for role, path in task_item_files(ref).items()}
-        except (TaskError, ImportError) as exc:
-            raise ExecutionError(f"node {self.node_id!r}: the Task's item files cannot be "
-                                 f"read: {exc}") from exc
-
-    def _check_item_read(self, name: str) -> None:
-        """Refuse a read, through this context's read helpers, of an item file the node
-        does not declare in its ``reads`` (as `item_file` does). ``path`` gives a path,
-        not a read, and is not checked: an op reads an item file through `item_file`."""
-        files = self._pass_item_files()
-        normal = Path(name).as_posix()
-        if normal in files and normal not in self._declared_reads:
-            raise ExecutionError(f"node {self.node_id!r} reads item file {normal!r} "
-                                 f"({files[normal]}), which it does not declare; declared "
-                                 f"reads: {list(self._declared_reads)}")
-
-    def item_file(self, role: str) -> Path | None:
-        """The file the item's Task laid into this pass under ``role`` (`Task.item_files`),
-        or ``None`` when this item has none. Refused (`ExecutionError`) outside an item's
-        pass, for a role the Task does not declare, and when this node does not list the
-        file in its ``reads``: what a step takes in is what it declares, so a read around
-        the declaration fails loudly instead of passing unseen. Both runtimes hand an op
-        this context (`run.build_op_context`)."""
-        import json
-
-        from refactory_dsh.items import PASS_MARKER
-        from refactory_dsh.task import TaskError, task_item_files
-
-        marker = self.workdir / PASS_MARKER
-        try:
-            ref = str(json.loads(marker.read_text()).get("task") or "")
-        except (OSError, ValueError, AttributeError):
-            ref = ""
-        if not ref:
-            raise ExecutionError(f"node {self.node_id!r} asks for item file {role!r} outside "
-                                 "an item's pass (no Task laid one in)")
-        try:
-            files = task_item_files(ref)
-        except (TaskError, ImportError) as exc:
-            raise ExecutionError(f"node {self.node_id!r}: the Task's item files cannot be "
-                                 f"read: {exc}") from exc
-        if role not in files:
-            raise ExecutionError(f"node {self.node_id!r} asks for item file {role!r}, which "
-                                 f"the Task does not lay in; it lays in: "
-                                 f"{', '.join(sorted(files)) or 'none'}")
-        name = files[role]
-        if name not in self._declared_reads:
-            raise ExecutionError(f"node {self.node_id!r} reads item file {name!r} ({role}), "
-                                 f"which it does not declare; declared reads: "
-                                 f"{list(self._declared_reads)}")
-        target = self.path(name)
-        return target if target.is_file() else None
-
-    # ── facts ──────────────────────────────────────────────────────────────
-    def set_fact(self, name: str, value: Any) -> None:
-        """Set a run fact. A node may only set facts it declares in ``produces``."""
-        self.facts[name] = value
-        self._produced.add(name)
-
-    def _internal_fact(self, name: str, value: Any) -> None:
-        """A fact the run itself records, not one a node claims to produce."""
-        self.facts[name] = value
-
-    @property
-    def declared_reads(self) -> tuple[str, ...]:
-        """The current node's declared reads, for gate discovery."""
-        return self._declared_reads
-
-    def _check_produces(self) -> None:
-        if not self.enforce_writes:
-            return
-        extra = sorted(self._produced - set(self._declared_facts))
-        if extra:
-            raise ExecutionError(
-                f"node {self.node_id!r} produced the fact(s) {extra}, which it does "
-                f"not declare; declared facts: {list(self._declared_facts)}"
-            )
-
-    # ── pass isolation ─────────────────────────────────────────────────────
-    def pass_scope(self, pass_dir: Path, produces: tuple[str, ...]):
-        """Context manager that isolates one data-node item pass.
-
-        On enter: saves *workdir* and *facts*, sets ``workdir`` to *pass_dir*
-        and ``facts`` to a deep copy: a pass that edits a fact in place (appends
-        to a list) changes its own copy, as the spine's pass does with its own
-        ``facts.json``.
-
-        On exit: merges only keys in *produces* plus ``"item_scores"`` that the
-        pass added or changed into the saved (run-level) facts, then restores
-        both ``workdir`` and ``facts``.
-        """
-        import copy
-        from contextlib import contextmanager
-
-        @contextmanager
-        def _scope():
-            saved_workdir = self.workdir
-            saved_facts = self.facts
-            self.workdir = pass_dir
-            self.facts = copy.deepcopy(saved_facts)
-            try:
-                yield
-            finally:
-                # Merge only declared produces + item_scores. The pass's copy is
-                # discarded on exit, so its values can be handed over as they are.
-                allowed = set(produces) | {"item_scores"}
-                for key in allowed:
-                    if key in self.facts:
-                        if key not in saved_facts or saved_facts[key] != self.facts[key]:
-                            saved_facts[key] = self.facts[key]
-                self.workdir = saved_workdir
-                self.facts = saved_facts
-
-        return _scope()
-
-
-class Verdict(str):
-    """A gate's verdict label, carrying why the gate gave it.
-
-    It *is* the label, so routing, comparisons and every caller that reads a
-    gate's return as a string are unchanged. The node runner prints ``reason``
-    before the label, which is how the spine hands a reloop's cause to the node
-    the run goes back to and to the CEO driving it. A reason that opens with its
-    own label (``"reloop: …"``, the form gate facts are written in) drops it, so
-    a reader is not told the verdict twice.
-    """
-
-    reason: str
-
-    def __new__(cls, label: str, reason: str = "") -> Verdict:
-        verdict = super().__new__(cls, label)
-        verdict.reason = reason.removeprefix(f"{label}: ")
-        return verdict
-
-
-def render(template: str, ctx: RunContext) -> str:
-    """Fill ``{{name}}`` and evaluate ``{% if/elif/else/endif %}`` blocks.
-
-    Deliberately not :meth:`str.format`: a prompt is prose full of braces, and a
-    single stray one must not be able to make an agent node unrunnable.
-    """
-    import re
-
-    values = {**ctx.knobs, **ctx.facts}
-
-    def replace(match: re.Match[str]) -> str:
-        key = match.group(1).strip()
-        if key not in values:
-            return match.group(0)
-        return str(values[key])
-
-    template = _render_conditionals(template, values)
-    return re.sub(r"\{\{\s*([A-Za-z_][A-Za-z0-9_]*)\s*\}\}", replace, template)
-
-
-def fills_facts(fn: Callable[..., Any]) -> Callable[..., Any]:
-    """Mark an op that fills each ``{{name}}`` in the ``str`` knobs it reads (its node's
-    ``knobs``) from the run's facts and knobs, as an agent's prompt is filled
-    (:func:`render`). The validator reads the mark: a slot in such a knob is one of the
-    op's inputs (V15, V17), and a slot in a knob nothing fills is refused (V20)."""
-    fn.fills_facts = True  # type: ignore[attr-defined]
-    return fn
-
-
-def by_declaration(fn: Callable[..., Any] | None = None, *,
-                   files: Sequence[str] | None = None) -> Any:
-    """Mark an op or gate callable that opens the files its node declares and writes and
-    sets its declared outputs, under the declared names (``ctx.declared_reads``, its
-    declared writes and facts), never a name of its own choosing. An edit may then rename
-    that node's files and outputs (``insert``'s 'takes_over', `core_ops._take_over_plan`);
-    a callable without the mark is taken to open or return them by name. (A fact it reads
-    is held to its ``inputs`` either way.)
-
-    ``files`` names the files it was built to read, one per role, when it finds each
-    role's file by `declared_files` (so an edit's check resolves them as its run does)."""
-    def mark(target: Callable[..., Any]) -> Callable[..., Any]:
-        target.by_declaration = True  # type: ignore[attr-defined]
-        if files is not None:
-            target.declared_files = tuple(files)  # type: ignore[attr-defined]
-        return target
-    return mark(fn) if fn is not None else mark
-
-
-def declared_files(reads: Sequence[str], files: Sequence[str],
-                   renames: Mapping[str, str] | None = None) -> list[str | None]:
-    """Each role's file among a node's declared ``reads``, for a callable built to read
-    ``files`` (one per role, `by_declaration`): the name the node reads that built file
-    under (``renames``, its `graph.Node.renames` ``reads``; else the built name), or None
-    when the node does not read it (an edit took out the step that wrote it). Never by
-    position or count. No reads at all (a context with no declaration): the built names."""
-    reads = list(reads)
-    if not reads:
-        return list(files)
-    named = [(renames or {}).get(name, name) for name in files]
-    return [name if name in reads else None for name in named]
-
-
-def names_matter(fn: Callable[..., Any]) -> Callable[..., Any]:
-    """Mark an op or gate callable whose behaviour depends on the names of the files it
-    reads, not only on what they hold (``select`` matches a label against them): an edit
-    that renames one of its reads would change what it does, so ``insert``'s 'takes_over'
-    refuses to (`core_ops._take_over_plan`)."""
-    fn.names_matter = True  # type: ignore[attr-defined]
-    return fn
-
-
-def _eval_condition(expr: str, values: dict[str, Any]) -> bool:
-    """Evaluate a simple conditional expression against *values*.
-
-    Supports ``name == 'literal'``, ``name != 'literal'``, and bare ``name``
-    (truthy check).  Anything else evaluates to ``False`` so the template
-    degrades to the ``{% else %}`` branch rather than crashing a run.
-    """
-    import re
-
-    expr = expr.strip()
-
-    # A literal ends at the quote that opened it, so either quote may appear inside
-    # the other: "don't explain", 'say "hi"'.
-    m = re.fullmatch(
-        r"""([A-Za-z_]\w*)\s*(==|!=)\s*(?:'([^']*)'|"([^"]*)")""", expr,
-    )
-    if m:
-        var, op = m.group(1), m.group(2)
-        lit = m.group(3) if m.group(3) is not None else m.group(4)
-        val = str(values.get(var, ""))
-        return (val == lit) if op == "==" else (val != lit)
-
-    m = re.fullmatch(r"([A-Za-z_]\w*)", expr)
-    if m:
-        return bool(values.get(m.group(1)))
-
-    return False
-
-
-def _render_conditionals(template: str, values: dict[str, Any]) -> str:
-    """Process ``{% if %}`` / ``{% elif %}`` / ``{% else %}`` / ``{% endif %}``."""
-    import re
-
-    # DOTALL: a condition may span lines, and its opening tag must be recognized
-    # whenever its else/endif are, or raw syntax and every branch reach the model.
-    pattern = re.compile(r"\{%[-\s]*(if|elif|else|endif)\b\s*(.*?)[-\s]*%\}", re.DOTALL)
-
-    result: list[str] = []
-    # Each frame: (emitting: is the current branch active, settled: has any
-    # branch in this if/elif/else chain already been taken).
-    stack: list[list[bool]] = []
-    pos = 0
-
-    def _emitting() -> bool:
-        return all(frame[0] for frame in stack)
-
-    for m in pattern.finditer(template):
-        tag, expr = m.group(1), m.group(2).strip()
-
-        if _emitting():
-            result.append(template[pos:m.start()])
-        pos = m.end()
-
-        if tag == "if":
-            cond = _eval_condition(expr, values)
-            stack.append([cond, cond])
-        elif tag == "elif" and stack:
-            settled = stack[-1][1]
-            cond = not settled and _eval_condition(expr, values)
-            stack[-1] = [cond, settled or cond]
-        elif tag == "else" and stack:
-            stack[-1] = [not stack[-1][1], True]
-        elif tag == "endif" and stack:
-            stack.pop()
-
-    if _emitting():
-        result.append(template[pos:])
-    return "".join(result)
-
-
-#: The file a data node's current item is written to, for the pass that reads it.
-CURRENT_ITEM = "current_item.json"
-
-#: Where a run says which items a data node should read, when they are not the ones
-#: the mode's own graph declares. A harness for a class of work is built once and fed
-#: many times, so the source is run configuration rather than graph structure.
-ITEMS_OVERRIDE = "items.json"
-
-
-def load_items(node: Node, workdir: Path) -> list[dict[str, Any]]:
-    """The items a data node iterates, in the order it declares them.
-
-    One loader, so a mode means the same thing on either runtime: the item is handed
-    to the pass as JSON rather than as a template variable, because a pass is a
-    subgraph of nodes and only the first of them sees a prompt.
-
-    The part the run directory names is applied last, by
-    :func:`refactory_dsh.task.select_subset`; both runtimes load through this
-    function, so both iterate the same part of the same items.
-    """
-    from refactory_dsh.task import _item_key, select_subset
-
-    every = full_items(node, workdir)
-    items = select_subset(every, workdir)
-    # A smoke's sample (`sandbox.smoke_sample`) names, per Task-bound node, the items it
-    # runs; any other run iterates the whole selected part, as it always has. An item is
-    # named as the sample and the selection name it: by id, else by its position among
-    # all the node's items (`task._item_key`), never its position in the selection.
-    if node.task_ref:
-        sample = smoke_sample_ids(workdir, node.id)
-        if sample is not None:
-            keys = {id(item): _item_key(item, index) for index, item in enumerate(every)}
-            items = [item for item in items if keys.get(id(item)) in sample]
-    return items
-
-
-#: Where a smoke's sample names the items each Task-bound data node runs
-#: (`sandbox.smoke_sample`), relative to the run directory: ``{node id: [item ids]}``.
-SMOKE_SAMPLE = ".refactory/smoke-sample.json"
-
-
-def smoke_sample_ids(workdir: Path, node_id: str) -> set[str] | None:
-    """The item ids a smoke's sample gives ``node_id``, or None outside a smoke."""
-    try:
-        sample = json.loads((Path(workdir) / SMOKE_SAMPLE).read_text())
-    except (OSError, json.JSONDecodeError):
-        return None
-    ids = sample.get(node_id) if isinstance(sample, dict) else None
-    return {str(item) for item in ids} if isinstance(ids, list) else None
-
-
-def full_items(node: Node, workdir: Path) -> list[dict[str, Any]]:
-    """Every item a data node has, before the run directory's selection is applied.
-
-    A node bound to a Task and naming no source takes its items from the Task, which
-    is what makes ``task_ref`` a binding rather than a line in a prompt. Public
-    because the outer loop sizes the partition it writes from the whole selection.
-
-    When ``subset.json`` exists in ``workdir``, its ``part`` and ``seed`` are
-    forwarded to ``Task.instances()`` so a Task whose items depend on the seed
-    sees the evaluation's part and seed.
-    """
-    items = declared_items(node, workdir)
-    if not items and node.task_ref:
-        from refactory_dsh.task import load_task, subset_part_seed
-
-        part, seed = subset_part_seed(workdir)
-        items = task_items(load_task(node.task_ref, workdir), part=part, seed=seed)
-    return items
-
-
-def declared_items(node: Node, workdir: Path) -> list[dict[str, Any]]:
-    """The items the node's own source declares, before any Task or selection.
-
-    A run directory may name a different source for this node, which is how a harness
-    built for a class of work is pointed at items it has never seen: the graph stays
-    what it was, and the run carries which items to read.
-    """
-    from refactory_dsh.items import source_override
-
-    override = source_override(workdir, node.id)
-    source_path = str(override.get("source_path") or node.source_path or "")
-    source_format = str(override.get("source_format") or node.source_format or "directory")
-    items: list[dict[str, Any]] = [] if override else [dict(item) for item in node.inline_items]
-    if not items and source_path:
-        source = workdir / source_path
-        if not source.exists():
-            source = Path(source_path)
-        if not source.exists():
-            raise ExecutionError(
-                f"data node {node.id!r} names source_path {source_path!r}, "
-                "which does not exist; bind the source before the run"
-            )
-        if source_format == "jsonl":
-            for index, line in enumerate(source.read_text().splitlines()):
-                if not line.strip():
-                    continue
-                payload = json.loads(line)
-                items.append(payload if isinstance(payload, dict) else {"value": payload})
-                items[-1].setdefault("id", str(index))
-        elif source_format == "csv":
-            import csv
-
-            with source.open(newline="") as handle:
-                items = [dict(row) for row in csv.DictReader(handle)]
-            for csv_index, csv_item in enumerate(items):
-                csv_item.setdefault("id", str(csv_index))
-        elif source_format == "directory":
-            items = []
-            for child in sorted(source.iterdir()):
-                if not child.is_dir():
-                    continue
-                # An item is a directory, and it may describe itself in `item.json`:
-                # those fields reach the pass the same way a Task's metadata does. The
-                # directory's name stays the id, so a described item cannot rename
-                # itself out of the selection it was listed in.
-                item: dict[str, Any] = {"id": child.name, "path": str(child)}
-                described = child / "item.json"
-                if described.exists():
-                    try:
-                        loaded = json.loads(described.read_text())
-                    except json.JSONDecodeError as exc:
-                        raise ExecutionError(
-                            f"item {child.name!r} of data node {node.id!r} carries an "
-                            f"item.json that is not JSON: {exc}"
-                        ) from exc
-                    if isinstance(loaded, dict):
-                        for key, value in loaded.items():
-                            item.setdefault(key, value)
-                items.append(item)
-        else:
-            raise ExecutionError(
-                f"data node {node.id!r} declares source_format "
-                f"{source_format!r}; known: directory, jsonl, csv"
-            )
-    limit = override.get("limit") or node.limit
-    if limit:
-        items = items[: int(limit)]
-    return items
-
-
-def task_items(
-    task: "Task",
-    *,
-    part: str | None = None,
-    seed: int | None = None,
-) -> list[dict[str, Any]]:
-    """A Task's instances as the items a data node iterates.
-
-    ``part`` and ``seed`` reach ``task.instances()`` only when its signature
-    accepts them (``task.part_seed_kwargs``), so a Task written without them
-    still loads and a TypeError raised inside it is never swallowed.
-    """
-    from refactory_dsh.task import part_seed_kwargs
-
-    instances = task.instances(**part_seed_kwargs(task.instances, part=part, seed=seed))
-    return [
-        {"id": instance.id, "path": instance.path, **instance.metadata}
-        for instance in instances
-    ]
-
-
-def _ask_model(model: Any, prompt: str, *, system: str, workdir: Path) -> str:
-    """One completion, telling the client where the node's artifacts belong.
-
-    ``workdir`` is not part of the vendored ``ModelClient`` protocol — the optimizer
-    needs only text back — so a client that does not accept it is asked without it. The
-    client that spawns an agent has to know: that agent has tools and writes files with
-    relative paths, and a completion run from the checkout writes a node's artifacts
-    into the repository. The reviewing nodes did exactly that, leaving the run's own
-    `reviews/` empty while the QA synthesis read nothing.
-    """
-    import inspect
-
-    kwargs: dict[str, Any] = {"system": system}
-    try:
-        parameters = inspect.signature(model.complete).parameters
-    except (TypeError, ValueError):  # pragma: no cover - a builtin or a stub
-        parameters = {}
-    if "workdir" in parameters:
-        kwargs["workdir"] = workdir
-    return str(model.complete(prompt, **kwargs))
-
+from typing import Any, Callable
+
+from ..graph import PROCEED, Graph, Node, op_io
+from ..loops import loop_edges
+from ..mode import RunResult
+from ..record import RunRecord
+from .context import ModelClient, RunContext, Step, Verdict, _SENTINEL, render
+from .failures import (
+    ExecutionError,
+    GateStop,
+    HaltStop,
+    OpOutcomeUnknown,
+    OpTimeoutError,
+    _BranchFailed,
+    _ItemDeadlineError,
+    route_verdict,
+)
+from .items import CURRENT_ITEM, load_items
+from .op_child import (
+    _emit_run_warnings,
+    _ensure_forkserver_preload,
+    _finish_op_child,
+    _forkserver_ctx,
+    _kill_op_child,
+    _main_file_lock,
+)
 
 #: Where a run records how far it got, so a failure does not discard the work.
 #:
@@ -821,182 +45,6 @@ def _ask_model(model: Any, prompt: str, *, system: str, workdir: Path) -> str:
 #: in the run directory; this is what makes them usable by a restart instead of only
 #: by a reader.
 PROGRESS = ".refactory/progress.json"
-
-
-def _op_child_target(conn: Any, args_dict: dict[str, Any]) -> None:
-    """Target for the child process that runs one op or fn gate, and then exits.
-
-    One child per call, so an op that crashes, hangs or leaves state behind cannot
-    affect the next one: the interpreter is the parent's as it is at this dispatch.
-    The parent kills the child's whole process group at the node's deadline.
-    """
-    os.setsid()
-
-    def _sigterm_handler(signum: int, frame: Any) -> None:
-        raise SystemExit(f"terminated by signal {signum}")
-    signal.signal(signal.SIGTERM, _sigterm_handler)
-
-    record = None
-    try:
-        # Apply the parent's environment snapshot: the forkserver child inherits
-        # the forkserver's env (created once), but the parent may have set vars
-        # (e.g. via monkeypatch.setenv in tests) that the child needs to see.
-        env_snapshot = args_dict.get("env_snapshot")
-        if env_snapshot:
-            os.environ.clear()
-            os.environ.update(env_snapshot)
-        # In a watched run (`activity.WATCH_ENV`) this child, which leads a session of
-        # its own, records its group, so a stopped run can end it.
-        record = activity.record_process()
-        # The child imports what an op names on its own: the forkserver started with the
-        # parent's sys.path. A workspace package installed since then is picked up here.
-        for pkg_name, pkg_paths in args_dict.get("_package_paths", {}).items():
-            pkg = importlib.import_module(pkg_name)
-            pkg.__path__ = list(pkg_paths)
-        importlib.invalidate_caches()
-        # SWEEP-3: Run ops in the run directory, matching the spine (execute.ts:204).
-        # Set REFACTORY_PROJECT so project_for_nodes() still resolves to the
-        # launcher rather than the run directory after the chdir.
-        if not os.environ.get("REFACTORY_PROJECT"):
-            os.environ["REFACTORY_PROJECT"] = os.getcwd()
-        os.chdir(args_dict["workdir"])
-
-        try:
-            from refactory_dsh.budgets import ENV_LEDGER, RunBudget
-
-            ledger = args_dict.get("budget_ledger")
-            if ledger is None:
-                os.environ.pop(ENV_LEDGER, None)
-            else:
-                os.environ[ENV_LEDGER] = ledger
-
-            # SWEEP-5: ctx.model for ops is None, matching the spine (run.py:314,
-            # 344-365) and the documented op API (create_ops.py:126).
-            ctx = RunContext(
-                Path(args_dict["workdir"]), knobs=args_dict["knobs"],
-                facts=args_dict["facts"], task=args_dict["task"],
-                memory=args_dict["memory"],
-                verdicts=args_dict["verdicts"], enforce_writes=args_dict["enforce_writes"],
-            )
-            ctx.node_id = args_dict["node_id"]
-            ctx.iteration = args_dict["iteration"]
-            ctx._declared = tuple(args_dict.get("writes", ()))
-            ctx._declared_reads = tuple(args_dict.get("reads", ()))
-            ctx._declared_facts = tuple(args_dict.get("produces", ()))
-            ctx.read_renames = dict(args_dict.get("read_renames") or {})
-            ctx.snippet = args_dict.get("snippet")
-
-            # Open the same shared ledger the parent holds, so an op that records usage
-            # is charged once, in this run (dm-173).
-            ctx.budget = RunBudget.from_path(ledger) if ledger else None
-
-            fn = resolve(args_dict["callable_target"])
-            # Gap 20 / correction C: capture stderr so run_warning lines can
-            # be emitted by the parent, matching the spine (execute.ts:177-178).
-            # SWEEP-4: also capture stdout so the parent can extract fn-gate
-            # feedback the same way the spine does (execute.ts:148-157).
-            _old_stderr = sys.stderr
-            _old_stdout = sys.stdout
-            _capture_stderr = _MarkedCapture()
-            _capture_stdout = _MarkedCapture()
-            sys.stderr = _capture_stderr
-            sys.stdout = _capture_stdout
-            try:
-                result = fn(ctx)
-            finally:
-                sys.stderr = _old_stderr
-                sys.stdout = _old_stdout
-            _captured_stderr = _capture_stderr.getvalue()
-            _captured_stdout = _capture_stdout.getvalue()
-
-            conn.send(("ok", {
-                "result": result,
-                "facts": dict(ctx.facts),
-                "writes_made": list(ctx.writes_made),
-                "_produced": list(ctx._produced),
-                "_stderr": _captured_stderr,
-                "_stdout": _captured_stdout,
-            }))
-        except SystemExit:
-            raise  # propagate SIGTERM
-        except BaseException as exc:
-            # Include any stderr and stdout captured before the exception for
-            # error diagnosis: an op that prints and then raises is exactly the
-            # run whose diagnostics are wanted.
-            try:
-                _err_stderr = _capture_stderr.getvalue()
-            except Exception:
-                _err_stderr = ""
-            try:
-                _err_stdout = _capture_stdout.getvalue()
-            except Exception:
-                _err_stdout = ""
-            conn.send(("error", {
-                "type": type(exc).__qualname__,
-                "module": type(exc).__module__,
-                "message": str(exc),
-                "traceback": "".join(traceback_mod.format_exception(exc)),
-                "_stderr": _err_stderr,
-                "_stdout": _err_stdout,
-            }))
-    finally:
-        activity.forget_process(record)
-        conn.close()
-
-
-class _MarkedCapture(io.StringIO):
-    """An op child's captured output, which a watched run counts as work as it is
-    written (`activity.mark`), as the spine's node runner does."""
-
-    def write(self, text: str) -> int:
-        activity.mark()
-        return super().write(text)
-
-
-def _finish_op_child(child: Any) -> None:
-    """Reap a child that has reported, killing it if it is still there.
-
-    An op that returns with a non-daemon thread still running keeps its child alive,
-    and multiprocessing joins every child at interpreter exit: the run would hang after
-    the node that caused it. So a child that outlives its grace is killed like a
-    timed-out one.
-    """
-    child.join(timeout=1)
-    if child.is_alive():
-        _kill_op_child(child)
-
-
-def _kill_op_child(child: Any) -> None:
-    """Stop one op's process group: terminate, grace, then kill whatever is left.
-
-    The grace waits on the group rather than on the child: polling the child would reap
-    the leader, freeing its pid, and the kill below names the group by that pid.
-    """
-    try:
-        os.killpg(child.pid, signal.SIGTERM)
-    except (ProcessLookupError, OSError):
-        try:
-            child.terminate()
-        except OSError:
-            pass
-    grace_until = time.monotonic() + 5
-    while time.monotonic() < grace_until:
-        try:
-            os.killpg(child.pid, 0)  # the group is still there, and so is its id
-        except OSError:
-            break
-        time.sleep(0.05)
-    # The leader may have exited on TERM while a descendant ignored it: kill the group
-    # anyway, before the join that would free the pid.
-    try:
-        os.killpg(child.pid, signal.SIGKILL)
-    except (ProcessLookupError, OSError):
-        if child.is_alive():
-            try:
-                child.kill()
-            except OSError:
-                pass
-    child.join(timeout=5)
 
 
 @dataclass
@@ -1156,7 +204,7 @@ class Executor:
                 error = f"the run exceeded {self.max_steps} steps"
                 break
             if node.kind == "fork":
-                from .fork import run_fork
+                from ..fork import run_fork
 
                 self.steps.append(Step(node.id, node.kind, 0.0))
                 self.record.complete(node)
@@ -1245,7 +293,7 @@ class Executor:
                     n for n in self.graph.nodes.values()
                     if n.id != node.id
                 ]) or 1
-                from .loops import loop_edges as _loop_edges
+                from ..loops import loop_edges as _loop_edges
 
                 _body = self.graph.data_body(node.id)
                 _reloops = sum(
@@ -1300,7 +348,7 @@ class Executor:
                 # (data_parallel's docstring); a recorded fallback runs them below.
                 _parallelism = node.effective_parallelism(self.ctx.knobs)
                 if _parallelism > 1:
-                    from .data_parallel import _check_serial_fallback, run_data_concurrent
+                    from ..data_parallel import _check_serial_fallback, run_data_concurrent
 
                     if _check_serial_fallback(self, node, _parallelism) is None:
                         _par = run_data_concurrent(
@@ -1704,7 +752,7 @@ class Executor:
                 return f"the run exceeded {self.max_steps} steps"
             # Nested fork inside a branch: delegate to run_fork.
             if node.kind == "fork":
-                from .fork import run_fork
+                from ..fork import run_fork
 
                 self.steps.append(Step(node.id, node.kind, 0.0))
                 self.record.complete(node)
@@ -1819,7 +867,7 @@ class Executor:
         from refactory_dsh.node_retry import falls_back_on, leaves_no_answer
         from refactory_dsh.run import BuildLoopStop
 
-        from .fork import _record_missing, _settle_missing
+        from ..fork import _record_missing, _settle_missing
 
         optional = any(node.id in self.graph.optional_targets_of(fork, self.ctx.knobs)
                        for fork in self.graph.nodes.values() if fork.kind == "fork")
@@ -1973,6 +1021,8 @@ class Executor:
         # checks (design_ops.py:302-306) handle None explicitly.
         # Resolve workdir to absolute: the child does os.chdir(workdir) and
         # relative paths would resolve against the new CWD otherwise.
+        import os
+
         _abs_workdir = str(self.ctx.workdir.resolve())
         # A declared required read that is missing refuses the node, as on the spine.
         from refactory_dsh.run import missing_inputs
@@ -2017,6 +1067,8 @@ class Executor:
         _ensure_forkserver_preload(self.graph)
         parent_conn, child_conn = _forkserver_ctx.Pipe()
         try:
+            from .op_child import _op_child_target
+
             child = _forkserver_ctx.Process(
                 target=_op_child_target, args=(child_conn, args_dict))
             # When the parent was launched from stdin (``python -`` or a
@@ -2386,7 +1438,8 @@ class Executor:
         def ask(attempt: Any, sent: str, place: Any) -> str:
             self.model_calls += 1
             if place is None:
-                response = _ask_model(attempt, sent, system=system, workdir=self.ctx.workdir)
+                import refactory_dsh.nn.executor as _pkg
+                response = _pkg._ask_model(attempt, sent, system=system, workdir=self.ctx.workdir)
             else:
                 response = workspaces.ask(place, attempt, sent, workdir=self.ctx.workdir, system=system)
             # Exchange-counting rule: one exchange per completed agent call.
