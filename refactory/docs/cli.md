@@ -32,7 +32,7 @@ variants). The refusal names which argument was empty.
 |---|---|
 | `--mode <mode>` | `design` (the default), `create`, `edit`, `design_fast`, `create_fast`, `edit_fast`, or `<package>/<mode>`. |
 | `--name <name>` | the package or artifact name; without it your words become the name. |
-| `--check "<command>"` | run in the Design run's worktree, or its artifact directory; fast Create/Edit also accept a focused package check. Failures enter the bounded repair path. |
+| `--check "<command>"` | run in the Design run's worktree, or its artifact directory; fast Create/Edit also accept a focused package check. The check must already run on the repository as it is when the run starts; a check that cannot run stops a worktree run before research starts; without a worktree it is a warning in the run's log and, where the mode has one, on the approval card. Failures enter the bounded repair path. |
 | `--repair-attempts <n>` | fast authoring repairs after the first implementation, from 0 to 3 (default 1); `--knob repair_attempts=<n>`, which the other modes refuse by name. |
 | `--attempts <n>` | an alias of the mode's attempts knob: `check_attempts` for design, `attempts` for create and edit, `repair_attempts` for their `_fast` variants. A named mode, which may declare none, refuses it. |
 | `--source-project <dir>` | fast Design: copy an existing directory into the artifact directory and apply the change there, instead of working in a worktree; it takes no `--target`, `--base`, `--setup` or `--generate`. |

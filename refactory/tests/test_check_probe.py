@@ -1,12 +1,12 @@
-"""The check's probe at prepare: a check that may not run is said in the run's first minute.
+"""The check's probe at prepare: a check that cannot run on the base stops the run.
 
 o55-dm149c's check passed ``-n 4`` to a pytest without pytest-xdist. Nothing ran the check
 until the build's self-check, 82 minutes in, which then blamed the targeted command. Now
 prepare probes the check where it will run (`check_probe`) -- pytest collects, every other
-program is looked up -- on the walker and on the spine alike. The probe is advisory: the
-change may add what the base lacks, so what it finds is a warning in the run's log and on
-the approval card, and the run goes on. A self-check that cannot run shows pytest's own
-error.
+program is looked up -- on the walker and on the spine alike. When the run has a worktree,
+a probe fault (a command pytest cannot parse, a missing program) refuses the run before
+research starts. Without a worktree the probe is advisory: its warning goes to the
+approval card and the run's log. A self-check that cannot run shows pytest's own error.
 """
 from __future__ import annotations
 
@@ -187,22 +187,24 @@ def test_without_a_worktree_the_check_is_probed_in_an_empty_directory(tmp_path):
     assert check_probe.probe_check(ctx, f"{PYTEST} tests/test_the_change_adds.py") == ""
 
 
-def test_the_approval_card_shows_the_probes_warning_with_the_tools_words():
+def test_the_approval_card_shows_the_probes_warning_for_a_no_worktree_run():
     from refactory_dsh.design_ops import design_card, design_review_status
 
     facts = {"design_review_attempts_used": 1, "design_review_findings": "",
-             "check_probe_warning": "Check may not run at base: its probe exited 4 (pytest's usage "
-                                    "error).\npytest: error: unrecognized arguments: -n"}
+             "check_probe_warning": "Check may not run in the artifact's directory: its probe exited "
+                                    "4 (pytest's usage error).\npytest: error: unrecognized "
+                                    "arguments: -n"}
     status = design_review_status(facts).splitlines()
-    assert "Check may not run at base: its probe exited 4 (pytest's usage error). (advisory)" in status
+    assert any("Check may not run in the artifact's directory" in ln and "(advisory)" in ln
+               for ln in status)
     assert "- pytest: error: unrecognized arguments: -n" in status
     assert "unrecognized arguments: -n" in design_card(facts)
     assert "Check may not run" not in design_review_status({**facts, "check_probe_warning": ""})
 
 
-# ── both runtimes warn at prepare and go on ───────────────────────────────────
+# ── worktree runs: a probe fault refuses before research ─────────────────────
 
-def test_the_walker_warns_at_prepare_and_goes_on_to_research(tmp_path, monkeypatch, capsys):
+def test_the_walker_refuses_a_worktree_run_whose_check_cannot_parse(tmp_path, monkeypatch):
     monkeypatch.setenv("REFACTORY_HOME", str(tmp_path / "home"))
     repo = _target(tmp_path / "repo")
     mode = DesignMode()
@@ -210,10 +212,61 @@ def test_the_walker_warns_at_prepare_and_goes_on_to_research(tmp_path, monkeypat
     state["knobs"]["pr"]["value"] = False
     mode.load_state_dict(state)
     model = FakeModel([])
-    mode.run(tmp_path / "run", model=model,
-             task={"name": "probe_tool", "brief": BRIEF, "check": UNPARSABLE, "target": str(repo)})
-    assert "Check may not run at base" in capsys.readouterr().err
+    result = mode.run(tmp_path / "run", model=model,
+                      task={"name": "probe_tool", "brief": BRIEF, "check": UNPARSABLE,
+                            "target": str(repo)})
+    assert not result.exit_ok, "the run should fail at prepare"
+    assert "unrecognized arguments: --no-such-option-xyz" in (result.error or "")
+    assert "The check must run on the repository as it is today" in (result.error or "")
+    assert not model.prompts, "the run did not reach research"
+
+
+def test_the_walker_refuses_a_worktree_run_with_a_missing_program(tmp_path, monkeypatch):
+    monkeypatch.setenv("REFACTORY_HOME", str(tmp_path / "home"))
+    repo = _target(tmp_path / "repo")
+    mode = DesignMode()
+    state = mode.state_dict()
+    state["knobs"]["pr"]["value"] = False
+    mode.load_state_dict(state)
+    model = FakeModel([])
+    result = mode.run(tmp_path / "run", model=model,
+                      task={"name": "probe_tool", "brief": BRIEF,
+                            "check": "no-such-program-xyz --check", "target": str(repo)})
+    assert not result.exit_ok, "the run should fail at prepare"
+    assert "`no-such-program-xyz` is not installed" in (result.error or "")
+    assert not model.prompts, "the run did not reach research"
+
+
+def test_the_walker_does_not_refuse_a_check_whose_only_fault_is_a_missing_test_path(
+    tmp_path, monkeypatch,
+):
+    monkeypatch.setenv("REFACTORY_HOME", str(tmp_path / "home"))
+    repo = _target(tmp_path / "repo")
+    mode = DesignMode()
+    state = mode.state_dict()
+    state["knobs"]["pr"]["value"] = False
+    mode.load_state_dict(state)
+    model = FakeModel([])
+    result = mode.run(tmp_path / "run", model=model,
+                      task={"name": "probe_tool", "brief": BRIEF,
+                            "check": f"{PYTEST} tests/test_the_change_adds.py",
+                            "target": str(repo)})
     assert model.prompts, "the run went on to research"
+
+
+def test_the_walker_does_not_refuse_a_clean_check(tmp_path, monkeypatch):
+    monkeypatch.setenv("REFACTORY_HOME", str(tmp_path / "home"))
+    repo = _target(tmp_path / "repo")
+    mode = DesignMode()
+    state = mode.state_dict()
+    state["knobs"]["pr"]["value"] = False
+    mode.load_state_dict(state)
+    model = FakeModel([])
+    result = mode.run(tmp_path / "run", model=model,
+                      task={"name": "probe_tool", "brief": BRIEF,
+                            "check": f"{PYTEST} tests", "target": str(repo)})
+    assert model.prompts, "the run went on to research"
+    assert not result.facts.get("check_probe_warning"), "no warning"
 
 
 #: The review's repros, which the base cannot run but the change may make runnable, and the
@@ -246,26 +299,89 @@ def _spine_prepare(tmp_path: Path, knobs: dict) -> tuple[subprocess.CompletedPro
 
 @pytest.mark.usefixtures("configured_model_home")
 @pytest.mark.parametrize("shape", SPINE_CHECKS)
-def test_the_spine_warns_in_the_node_process_and_goes_on(tmp_path, monkeypatch, shape):
+def test_the_spine_refuses_a_worktree_run_whose_check_cannot_run(tmp_path, monkeypatch, shape):
     monkeypatch.setenv("REFACTORY_HOME", str(tmp_path / "home"))
     check, says = SPINE_CHECKS[shape]
     done, run = _spine_prepare(tmp_path, {"check": check, "target": str(_target(tmp_path / "repo"))})
-    assert done.returncode == 0, done.stderr[-3000:]
-    warning = json.loads((run / "facts.json").read_text())["check_probe_warning"]
-    assert warning.startswith("Check may not run at base: ") and says in warning
-    assert "Check may not run at base" in done.stderr
+    assert done.returncode != 0, "the run should fail at prepare"
+    assert says in done.stderr
+    assert "The check must run on the repository as it is today" in done.stderr
+
+
+# ── no-worktree runs: a probe warning is advisory, not a refusal ─────────────
+
+#: A missing program whose probe always warns, independent of the environment.
+MISSING_PROGRAM = "no-such-program-xyz --flag"
+
+
+def test_the_walker_goes_on_without_a_worktree_despite_a_probe_warning(tmp_path, monkeypatch):
+    monkeypatch.setenv("REFACTORY_HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("REFACTORY_PROJECT", str(tmp_path / "project"))
+    mode = DesignMode()
+    state = mode.state_dict()
+    state["knobs"]["pr"]["value"] = False
+    state["knobs"]["worktree"]["value"] = False
+    mode.load_state_dict(state)
+    model = FakeModel([])
+    result = mode.run(tmp_path / "run", model=model,
+                      task={"name": "probe_tool", "brief": BRIEF, "check": MISSING_PROGRAM})
+    assert model.prompts, "the run reached research despite the warning"
+    warning = result.facts.get("check_probe_warning", "")
+    assert warning.startswith("Check may not run in the artifact's directory: ")
+    assert "`no-such-program-xyz` is not installed" in warning
+    from refactory_dsh.design_ops import design_review_status
+
+    status = design_review_status({**result.facts, "design_review_attempts_used": 1,
+                                   "design_review_findings": ""})
+    assert "no-such-program-xyz" in status and "(advisory)" in status
 
 
 @pytest.mark.usefixtures("configured_model_home")
 def test_the_spine_goes_on_without_a_worktree(tmp_path, monkeypatch):
     monkeypatch.setenv("REFACTORY_HOME", str(tmp_path / "home"))
     monkeypatch.chdir(tmp_path)
-    done, run = _spine_prepare(tmp_path, {"check": "python -m pytest -p tests.plugin tests",
-                                          "worktree": False})
-    # Whether this probe warns depends on the pytest on PATH; either way the run goes on.
+    done, run = _spine_prepare(tmp_path, {"check": MISSING_PROGRAM, "worktree": False})
     assert done.returncode == 0, done.stderr[-3000:]
     warning = json.loads((run / "facts.json").read_text())["check_probe_warning"]
-    assert warning == "" or warning.startswith("Check may not run in the artifact's directory: ")
+    assert warning.startswith("Check may not run in the artifact's directory: ")
+    assert "`no-such-program-xyz` is not installed" in warning
+
+
+# ── design_fast: the probe gate applies through prepare_artifact ──────────────
+
+def test_design_fast_refuses_a_worktree_run_whose_check_cannot_run(tmp_path, monkeypatch):
+    from refactory_dsh.fast import DesignFastMode
+
+    monkeypatch.setenv("REFACTORY_HOME", str(tmp_path / "home"))
+    repo = _target(tmp_path / "repo")
+    mode = DesignFastMode()
+    model = FakeModel([])
+    result = mode.run(tmp_path / "run", model=model,
+                      task={"name": "probe_tool", "brief": BRIEF,
+                            "check": MISSING_PROGRAM, "target": str(repo)})
+    assert not result.exit_ok, "the run should fail at prepare"
+    assert "`no-such-program-xyz` is not installed" in (result.error or "")
+    assert "The check must run on the repository as it is today" in (result.error or "")
+    assert not model.prompts, "the run did not reach the strategist"
+
+
+def test_design_fast_goes_on_with_source_project_despite_a_probe_warning(tmp_path, monkeypatch):
+    from refactory_dsh.fast import DesignFastMode
+
+    monkeypatch.setenv("REFACTORY_HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("REFACTORY_PROJECT", str(tmp_path / "project"))
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "app.py").write_text("print('one')\n")
+    mode = DesignFastMode()
+    model = FakeModel([])
+    result = mode.run(tmp_path / "run", model=model,
+                      task={"name": "probe_tool", "brief": BRIEF,
+                            "check": MISSING_PROGRAM, "source_project": str(source)})
+    assert model.prompts, "the run reached the strategist despite the warning"
+    warning = result.facts.get("check_probe_warning", "")
+    assert warning.startswith("Check may not run in the artifact's directory: ")
+    assert "`no-such-program-xyz` is not installed" in warning
 
 
 # ── a self-check that ran nothing shows pytest's own error ────────────────────
