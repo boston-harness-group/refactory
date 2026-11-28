@@ -1116,7 +1116,7 @@ _RE_EXISTING_NODES = re.compile(r"existing (?:steps|nodes): (.+)")
 _RE_GATE_VERDICTS = re.compile(r"its verdicts: (.+)")
 _RE_SEES_STEP = re.compile(r"step '([^']+)'s outputs are not there on every path")
 _RE_SEES_NAME = re.compile(r"'sees' names '([^']+)'")
-_RE_NO_OUTPUTS = re.compile(r"'([^']+)' has no outputs to take over")
+_RE_NO_OUTPUTS = re.compile(r"'([^']+)'[^']*\bno outputs\b")
 _RE_DOES_NOT_RUN_BEFORE = re.compile(
     r"'([^']+)' does not run before the (?:new step|route) on every path")
 _RE_FORK_NO_JOIN = re.compile(r"fork '([^']+)' has no join")
@@ -1250,7 +1250,7 @@ def check_refusal_names(state: dict[str, Any], outcome: list[str]) -> list[Viola
                                         f"refusal says {gate_id!r} verdicts are {claimed} "
                                         f"but actual are {actual}"))
 
-        # "'X' has no outputs to take over": should have no writes and no produces
+        # any "'X' ... no outputs" claim: check node has no writes and no produces
         m = _RE_NO_OUTPUTS.search(reason)
         if m:
             node_id = m.group(1)
@@ -1806,7 +1806,7 @@ class EditGenerator:
 
     def takeover_probe(self, state: dict[str, Any]) -> dict[str, Any]:
         """An ``insert`` whose ``takes_over`` targets a mix of valid and invalid nodes:
-        gates, forks, ops with no outputs, unreachable steps, and valid ones."""
+        gates, forks, data, ops with no outputs, unreachable steps, and valid ones."""
         rng = self.sees_rng
         graph = _graph_of(state)
         ids = sorted(graph.nodes)
@@ -2490,7 +2490,7 @@ def replay_case(path: Path, *, spine: bool = False) -> tuple[list[Violation], li
 
 # ── the decision record ──────────────────────────────────────────────────
 
-RECORD_SEED = 20261127
+RECORD_SEED = 20261131
 RECORD_EDITS_PER_WALK = 8
 RECORD_PATH = HERE / "fixtures" / "structure_fuzz_record.json"
 
@@ -2523,7 +2523,7 @@ def generate_record(seed: int = RECORD_SEED,
             ids = sorted(_graph_of(current.state).nodes)
             if probe_roll < 0.08 and ids:
                 edit = generator.sees_probe(current.state)
-            elif probe_roll < 0.14 and ids:
+            elif probe_roll < 0.30 and ids:
                 edit = generator.takeover_probe(current.state)
             try:
                 outcome = applier.attempt(current, edit, seen)

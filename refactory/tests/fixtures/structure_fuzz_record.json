@@ -3,19 +3,14 @@
     {
       "decision": "refused",
       "edit": {
-        "before": "items",
-        "kind": "agent",
-        "op": "insert",
-        "sees": [
-          "read_item",
-          "task"
-        ]
+        "op": "remove",
+        "step": "solve"
       },
       "reason_codes": [
-        "E-precondition"
+        "E-protected"
       ],
       "reasons": [
-        "E-precondition: 'items' is a data; insert after it, or before the step it leads to"
+        "E-protected: node 'check' is protected, and the edit changes its declaration (reads)"
       ],
       "seed_name": "fuzz_data_pass",
       "step": 0
@@ -23,17 +18,17 @@
     {
       "decision": "refused",
       "edit": {
-        "op": "merge",
+        "copies": 2,
+        "op": "parallelize",
         "steps": [
-          "read_item",
-          "solve"
+          "items"
         ]
       },
       "reason_codes": [
-        "E-protected"
+        "E-precondition"
       ],
       "reasons": [
-        "E-protected: node 'items' is protected, and the edit changes its declaration (subgraph_entry)"
+        "E-precondition: 'items' is a data; parallelize works on a step (agent, op or code)"
       ],
       "seed_name": "fuzz_data_pass",
       "step": 1
@@ -41,52 +36,54 @@
     {
       "decision": "refused",
       "edit": {
-        "condition": null,
-        "op": "remove_edge",
-        "source": "read_item",
-        "target": "solve"
+        "node": {
+          "evaluator": "",
+          "gate_kind": "agent",
+          "id": "gate1",
+          "kind": "gate",
+          "max_iterations": 2
+        },
+        "op": "wrap",
+        "target": "check"
       },
       "reason_codes": [
-        "E-protected"
+        "E-precondition"
       ],
       "reasons": [
-        "E-protected: node 'check' is protected, and after the edit a run can finish without it"
+        "E-precondition: 'check' has no out-edge, so wrapping it would enclose nothing"
       ],
       "seed_name": "fuzz_data_pass",
       "step": 2
     },
     {
-      "decision": "accepted",
+      "decision": "refused",
       "edit": {
-        "name": "solve__system_prompt",
-        "op": "set_knob",
-        "value": "You are the solve step.\nexplain each step"
+        "fork": "items",
+        "op": "serialize"
       },
+      "reason_codes": [
+        "E-precondition"
+      ],
+      "reasons": [
+        "E-precondition: 'items' is a data, not a fork"
+      ],
       "seed_name": "fuzz_data_pass",
-      "state_id": "3e3047208988",
       "step": 3
     },
     {
       "decision": "refused",
       "edit": {
-        "node": {
-          "colour": "red",
-          "evaluator": "",
-          "gate_kind": "user",
-          "id": "gate1",
-          "kind": "gate",
-          "max_iterations": 2
-        },
-        "op": "add_node",
-        "position": {
-          "after": "items"
-        }
+        "after": "check",
+        "max": 3,
+        "op": "map",
+        "over": "check",
+        "text": "Work on this element (2)."
       },
       "reason_codes": [
-        "E-shape"
+        "E-protected"
       ],
       "reasons": [
-        "E-shape: unknown node field(s): ['colour']"
+        "E-protected: node 'check' is protected, and the edit rewires its out-edges"
       ],
       "seed_name": "fuzz_data_pass",
       "step": 4
@@ -94,14 +91,24 @@
     {
       "decision": "refused",
       "edit": {
-        "op": "bypass",
-        "target": "report"
+        "node": {
+          "evaluator": "",
+          "gate_kind": "user",
+          "id": "gate3",
+          "kind": "gate",
+          "max_iterations": 2
+        },
+        "op": "add_node",
+        "position": {
+          "start": true
+        }
       },
       "reason_codes": [
-        "E-precondition"
+        "V5"
       ],
       "reasons": [
-        "E-precondition: 'report' has no successor to reconnect to"
+        "V5 [gate3]: a gate must not have an unconditional out-edge; every edge out of a gate carries a verdict",
+        "V5 [gate3]: a gate needs at least two conditioned out-edges, has 0"
       ],
       "seed_name": "fuzz_data_pass",
       "step": 5
@@ -110,31 +117,41 @@
       "decision": "refused",
       "edit": {
         "node": {
-          "id": "data2",
-          "kind": "data",
-          "produces": [
-            "item_scores"
+          "blocking": true,
+          "call": "structure_fuzz_graphs:step",
+          "evaluator": "",
+          "id": "read_item_c4",
+          "inline_items": [
+            {
+              "id": "x"
+            }
           ],
-          "subgraph_entry": "read_item",
-          "subgraph_exit": "report",
-          "task_ref": "structure_fuzz_graphs:FuzzTask",
-          "writes": [
+          "kind": "op",
+          "knobs": [],
+          "max_iterations": 1,
+          "notes": "",
+          "produces": [
+            "question"
+          ],
+          "prompt_template": "",
+          "reads": [
             "current_item.json"
-          ]
+          ],
+          "role": "ceo",
+          "score_effect": "affects",
+          "tools": [],
+          "writes": []
         },
         "op": "add_node",
         "position": {
-          "before": "solve"
+          "terminal": true
         }
       },
       "reason_codes": [
-        "V10",
-        "V12"
+        "E-items"
       ],
       "reasons": [
-        "V10: cycle through 'data2' avoids every gate; route every cycle through a gate with a bounded retry transition",
-        "V12 [data2]: data subgraph entry 'read_item' cannot reach its exit 'report'",
-        "V12 [data2]: its pass leads back to the data node from ['read_item']"
+        "E-items: node(s) read_item_c4 declare inline_items, which writes the items into the graph; a harness for a class of work reads its items at run time, so an edit may not bake them in"
       ],
       "seed_name": "fuzz_data_pass",
       "step": 6
@@ -142,19 +159,638 @@
     {
       "decision": "refused",
       "edit": {
+        "after": "solve",
+        "kind": "agent",
+        "op": "insert",
+        "takes_over": "items"
+      },
+      "reason_codes": [
+        "E-precondition"
+      ],
+      "reasons": [
+        "E-precondition: 'items' is a data; only agent or op steps can be taken over"
+      ],
+      "seed_name": "fuzz_data_pass",
+      "step": 7
+    },
+    {
+      "decision": "refused",
+      "edit": {
         "op": "merge",
         "steps": [
-          "read_item",
-          "solve"
+          "load",
+          "clean"
         ]
       },
       "reason_codes": [
-        "E-protected"
+        "E-precondition"
       ],
       "reasons": [
-        "E-protected: node 'items' is protected, and the edit changes its declaration (subgraph_entry)"
+        "E-precondition: emit, summarise read(s) what 'load' makes, which a merged step would no longer make"
       ],
-      "seed_name": "fuzz_data_pass",
+      "seed_name": "fuzz_dataflow",
+      "step": 0
+    },
+    {
+      "decision": "accepted",
+      "edit": {
+        "after": "load",
+        "kind": "agent",
+        "op": "insert",
+        "takes_over": "load"
+      },
+      "seed_name": "fuzz_dataflow",
+      "state_id": "7293bce88d8d",
+      "step": 1
+    },
+    {
+      "decision": "refused",
+      "edit": {
+        "after": "summarise",
+        "kind": "agent",
+        "op": "insert",
+        "sees": [
+          "clean.txt"
+        ]
+      },
+      "reason_codes": [
+        "E-unread"
+      ],
+      "reasons": [
+        "E-unread: nothing reads the output of new step 'summarise_next', so it changes no result (give it 'takes_over': summarise)"
+      ],
+      "seed_name": "fuzz_dataflow",
+      "step": 2
+    },
+    {
+      "decision": "refused",
+      "edit": {
+        "condition": null,
+        "op": "remove_edge",
+        "source": "clean",
+        "target": "summarise"
+      },
+      "reason_codes": [
+        "V2",
+        "V6"
+      ],
+      "reasons": [
+        "V2 [emit]: node is not reachable from the start node",
+        "V2 [summarise]: node is not reachable from the start node",
+        "V6 [emit]: reads 'summary.txt', which no node on a path from 'load' to a terminal produces"
+      ],
+      "seed_name": "fuzz_dataflow",
+      "step": 3
+    },
+    {
+      "decision": "refused",
+      "edit": {
+        "kind": "code",
+        "op": "fallback",
+        "step": "load",
+        "tools": [
+          "Bash"
+        ]
+      },
+      "reason_codes": [
+        "E-precondition"
+      ],
+      "reasons": [
+        "E-precondition: 'load' runs outside any per-item pass; a fallback answers for a step that runs once per item"
+      ],
+      "seed_name": "fuzz_dataflow",
+      "step": 4
+    },
+    {
+      "decision": "refused",
+      "edit": {
+        "id": "summarise",
+        "op": "remove_node"
+      },
+      "reason_codes": [
+        "V2",
+        "V6"
+      ],
+      "reasons": [
+        "V2 [emit]: node is not reachable from the start node",
+        "V6 [emit]: reads 'summary.txt', which no node on a path from 'load' to a terminal produces"
+      ],
+      "seed_name": "fuzz_dataflow",
+      "step": 5
+    },
+    {
+      "decision": "accepted",
+      "edit": {
+        "after": "summarise",
+        "kind": "agent",
+        "op": "insert",
+        "takes_over": "summarise"
+      },
+      "seed_name": "fuzz_dataflow",
+      "state_id": "967846c37b24",
+      "step": 6
+    },
+    {
+      "decision": "refused",
+      "edit": {
+        "condition": "reject",
+        "op": "add_edge",
+        "source": "load",
+        "target": "emit"
+      },
+      "reason_codes": [
+        "V15",
+        "V4"
+      ],
+      "reasons": [
+        "V15 [emit]: declares ['summary.txt'] as required_reads, which some path to it does not write first; both runtimes refuse to run it without them (a data pass's own files stay inside its pass)",
+        "V4 [load]: a non-gate node needs at most one out-edge, has 2"
+      ],
+      "seed_name": "fuzz_dataflow",
+      "step": 7
+    },
+    {
+      "decision": "refused",
+      "edit": [],
+      "reason_codes": [
+        "E-op"
+      ],
+      "reasons": [
+        "E-op: an edit is a JSON object naming its op, not list []"
+      ],
+      "seed_name": "fuzz_draft_review",
+      "step": 0
+    },
+    {
+      "decision": "refused",
+      "edit": {
+        "after": "review",
+        "kind": "agent",
+        "op": "insert",
+        "sees": [
+          "finalize"
+        ]
+      },
+      "reason_codes": [
+        "E-precondition"
+      ],
+      "reasons": [
+        "E-precondition: step 'finalize''s outputs are not there on every path to the new step, so it cannot see them (missing on the intake --> draft path; \"after\" one of [finalize, ship] would reach it); 'sees' requires every path to carry the name, even when the step tolerates its absence"
+      ],
+      "seed_name": "fuzz_draft_review",
+      "step": 1
+    },
+    {
+      "decision": "refused",
+      "edit": {
+        "after": "review",
+        "kind": "agent",
+        "op": "insert",
+        "takes_over": "finalize"
+      },
+      "reason_codes": [
+        "E-precondition"
+      ],
+      "reasons": [
+        "E-precondition: 'finalize' does not run before the new step on every path to it (missing on the intake --> draft path); 'takes_over' names a step every run passes before the new one (not a step after it, on a sibling branch or on a branch a route can skip)"
+      ],
+      "seed_name": "fuzz_draft_review",
+      "step": 2
+    },
+    {
+      "decision": "accepted",
+      "edit": {
+        "into": [
+          {
+            "kind": "code"
+          }
+        ],
+        "op": "split",
+        "step": "review"
+      },
+      "seed_name": "fuzz_draft_review",
+      "state_id": "b83d4bb50352",
+      "step": 3
+    },
+    {
+      "decision": "refused",
+      "edit": {
+        "after": "intake",
+        "kind": "agent",
+        "op": "insert",
+        "takes_over": "finalize"
+      },
+      "reason_codes": [
+        "E-precondition"
+      ],
+      "reasons": [
+        "E-precondition: 'finalize' does not run before the new step on every path to it (missing on the intake --> draft path); 'takes_over' names a step every run passes before the new one (not a step after it, on a sibling branch or on a branch a route can skip)"
+      ],
+      "seed_name": "fuzz_draft_review",
+      "step": 4
+    },
+    {
+      "decision": "accepted",
+      "edit": {
+        "node": {
+          "blocking": true,
+          "call": "structure_fuzz_graphs:step",
+          "evaluator": "",
+          "id": "ship_c3",
+          "kind": "op",
+          "knobs": [],
+          "max_iterations": 1,
+          "notes": "",
+          "produces": [
+            "ship_c3_fact"
+          ],
+          "prompt_template": "",
+          "reads": [
+            "final.txt"
+          ],
+          "required_reads": [
+            "final.txt"
+          ],
+          "role": "ceo",
+          "score_effect": "affects",
+          "tools": [],
+          "writes": [
+            "ship_c3.txt"
+          ]
+        },
+        "op": "insert_after",
+        "target": "finalize"
+      },
+      "seed_name": "fuzz_draft_review",
+      "state_id": "8e49316482d6",
+      "step": 5
+    },
+    {
+      "decision": "refused",
+      "edit": {
+        "condition": null,
+        "op": "remove_edge",
+        "source": "review_new",
+        "target": "finalize"
+      },
+      "reason_codes": [
+        "V2",
+        "V6"
+      ],
+      "reasons": [
+        "V2 [finalize]: node is not reachable from the start node",
+        "V2 [ship]: node is not reachable from the start node",
+        "V2 [ship_c3]: node is not reachable from the start node",
+        "V6 [ship]: reads 'final.txt', which no node on a path from 'intake' to a terminal produces",
+        "V6 [ship_c3]: reads 'final.txt', which no node on a path from 'intake' to a terminal produces"
+      ],
+      "seed_name": "fuzz_draft_review",
+      "step": 6
+    },
+    {
+      "decision": "accepted",
+      "edit": {
+        "into": [
+          {
+            "kind": "code"
+          },
+          {
+            "kind": "agent"
+          }
+        ],
+        "op": "split",
+        "step": "finalize"
+      },
+      "seed_name": "fuzz_draft_review",
+      "state_id": "05ca1d66c199",
+      "step": 7
+    },
+    {
+      "decision": "refused",
+      "edit": {
+        "first": "plot",
+        "op": "reorder",
+        "second": "describe"
+      },
+      "reason_codes": [
+        "V15",
+        "V2",
+        "V6"
+      ],
+      "reasons": [
+        "V15 [ship]: declares ['description.txt'] as required_reads, which some path to it does not write first; both runtimes refuse to run it without them (a data pass's own files stay inside its pass)",
+        "V2 [describe]: node is not reachable from the start node",
+        "V6 [ship]: reads 'description.txt', which no node on a path from 'intake' to a terminal produces"
+      ],
+      "seed_name": "fuzz_file_output",
+      "step": 0
+    },
+    {
+      "decision": "refused",
+      "edit": [],
+      "reason_codes": [
+        "E-op"
+      ],
+      "reasons": [
+        "E-op: an edit is a JSON object naming its op, not list []"
+      ],
+      "seed_name": "fuzz_file_output",
+      "step": 1
+    },
+    {
+      "decision": "refused",
+      "edit": {
+        "into": [
+          {
+            "call": "refactory_dsh.snippet:run",
+            "code": "import json\ndef main(inp):\n    text = json.dumps(inp, sort_keys=True, default=str)\n    return {'facts': {'code2_fact': len(text)},\n            'files': {'code2.txt': text[:200]}}\n",
+            "id": "code2",
+            "inputs": [
+              "finished"
+            ],
+            "kind": "op",
+            "produces": [
+              "code2_fact"
+            ],
+            "reads": [
+              "answer.txt"
+            ],
+            "writes": [
+              "code2.txt"
+            ]
+          },
+          {
+            "call": "refactory_dsh.snippet:run",
+            "code": "import socket\ndef main(inp):\n    socket.create_connection(('1.1.1.1', 80))\n    return {}\n",
+            "id": "code3",
+            "inputs": [],
+            "kind": "op",
+            "produces": [
+              "code3_fact"
+            ],
+            "reads": [
+              "figure.png"
+            ],
+            "writes": [
+              "code3.txt"
+            ]
+          }
+        ],
+        "op": "split",
+        "target": "intake"
+      },
+      "reason_codes": [
+        "V15",
+        "V18",
+        "V6"
+      ],
+      "reasons": [
+        "V15 [code2]: declares ['finished'] as inputs, which some path to it does not produce first (a data pass's own facts stay inside its pass)",
+        "V15 [describe]: needs {{brief}}, which some path to it does not produce first; an agent's inputs are required (a data pass's own files and facts stay inside its pass). A fact the runtime re-derives before each dispatch belongs in the node's feedback_keys, and an optional one goes inside {% if name %}...{% endif %}",
+        "V18 [code3]: code node: imports 'socket'; allowed: re, json, math, collections, itertools, statistics, fractions, unicodedata, string",
+        "V18 [code3]: code node: uses the attribute 'create_connection', which is not among the methods of str, bytes, list, dict, set, tuple, int, float and the allowed modules' public names (string formatting is refused)",
+        "V6 [plot]: reads 'brief.txt', which no node on a path from 'code2' to a terminal produces"
+      ],
+      "seed_name": "fuzz_file_output",
+      "step": 2
+    },
+    {
+      "decision": "accepted",
+      "edit": {
+        "judge": "agent",
+        "op": "loop",
+        "step": "describe",
+        "text": "Is the work complete?"
+      },
+      "seed_name": "fuzz_file_output",
+      "state_id": "67b1fcdcc0f9",
+      "step": 3
+    },
+    {
+      "decision": "refused",
+      "edit": {
+        "first": "plot",
+        "op": "reorder",
+        "second": "describe"
+      },
+      "reason_codes": [
+        "V15"
+      ],
+      "reasons": [
+        "V15 [describe_check_judge]: needs {{description}}, which some path to it does not produce first; an agent's inputs are required (a data pass's own files and facts stay inside its pass). A fact the runtime re-derives before each dispatch belongs in the node's feedback_keys, and an optional one goes inside {% if name %}...{% endif %}",
+        "V15 [ship]: declares ['description.txt'] as required_reads, which some path to it does not write first; both runtimes refuse to run it without them (a data pass's own files stay inside its pass)"
+      ],
+      "seed_name": "fuzz_file_output",
+      "step": 4
+    },
+    {
+      "decision": "accepted",
+      "edit": {
+        "branches": [
+          {
+            "call": "structure_fuzz_graphs:step",
+            "id": "op4",
+            "kind": "op",
+            "produces": [
+              "op4_fact"
+            ],
+            "reads": [
+              "answer.txt"
+            ],
+            "required_reads": [
+              "answer.txt"
+            ],
+            "writes": [
+              "op4.txt"
+            ]
+          },
+          {
+            "call": "refactory_dsh.snippet:run",
+            "code": "import json\ndef main(inp):\n    text = json.dumps(inp, sort_keys=True, default=str)\n    return {'facts': {'code5_fact': len(text)},\n            'files': {'code5.txt': text[:200]}}\n",
+            "id": "code5",
+            "inputs": [
+              "description"
+            ],
+            "kind": "op",
+            "produces": [
+              "code5_fact"
+            ],
+            "reads": [],
+            "writes": [
+              "code5.txt"
+            ]
+          }
+        ],
+        "op": "parallel",
+        "target": "ship"
+      },
+      "seed_name": "fuzz_file_output",
+      "state_id": "1492b639c0ea",
+      "step": 5
+    },
+    {
+      "decision": "refused",
+      "edit": {
+        "after": "describe",
+        "kind": "agent",
+        "op": "insert",
+        "takes_over": "describe_check_judge"
+      },
+      "reason_codes": [
+        "E-precondition"
+      ],
+      "reasons": [
+        "E-precondition: 'describe_check_judge' does not run before the new step on every path to it (missing on the describe_check --reloop--> describe path); 'takes_over' names a step every run passes before the new one (not a step after it, on a sibling branch or on a branch a route can skip)"
+      ],
+      "seed_name": "fuzz_file_output",
+      "step": 6
+    },
+    {
+      "decision": "refused",
+      "edit": {
+        "op": "duplicate",
+        "target": "ghost"
+      },
+      "reason_codes": [
+        "E-precondition"
+      ],
+      "reasons": [
+        "E-precondition: no node 'ghost' to duplicate"
+      ],
+      "seed_name": "fuzz_file_output",
+      "step": 7
+    },
+    {
+      "decision": "refused",
+      "edit": {
+        "node": {
+          "id": "join1",
+          "kind": "join",
+          "sources": [
+            "setup",
+            "split"
+          ]
+        },
+        "op": "insert_before",
+        "target": "right_b"
+      },
+      "reason_codes": [
+        "V16"
+      ],
+      "reasons": [
+        "V16 [join1]: a join belongs to exactly one fork (the one whose out-edge leads to it); this one belongs to none"
+      ],
+      "seed_name": "fuzz_fork_join",
+      "step": 0
+    },
+    {
+      "decision": "refused",
+      "edit": {
+        "first": "decide",
+        "op": "reorder",
+        "second": "done"
+      },
+      "reason_codes": [
+        "E-precondition"
+      ],
+      "reasons": [
+        "E-precondition: data dependency: 'done' reads ['answer.txt'], which only 'decide' produces, so the two cannot be swapped"
+      ],
+      "seed_name": "fuzz_fork_join",
+      "step": 1
+    },
+    {
+      "decision": "refused",
+      "edit": {
+        "op": "rewire",
+        "sees": [
+          "left"
+        ],
+        "step": "done"
+      },
+      "reason_codes": [
+        "E-precondition"
+      ],
+      "reasons": [
+        "E-precondition: 'done' is a plain op: what it reads is what its callable reads. Rewire an agent or a code step"
+      ],
+      "seed_name": "fuzz_fork_join",
+      "step": 2
+    },
+    {
+      "decision": "refused",
+      "edit": {
+        "fork": "split",
+        "op": "branch"
+      },
+      "reason_codes": [
+        "E-unread"
+      ],
+      "reasons": [
+        "E-unread: nothing reads the output of new step 'split_branch', so it changes no result (name decide in 'to' (its prompt gets a section for it))"
+      ],
+      "seed_name": "fuzz_fork_join",
+      "step": 3
+    },
+    {
+      "decision": "accepted",
+      "edit": {
+        "after": "decide",
+        "call": "structure_fuzz_graphs:step",
+        "kind": "op",
+        "op": "insert",
+        "sees": [
+          "setup"
+        ],
+        "takes_over": "right_a"
+      },
+      "seed_name": "fuzz_fork_join",
+      "state_id": "f3c9318cb32a",
+      "step": 4
+    },
+    {
+      "decision": "refused",
+      "edit": {
+        "first": "right_a",
+        "op": "reorder",
+        "second": "right_b"
+      },
+      "reason_codes": [
+        "E-precondition"
+      ],
+      "reasons": [
+        "E-precondition: data dependency: 'right_b' reads ['right_a_own_right_a.txt'], which only 'right_a' produces, so the two cannot be swapped"
+      ],
+      "seed_name": "fuzz_fork_join",
+      "step": 5
+    },
+    {
+      "decision": "accepted",
+      "edit": {
+        "after": "decide_next",
+        "kind": "agent",
+        "op": "insert",
+        "takes_over": "right_a"
+      },
+      "seed_name": "fuzz_fork_join",
+      "state_id": "7a94fa728477",
+      "step": 6
+    },
+    {
+      "decision": "refused",
+      "edit": {
+        "after": "right_a",
+        "kind": "agent",
+        "op": "insert",
+        "takes_over": "split"
+      },
+      "reason_codes": [
+        "E-precondition"
+      ],
+      "reasons": [
+        "E-precondition: 'split' is a fork; only agent or op steps can be taken over"
+      ],
+      "seed_name": "fuzz_fork_join",
       "step": 7
     },
     {
@@ -173,35 +809,285 @@
       "reasons": [
         "V7 [k1]: knob is declared but no node consumes it, so moving it cannot change the run"
       ],
-      "seed_name": "fuzz_dataflow",
+      "seed_name": "fuzz_gate_loop",
       "step": 0
     },
     {
       "decision": "refused",
       "edit": {
-        "first": "load",
-        "op": "reorder",
-        "second": "clean"
+        "after": "finish",
+        "kind": "agent",
+        "op": "insert",
+        "takes_over": "review"
       },
       "reason_codes": [
         "E-precondition"
       ],
       "reasons": [
-        "E-precondition: data dependency: 'clean' reads ['raw.txt'], which only 'load' produces, so the two cannot be swapped"
+        "E-precondition: 'review' is a gate; only agent or op steps can be taken over"
       ],
-      "seed_name": "fuzz_dataflow",
+      "seed_name": "fuzz_gate_loop",
       "step": 1
+    },
+    {
+      "decision": "refused",
+      "edit": {
+        "op": "rewire",
+        "sees": [
+          "finish"
+        ],
+        "step": "prepare"
+      },
+      "reason_codes": [
+        "E-precondition"
+      ],
+      "reasons": [
+        "E-precondition: 'prepare' is a plain op: what it reads is what its callable reads. Rewire an agent or a code step"
+      ],
+      "seed_name": "fuzz_gate_loop",
+      "step": 2
+    },
+    {
+      "decision": "refused",
+      "edit": {
+        "node": {
+          "blocking": true,
+          "call": "",
+          "colour": "red",
+          "evaluator": "structure_fuzz_graphs:proceed",
+          "id": "review_c2",
+          "kind": "gate",
+          "knobs": [],
+          "max_iterations": 3,
+          "notes": "does review pass?",
+          "produces": [],
+          "prompt_template": "",
+          "reads": [
+            "work.txt"
+          ],
+          "role": "ceo",
+          "score_effect": "affects",
+          "tools": [],
+          "writes": []
+        },
+        "op": "add_node",
+        "position": {
+          "after": "prepare"
+        }
+      },
+      "reason_codes": [
+        "E-shape"
+      ],
+      "reasons": [
+        "E-shape: unknown node field(s): ['colour']"
+      ],
+      "seed_name": "fuzz_gate_loop",
+      "step": 3
+    },
+    {
+      "decision": "refused",
+      "edit": {
+        "op": "remove_edge",
+        "source": "prepare",
+        "target": "work"
+      },
+      "reason_codes": [
+        "V2",
+        "V6"
+      ],
+      "reasons": [
+        "V2 [finish]: node is not reachable from the start node",
+        "V2 [review]: node is not reachable from the start node",
+        "V2 [work]: node is not reachable from the start node",
+        "V6 [finish]: reads 'work.txt', which no node on a path from 'prepare' to a terminal produces",
+        "V6 [review]: reads 'work.txt', which no node on a path from 'prepare' to a terminal produces"
+      ],
+      "seed_name": "fuzz_gate_loop",
+      "step": 4
+    },
+    {
+      "decision": "refused",
+      "edit": {
+        "after": "review",
+        "kind": "agent",
+        "op": "insert",
+        "takes_over": "work"
+      },
+      "reason_codes": [
+        "E-precondition"
+      ],
+      "reasons": [
+        "E-precondition: 'review' is a gate whose out-edges carry verdicts; insert before the step a verdict leads to"
+      ],
+      "seed_name": "fuzz_gate_loop",
+      "step": 5
+    },
+    {
+      "decision": "refused",
+      "edit": {
+        "after": "review",
+        "kind": "agent",
+        "op": "insert",
+        "takes_over": "prepare"
+      },
+      "reason_codes": [
+        "E-precondition"
+      ],
+      "reasons": [
+        "E-precondition: 'review' is a gate whose out-edges carry verdicts; insert before the step a verdict leads to"
+      ],
+      "seed_name": "fuzz_gate_loop",
+      "step": 6
+    },
+    {
+      "decision": "refused",
+      "edit": {
+        "node": {
+          "blocking": true,
+          "call": "",
+          "evaluator": "structure_fuzz_graphs:proceed",
+          "id": "raw4",
+          "kind": "gate",
+          "knobs": [],
+          "max_iterations": 3,
+          "notes": "does review pass?",
+          "produces": [],
+          "prompt_template": "",
+          "reads": [
+            "work.txt"
+          ],
+          "role": "ceo",
+          "score_effect": "affects",
+          "tools": [],
+          "writes": []
+        },
+        "op": "insert_after",
+        "target": "review"
+      },
+      "reason_codes": [
+        "E-precondition"
+      ],
+      "reasons": [
+        "E-precondition: 'review' is a gate whose out-edges carry verdicts; 'after' does not say which verdict to splice onto"
+      ],
+      "seed_name": "fuzz_gate_loop",
+      "step": 7
     },
     {
       "decision": "accepted",
       "edit": {
-        "new_id": "load_d2",
-        "op": "duplicate",
-        "target": "load"
+        "condition": "reloop",
+        "op": "add_edge",
+        "source": "approve",
+        "target": "check"
       },
-      "seed_name": "fuzz_dataflow",
-      "state_id": "c6edb8ce06e2",
+      "seed_name": "fuzz_gates",
+      "state_id": "ca14b007df74",
+      "step": 0
+    },
+    {
+      "decision": "refused",
+      "edit": {
+        "before": "polish",
+        "kind": "agent",
+        "op": "insert",
+        "sees": [
+          "dropped",
+          "draft"
+        ]
+      },
+      "reason_codes": [
+        "E-precondition"
+      ],
+      "reasons": [
+        "E-precondition: 'sees' names 'dropped', which exists in the graph (produced by drop; missing on the polish --> approve path; \"after\" one of [drop] would reach it) but is not there before the new step on every path; 'sees' requires every path to carry the name, even when the step tolerates its absence"
+      ],
+      "seed_name": "fuzz_gates",
+      "step": 1
+    },
+    {
+      "decision": "refused",
+      "edit": {
+        "name": "k1",
+        "op": "add_knob",
+        "spec": {
+          "default": "x",
+          "kind": "str"
+        }
+      },
+      "reason_codes": [
+        "V7"
+      ],
+      "reasons": [
+        "V7 [k1]: knob is declared but no node consumes it, so moving it cannot change the run"
+      ],
+      "seed_name": "fuzz_gates",
       "step": 2
+    },
+    {
+      "decision": "refused",
+      "edit": {
+        "kind": "code",
+        "op": "fallback",
+        "step": "polish"
+      },
+      "reason_codes": [
+        "E-precondition"
+      ],
+      "reasons": [
+        "E-precondition: 'polish' runs outside any per-item pass; a fallback answers for a step that runs once per item"
+      ],
+      "seed_name": "fuzz_gates",
+      "step": 3
+    },
+    {
+      "decision": "refused",
+      "edit": {
+        "id": "polish",
+        "op": "remove_node"
+      },
+      "reason_codes": [
+        "V5"
+      ],
+      "reasons": [
+        "V5 [check]: a gate needs at least two conditioned out-edges, has 1"
+      ],
+      "seed_name": "fuzz_gates",
+      "step": 4
+    },
+    {
+      "decision": "refused",
+      "edit": {
+        "after": "triage",
+        "kind": "agent",
+        "op": "insert",
+        "sees": [
+          "draft.txt",
+          "check"
+        ]
+      },
+      "reason_codes": [
+        "E-precondition"
+      ],
+      "reasons": [
+        "E-precondition: 'triage' is a gate whose out-edges carry verdicts; insert before the step a verdict leads to"
+      ],
+      "seed_name": "fuzz_gates",
+      "step": 5
+    },
+    {
+      "decision": "refused",
+      "edit": {
+        "op": ""
+      },
+      "reason_codes": [
+        "E-op"
+      ],
+      "reasons": [
+        "E-op: unknown edit ''; known: ['add_edge', 'add_knob', 'add_node', 'branch', 'bypass', 'duplicate', 'fallback', 'insert', 'insert_after', 'insert_before', 'loop', 'map', 'merge', 'parallel', 'parallelize', 'remove', 'remove_edge', 'remove_knob', 'remove_node', 'reorder', 'rewire', 'route', 'serialize', 'set_knob', 'split', 'wrap']"
+      ],
+      "seed_name": "fuzz_gates",
+      "step": 6
     },
     {
       "decision": "accepted",
@@ -210,298 +1096,516 @@
           "blocking": true,
           "call": "structure_fuzz_graphs:step",
           "evaluator": "",
-          "id": "clean_c3",
+          "id": "ship_c3",
           "kind": "op",
-          "knobs": [
-            "depth"
-          ],
+          "knobs": [],
           "max_iterations": 1,
           "notes": "",
           "produces": [
-            "cleaned"
+            "shipped"
           ],
           "prompt_template": "",
           "reads": [
-            "raw.txt"
+            "polished.txt"
           ],
           "role": "ceo",
           "score_effect": "affects",
           "tools": [],
           "writes": [
-            "clean.txt"
+            "answer.txt"
           ]
         },
-        "op": "insert_before",
-        "target": "emit"
+        "op": "add_node",
+        "position": {
+          "before": "polish"
+        }
       },
-      "seed_name": "fuzz_dataflow",
-      "state_id": "4292a0e3773d",
-      "step": 3
+      "seed_name": "fuzz_gates",
+      "state_id": "0d3a619133a1",
+      "step": 7
+    },
+    {
+      "decision": "accepted",
+      "edit": {
+        "name": "escalate__system_prompt",
+        "op": "set_knob",
+        "value": "You are the escalate step.\nexplain each step"
+      },
+      "seed_name": "fuzz_multi_terminal",
+      "state_id": "a46165e8c924",
+      "step": 0
     },
     {
       "decision": "refused",
       "edit": {
         "op": "merge",
         "steps": [
-          "clean",
-          "clean"
+          "route",
+          "route"
         ]
       },
       "reason_codes": [
         "E-precondition"
       ],
       "reasons": [
-        "E-precondition: 'clean' does not lead straight to 'clean'; give consecutive steps, in run order"
+        "E-precondition: 'route' is a gate; merge works on a step (agent, op or code)"
       ],
-      "seed_name": "fuzz_dataflow",
-      "step": 4
-    },
-    {
-      "decision": "accepted",
-      "edit": {
-        "op": "remove",
-        "step": "emit"
-      },
-      "seed_name": "fuzz_dataflow",
-      "state_id": "13ede7c697af",
-      "step": 5
-    },
-    {
-      "decision": "accepted",
-      "edit": {
-        "op": "remove",
-        "step": "clean_c3"
-      },
-      "seed_name": "fuzz_dataflow",
-      "state_id": "2de01b459f59",
-      "step": 6
-    },
-    {
-      "decision": "refused",
-      "edit": {
-        "branches": [
-          {
-            "call": "refactory_dsh.snippet:run",
-            "code": "import json\ndef main(inp):\n    text = json.dumps(inp, sort_keys=True, default=str)\n    return {'facts': {'code4_fact': len(text)},\n            'files': {'code4.txt': text[:200]}}\n",
-            "id": "code4",
-            "inputs": [],
-            "kind": "op",
-            "produces": [
-              "code4_fact"
-            ],
-            "reads": [
-              "raw.txt"
-            ],
-            "writes": [
-              "code4.txt"
-            ]
-          },
-          {
-            "id": "agent5",
-            "kind": "agent",
-            "produces": [
-              "agent5_fact"
-            ],
-            "prompt_template": "Think about {{source}}",
-            "reads": [],
-            "role": "solver",
-            "system_prompt_template": "You are agent5.",
-            "tool_policy": null,
-            "tools": [
-              "read"
-            ],
-            "workspace": {
-              "kind": "scratch"
-            },
-            "writes": [
-              "code4.txt"
-            ]
-          }
-        ],
-        "op": "parallel",
-        "target": "load_d2"
-      },
-      "reason_codes": [
-        "E-precondition"
-      ],
-      "reasons": [
-        "E-precondition: branches 'code4' and 'agent5' both write 'code4.txt'"
-      ],
-      "seed_name": "fuzz_dataflow",
-      "step": 7
-    },
-    {
-      "decision": "accepted",
-      "edit": {
-        "op": "split",
-        "step": "ship"
-      },
-      "seed_name": "fuzz_draft_review",
-      "state_id": "4dc7e4fe1851",
-      "step": 0
-    },
-    {
-      "decision": "refused",
-      "edit": {
-        "before": "ship_b_inputs",
-        "kind": "agent",
-        "op": "insert",
-        "sees": [
-          "review",
-          "ship_b"
-        ]
-      },
-      "reason_codes": [
-        "E-precondition"
-      ],
-      "reasons": [
-        "E-precondition: step 'ship_b''s outputs are not there on every path to the new step, so it cannot see them (missing on the intake --> draft path; \"after\" one of [ship_b] would reach it); 'sees' requires every path to carry the name, even when the step tolerates its absence"
-      ],
-      "seed_name": "fuzz_draft_review",
+      "seed_name": "fuzz_multi_terminal",
       "step": 1
     },
     {
-      "decision": "refused",
+      "decision": "accepted",
       "edit": {
         "node": {
-          "blocking": true,
-          "call": "refactory_dsh.nn.operators:collect",
-          "evaluator": "",
-          "id": "ship_b_inputs_c2",
-          "inline_items": [
-            {
-              "id": "x"
-            }
-          ],
+          "call": "structure_fuzz_graphs:step",
+          "id": "op1",
           "kind": "op",
-          "knobs": [],
-          "max_iterations": 1,
-          "notes": "Hands ship_b the files it sees.",
           "produces": [
-            "ship_b_inputs"
+            "op1_fact"
           ],
-          "prompt_template": "",
           "reads": [
-            "final.txt"
+            "escalation.txt",
+            "label.txt"
           ],
-          "role": "ceo",
-          "score_effect": "none",
-          "tools": [],
-          "writes": []
+          "writes": [
+            "op1.txt"
+          ]
         },
-        "op": "add_node",
-        "position": {
-          "terminal": true
-        }
+        "op": "wrap",
+        "target": "classify"
       },
-      "reason_codes": [
-        "E-items"
-      ],
-      "reasons": [
-        "E-items: node(s) ship_b_inputs_c2 declare inline_items, which writes the items into the graph; a harness for a class of work reads its items at run time, so an edit may not bake them in"
-      ],
-      "seed_name": "fuzz_draft_review",
+      "seed_name": "fuzz_multi_terminal",
+      "state_id": "e50e5c790d4e",
       "step": 2
     },
     {
       "decision": "refused",
       "edit": {
-        "op": "remove",
-        "step": "ship_b_inputs"
+        "after": "classify",
+        "kind": "agent",
+        "op": "insert",
+        "takes_over": "ghost"
       },
       "reason_codes": [
         "E-precondition"
       ],
       "reasons": [
-        "E-precondition: removing 'ship_b_inputs' leaves steps without an input only it makes: 'ship_b' needs ship_b_inputs; remove or rewire those first"
+        "E-precondition: 'takes_over' names an existing step, not 'ghost'"
       ],
-      "seed_name": "fuzz_draft_review",
+      "seed_name": "fuzz_multi_terminal",
       "step": 3
     },
     {
       "decision": "refused",
       "edit": {
-        "fork": "ship_b",
-        "op": "serialize"
+        "after": "accept",
+        "kind": "agent",
+        "op": "insert",
+        "takes_over": "ghost"
       },
       "reason_codes": [
         "E-precondition"
       ],
       "reasons": [
-        "E-precondition: 'ship_b' is a agent, not a fork"
+        "E-precondition: 'takes_over' names an existing step, not 'ghost'"
       ],
-      "seed_name": "fuzz_draft_review",
+      "seed_name": "fuzz_multi_terminal",
       "step": 4
+    },
+    {
+      "decision": "accepted",
+      "edit": {
+        "new_id": "accept_d2",
+        "op": "duplicate",
+        "target": "accept"
+      },
+      "seed_name": "fuzz_multi_terminal",
+      "state_id": "0bb076bfcaca",
+      "step": 5
     },
     {
       "decision": "accepted",
       "edit": {
         "node": {
           "blocking": true,
-          "call": "refactory_dsh.nn.operators:collect",
+          "call": "structure_fuzz_graphs:step",
           "evaluator": "",
-          "id": "ship_a_inputs_c3",
+          "id": "accept_d2_c3",
           "kind": "op",
           "knobs": [],
           "max_iterations": 1,
-          "notes": "Hands ship_a the files it sees.",
+          "notes": "",
           "produces": [
-            "ship_a_inputs"
+            "accept_d2_c3_fact"
           ],
           "prompt_template": "",
           "reads": [
-            "final.txt"
+            "label.txt"
           ],
           "role": "ceo",
-          "score_effect": "none",
+          "score_effect": "affects",
           "tools": [],
-          "writes": []
+          "writes": [
+            "accept_d2_c3.txt"
+          ]
         },
         "op": "insert_before",
-        "target": "ship_a_inputs"
+        "target": "classify"
       },
-      "seed_name": "fuzz_draft_review",
-      "state_id": "ce00e167d117",
-      "step": 5
-    },
-    {
-      "decision": "accepted",
-      "edit": {
-        "after": "intake",
-        "op": "map",
-        "over": "intake"
-      },
-      "seed_name": "fuzz_draft_review",
-      "state_id": "8fc229d90b5c",
+      "seed_name": "fuzz_multi_terminal",
+      "state_id": "1efbb7e4cd09",
       "step": 6
     },
     {
       "decision": "accepted",
       "edit": {
-        "after": "ship_a_inputs_c3",
-        "kind": "agent",
-        "op": "insert",
-        "text": "Work on part 4 of the task."
+        "node": {
+          "blocking": true,
+          "call": "structure_fuzz_graphs:step",
+          "evaluator": "",
+          "id": "accept_d2_c3_c4",
+          "kind": "op",
+          "knobs": [],
+          "max_iterations": 1,
+          "notes": "",
+          "produces": [
+            "accept_d2_c3_c4_fact"
+          ],
+          "prompt_template": "",
+          "reads": [
+            "label.txt"
+          ],
+          "role": "ceo",
+          "score_effect": "affects",
+          "tools": [],
+          "writes": [
+            "accept_d2_c3_c4.txt"
+          ]
+        },
+        "op": "insert_before",
+        "target": "classify"
       },
-      "seed_name": "fuzz_draft_review",
-      "state_id": "c93f42427cdf",
+      "seed_name": "fuzz_multi_terminal",
+      "state_id": "8fbadc837bf2",
       "step": 7
     },
     {
       "decision": "refused",
       "edit": {
-        "first": "intake",
-        "op": "reorder",
-        "second": "plot"
+        "before": "end",
+        "kind": "agent",
+        "op": "insert",
+        "sees": [
+          "end"
+        ]
       },
       "reason_codes": [
         "E-precondition"
       ],
       "reasons": [
-        "E-precondition: data dependency: 'plot' reads ['brief.txt'], which only 'intake' produces, so the two cannot be swapped"
+        "E-precondition: step 'end''s outputs are not there on every path to the new step, so it cannot see them (missing on the inner_join --> after_inner path; \"after\" one of [end] would reach it); 'sees' requires every path to carry the name, even when the step tolerates its absence"
       ],
-      "seed_name": "fuzz_file_output",
+      "seed_name": "fuzz_nested_fork",
       "step": 0
+    },
+    {
+      "decision": "accepted",
+      "edit": {
+        "fork": "outer",
+        "op": "serialize"
+      },
+      "seed_name": "fuzz_nested_fork",
+      "state_id": "1e9c77de7a70",
+      "step": 1
+    },
+    {
+      "decision": "refused",
+      "edit": {
+        "after": "deep_a",
+        "judge": "agent",
+        "op": "route",
+        "to": {
+          "other": {
+            "kind": "code"
+          },
+          "proceed": "inner_join"
+        }
+      },
+      "reason_codes": [
+        "E-unread"
+      ],
+      "reasons": [
+        "E-unread: nothing reads the output of new step 'deep_a_other', so it changes no result (no step can read it)"
+      ],
+      "seed_name": "fuzz_nested_fork",
+      "step": 2
+    },
+    {
+      "decision": "refused",
+      "edit": {
+        "op": "bypass",
+        "target": "inner_join"
+      },
+      "reason_codes": [
+        "V16"
+      ],
+      "reasons": [
+        "V16 [inner]: a fork's one unconditional out-edge leads to its join, where its branches meet; this fork leads to 'after_inner', which is not a join"
+      ],
+      "seed_name": "fuzz_nested_fork",
+      "step": 3
+    },
+    {
+      "decision": "refused",
+      "edit": {
+        "judge": "agent",
+        "op": "loop",
+        "step": "inner_join",
+        "text": "Is the work complete?"
+      },
+      "reason_codes": [
+        "E-precondition"
+      ],
+      "reasons": [
+        "E-precondition: 'inner_join' is a join; loop works on a step (agent, op or code)"
+      ],
+      "seed_name": "fuzz_nested_fork",
+      "step": 4
+    },
+    {
+      "decision": "refused",
+      "edit": {
+        "fork": "inner",
+        "kind": "agent",
+        "op": "branch"
+      },
+      "reason_codes": [
+        "E-unread"
+      ],
+      "reasons": [
+        "E-unread: nothing reads the output of new step 'inner_branch', so it changes no result (no step can read it)"
+      ],
+      "seed_name": "fuzz_nested_fork",
+      "step": 5
+    },
+    {
+      "decision": "refused",
+      "edit": {
+        "name": "deep_b__system_prompt",
+        "op": "remove_knob"
+      },
+      "reason_codes": [
+        "V14",
+        "V7"
+      ],
+      "reasons": [
+        "V14 [deep_b]: field binding references undeclared knob 'deep_b__system_prompt'",
+        "V7 [deep_b]: consumes undeclared knob 'deep_b__system_prompt'"
+      ],
+      "seed_name": "fuzz_nested_fork",
+      "step": 6
+    },
+    {
+      "decision": "refused",
+      "edit": {
+        "after": "inner_join",
+        "kind": "agent",
+        "op": "insert",
+        "takes_over": "ghost"
+      },
+      "reason_codes": [
+        "E-precondition"
+      ],
+      "reasons": [
+        "E-precondition: 'takes_over' names an existing step, not 'ghost'"
+      ],
+      "seed_name": "fuzz_nested_fork",
+      "step": 7
+    },
+    {
+      "decision": "accepted",
+      "edit": {
+        "after": "finalize",
+        "kind": "agent",
+        "op": "insert",
+        "takes_over": "finalize"
+      },
+      "seed_name": "fuzz_skip_path",
+      "state_id": "2bc064dac6b5",
+      "step": 0
+    },
+    {
+      "decision": "refused",
+      "edit": {
+        "before": "process",
+        "kind": "agent",
+        "op": "insert",
+        "sees": [
+          "has_case"
+        ]
+      },
+      "reason_codes": [
+        "E-precondition"
+      ],
+      "reasons": [
+        "E-precondition: step 'has_case''s outputs are not there on every path to the new step, so it cannot see them (missing on the has_case --skip--> finalize path); 'sees' requires every path to carry the name, even when the step tolerates its absence"
+      ],
+      "seed_name": "fuzz_skip_path",
+      "step": 1
+    },
+    {
+      "decision": "accepted",
+      "edit": {
+        "node": {
+          "blocking": true,
+          "call": "structure_fuzz_graphs:step",
+          "evaluator": "",
+          "id": "process_c3",
+          "kind": "op",
+          "knobs": [],
+          "max_iterations": 1,
+          "notes": "",
+          "produces": [
+            "result"
+          ],
+          "prompt_template": "",
+          "reads": [
+            "brief.txt"
+          ],
+          "role": "ceo",
+          "score_effect": "affects",
+          "tools": [],
+          "writes": [
+            "result.txt"
+          ]
+        },
+        "op": "add_node",
+        "position": {
+          "start": true
+        }
+      },
+      "seed_name": "fuzz_skip_path",
+      "state_id": "4c65babcce00",
+      "step": 2
+    },
+    {
+      "decision": "refused",
+      "edit": {
+        "node": {
+          "blocking": true,
+          "call": "",
+          "evaluator": "",
+          "id": "finalize_next_c4",
+          "kind": "agent",
+          "knobs": [],
+          "max_iterations": 1,
+          "notes": "",
+          "produces": [
+            "finished"
+          ],
+          "prompt_template": "New ask for finalize_next_c4: {{finished}}",
+          "reads": [],
+          "role": "ceo",
+          "score_effect": "affects",
+          "system_prompt_template": "You are copy finalize_next_c4.",
+          "tool_policy": "none",
+          "tools": [],
+          "writes": [
+            "finalize_next_c4.txt"
+          ]
+        },
+        "op": "wrap",
+        "target": "process_c3"
+      },
+      "reason_codes": [
+        "V15"
+      ],
+      "reasons": [
+        "V15 [finalize_next_c4]: needs {{finished}}, which some path to it does not produce first; an agent's inputs are required (a data pass's own files and facts stay inside its pass). A fact the runtime re-derives before each dispatch belongs in the node's feedback_keys, and an optional one goes inside {% if name %}...{% endif %}"
+      ],
+      "seed_name": "fuzz_skip_path",
+      "step": 3
+    },
+    {
+      "decision": "refused",
+      "edit": {
+        "kind": "agent",
+        "op": "fallback",
+        "role": "judge",
+        "step": "finalize",
+        "text": "Check the work so far (5)."
+      },
+      "reason_codes": [
+        "E-precondition"
+      ],
+      "reasons": [
+        "E-precondition: 'fallback' does not take 'role'; it would be ignored. Its fields: step, kind, text, system, sees, id, call, reads, tools, route, sealed"
+      ],
+      "seed_name": "fuzz_skip_path",
+      "step": 4
+    },
+    {
+      "decision": "refused",
+      "edit": {
+        "after": "finalize_next",
+        "kind": "agent",
+        "op": "insert",
+        "sees": [
+          "brief.txt"
+        ],
+        "takes_over": "process",
+        "text": "Check the work so far (6)."
+      },
+      "reason_codes": [
+        "E-precondition"
+      ],
+      "reasons": [
+        "E-precondition: 'process' does not run before the new step on every path to it (missing on the has_case --skip--> finalize path); 'takes_over' names a step every run passes before the new one (not a step after it, on a sibling branch or on a branch a route can skip)"
+      ],
+      "seed_name": "fuzz_skip_path",
+      "step": 5
+    },
+    {
+      "decision": "accepted",
+      "edit": {
+        "name": "finalize_next__task",
+        "op": "set_knob",
+        "value": "Work on the task with what you are given, and write your result.\n\n## Finished\n{{finalize}}\n\n## Files from earlier steps (finalize_next_inputs)\n{{finalize_next_inputs}}\nAlso, edit 6."
+      },
+      "seed_name": "fuzz_skip_path",
+      "state_id": "087c41e1f23b",
+      "step": 6
+    },
+    {
+      "decision": "accepted",
+      "edit": {
+        "node": {
+          "blocking": true,
+          "call": "structure_fuzz_graphs:step",
+          "evaluator": "",
+          "id": "start_c7",
+          "kind": "op",
+          "knobs": [],
+          "max_iterations": 1,
+          "notes": "",
+          "produces": [
+            "brief"
+          ],
+          "prompt_template": "",
+          "reads": [],
+          "role": "ceo",
+          "score_effect": "affects",
+          "tools": [],
+          "writes": [
+            "brief.txt"
+          ]
+        },
+        "op": "insert_after",
+        "target": "process_c3"
+      },
+      "seed_name": "fuzz_skip_path",
+      "state_id": "e6a82aa91aae",
+      "step": 7
     },
     {
       "decision": "accepted",
@@ -530,585 +1634,193 @@
         "op": "insert_after",
         "target": "intake"
       },
-      "seed_name": "fuzz_file_output",
-      "state_id": "b3ba830c2564",
-      "step": 1
-    },
-    {
-      "decision": "accepted",
-      "edit": {
-        "after": "plot",
-        "judge": "agent",
-        "op": "route"
-      },
-      "seed_name": "fuzz_file_output",
-      "state_id": "76471ca7ccc3",
-      "step": 2
-    },
-    {
-      "decision": "refused",
-      "edit": {
-        "op": "bypass",
-        "target": "plot_route_judge_inputs"
-      },
-      "reason_codes": [
-        "V15"
-      ],
-      "reasons": [
-        "V15 [plot_route_judge]: needs {{plot_route_judge_inputs}}, which some path to it does not produce first; an agent's inputs are required (a data pass's own files and facts stay inside its pass). A fact the runtime re-derives before each dispatch belongs in the node's feedback_keys, and an optional one goes inside {% if name %}...{% endif %}"
-      ],
-      "seed_name": "fuzz_file_output",
-      "step": 3
-    },
-    {
-      "decision": "refused",
-      "edit": {
-        "node": {
-          "id": "agent3",
-          "kind": "agent",
-          "produces": [
-            "agent3_fact"
-          ],
-          "prompt_template": "Think about {{finished}}",
-          "reads": [],
-          "role": "solver",
-          "system_prompt_template": "You are agent3.",
-          "tool_policy": null,
-          "tools": [
-            "bash"
-          ],
-          "workspace": {
-            "kind": "scratch"
-          },
-          "writes": [
-            "agent3.txt"
-          ]
-        },
-        "op": "add_node",
-        "position": {
-          "detached": true
-        }
-      },
-      "reason_codes": [
-        "V2"
-      ],
-      "reasons": [
-        "V2 [agent3]: node is not reachable from the start node"
-      ],
-      "seed_name": "fuzz_file_output",
-      "step": 4
-    },
-    {
-      "decision": "refused",
-      "edit": {
-        "after": "raw2",
-        "kind": "agent",
-        "op": "insert",
-        "takes_over": "plot_revise"
-      },
-      "reason_codes": [
-        "E-precondition"
-      ],
-      "reasons": [
-        "E-precondition: 'plot_revise' does not run before the new step on every path to it (produced by plot_revise; missing on the plot_route --proceed--> describe path; \"after\" one of [plot_revise] would reach it); 'takes_over' names a step every run passes before the new one (not a step after it, on a sibling branch or on a branch a route can skip)"
-      ],
-      "seed_name": "fuzz_file_output",
-      "step": 5
-    },
-    {
-      "decision": "refused",
-      "edit": {
-        "after": "ship",
-        "kind": "agent",
-        "op": "insert",
-        "sees": [
-          "finished"
-        ]
-      },
-      "reason_codes": [
-        "E-unread"
-      ],
-      "reasons": [
-        "E-unread: nothing reads the output of new step 'ship_next', so it changes no result (give it 'takes_over': describe)"
-      ],
-      "seed_name": "fuzz_file_output",
-      "step": 6
-    },
-    {
-      "decision": "refused",
-      "edit": {
-        "copies": 2,
-        "op": "parallelize",
-        "steps": [
-          "plot_revise_inputs"
-        ]
-      },
-      "reason_codes": [
-        "E-precondition"
-      ],
-      "reasons": [
-        "E-precondition: 'plot_revise_inputs' is not a model step; a copy of an op or of code would compute the same thing again. Copy an agent"
-      ],
-      "seed_name": "fuzz_file_output",
-      "step": 7
-    },
-    {
-      "decision": "refused",
-      "edit": {
-        "id": "right_b",
-        "op": "remove_node"
-      },
-      "reason_codes": [
-        "V12",
-        "V15",
-        "V16",
-        "V6"
-      ],
-      "reasons": [
-        "V12 [merge]: join source 'right_b' is not a node",
-        "V15 [decide]: needs file 'right_b.txt', which some path to it does not produce first; an agent's inputs are required (a data pass's own files and facts stay inside its pass). A fact the runtime re-derives before each dispatch belongs in the node's feedback_keys, and an optional one goes inside {% if name %}...{% endif %}",
-        "V16 [split]: join 'merge' waits for 'right_b', which is in no branch of this fork",
-        "V6 [decide]: reads 'right_b.txt', which no node on a path from 'setup' to a terminal produces"
-      ],
-      "seed_name": "fuzz_fork_join",
+      "seed_name": "fuzz_tool_step",
+      "state_id": "4cc8b8316c0f",
       "step": 0
     },
     {
       "decision": "refused",
       "edit": {
-        "into": [
-          {
-            "blocking": true,
-            "call": "structure_fuzz_graphs:step",
-            "evaluator": "",
-            "id": "setup_c1",
-            "kind": "op",
-            "knobs": [],
-            "max_iterations": 1,
-            "notes": "",
-            "produces": [
-              "brief"
-            ],
-            "prompt_template": "",
-            "reads": [],
-            "role": "ceo",
-            "score_effect": "affects",
-            "tools": [],
-            "writes": [
-              "brief.txt"
-            ]
-          },
-          {
-            "blocking": true,
-            "call": "structure_fuzz_graphs:step",
-            "evaluator": "",
-            "id": "right_b_c2",
-            "kind": "op",
-            "knobs": [],
-            "max_iterations": 1,
-            "notes": "",
-            "produces": [
-              "right_b_c2_fact"
-            ],
-            "prompt_template": "",
-            "reads": [
-              "right_a.txt"
-            ],
-            "role": "ceo",
-            "score_effect": "affects",
-            "tools": [],
-            "writes": [
-              "right_b_c2.txt"
-            ]
-          }
+        "fork": "gather",
+        "kind": "agent",
+        "op": "branch",
+        "optional": true,
+        "sees": [
+          "reason"
         ],
-        "op": "split",
-        "target": "setup"
-      },
-      "reason_codes": [
-        "E-unread"
-      ],
-      "reasons": [
-        "E-unread: nothing reads the output of new step 'right_b_c2', so it changes no result (rewire a later step to see it, in the same edits)"
-      ],
-      "seed_name": "fuzz_fork_join",
-      "step": 1
-    },
-    {
-      "decision": "accepted",
-      "edit": {
-        "name": "decide__system_prompt",
-        "op": "set_knob",
-        "value": "You decide.\nAlso, edit 2."
-      },
-      "seed_name": "fuzz_fork_join",
-      "state_id": "8473121bf5e9",
-      "step": 2
-    },
-    {
-      "decision": "accepted",
-      "edit": {
-        "name": "decide__system_prompt",
-        "op": "set_knob",
-        "value": "You decide.\nAlso, edit 2.\nprefer the simplest solution"
-      },
-      "seed_name": "fuzz_fork_join",
-      "state_id": "f81fd1c70327",
-      "step": 3
-    },
-    {
-      "decision": "accepted",
-      "edit": {
-        "node": {
-          "call": "structure_fuzz_graphs:step",
-          "id": "right_a",
-          "kind": "op",
-          "produces": [
-            "op3_fact"
-          ],
-          "reads": [],
-          "writes": [
-            "op3.txt"
-          ]
-        },
-        "op": "add_node",
-        "position": {
-          "after": "right_a"
-        }
-      },
-      "seed_name": "fuzz_fork_join",
-      "state_id": "5d68469b675d",
-      "step": 4
-    },
-    {
-      "decision": "refused",
-      "edit": {
-        "branches": [
-          {
-            "id": "agent4",
-            "kind": "agent",
-            "produces": [
-              "agent4_fact"
-            ],
-            "prompt_template": "Think about {{right_fact}}",
-            "reads": [],
-            "role": "solver",
-            "system_prompt_template": "You are agent4.",
-            "writes": []
-          },
-          {
-            "id": "agent5",
-            "kind": "agent",
-            "produces": [
-              "agent5_fact"
-            ],
-            "prompt_template": "Think about {{right_fact}}",
-            "reads": [
-              "op3.txt"
-            ],
-            "role": "solver",
-            "system_prompt_template": "You are agent5.",
-            "tool_policy": "none",
-            "writes": [
-              "agent5.txt"
-            ]
-          }
-        ],
-        "op": "parallel",
-        "target": "right_a"
-      },
-      "reason_codes": [
-        "V15"
-      ],
-      "reasons": [
-        "V15 [agent4]: declares tool_policy 'none' and 0 writes; a no-tools agent's reply is its one declared output, so it declares exactly one",
-        "V15 [agent5]: needs file 'op3.txt', which some path to it does not produce first; an agent's inputs are required (a data pass's own files and facts stay inside its pass). A fact the runtime re-derives before each dispatch belongs in the node's feedback_keys, and an optional one goes inside {% if name %}...{% endif %}"
-      ],
-      "seed_name": "fuzz_fork_join",
-      "step": 5
-    },
-    {
-      "decision": "refused",
-      "edit": {
-        "op": "bypass",
-        "target": "merge"
-      },
-      "reason_codes": [
-        "V15",
-        "V16"
-      ],
-      "reasons": [
-        "V15 [decide]: needs file 'left.txt', file 'right_b.txt', {{right_fact}}, which some path to it does not produce first; an agent's inputs are required (a data pass's own files and facts stay inside its pass). A fact the runtime re-derives before each dispatch belongs in the node's feedback_keys, and an optional one goes inside {% if name %}...{% endif %}",
-        "V16 [split]: a fork's one unconditional out-edge leads to its join, where its branches meet; this fork leads to 'decide', which is not a join"
-      ],
-      "seed_name": "fuzz_fork_join",
-      "step": 6
-    },
-    {
-      "decision": "accepted",
-      "edit": {
-        "fork": "split",
-        "op": "serialize"
-      },
-      "seed_name": "fuzz_fork_join",
-      "state_id": "6885402622eb",
-      "step": 7
-    },
-    {
-      "decision": "refused",
-      "edit": {
-        "node": {
-          "id": "fork1",
-          "kind": "fork",
-          "targets": [
-            "prepare",
-            "work"
-          ]
-        },
-        "op": "insert_before",
-        "target": "work"
-      },
-      "reason_codes": [
-        "V10",
-        "V16"
-      ],
-      "reasons": [
-        "V10: cycle through 'fork1' avoids every gate; route every cycle through a gate with a bounded retry transition",
-        "V16 [fork1]: a fork's one unconditional out-edge leads to its join, where its branches meet; this fork leads to 'work', which is not a join"
-      ],
-      "seed_name": "fuzz_gate_loop",
-      "step": 0
-    },
-    {
-      "decision": "accepted",
-      "edit": {
-        "name": "work__system_prompt",
-        "op": "set_knob",
-        "value": "You are the work step.\nAlso, edit 1."
-      },
-      "seed_name": "fuzz_gate_loop",
-      "state_id": "e1466e7520d6",
-      "step": 1
-    },
-    {
-      "decision": "accepted",
-      "edit": {
-        "node": {
-          "blocking": true,
-          "call": "structure_fuzz_graphs:step",
-          "evaluator": "",
-          "id": "finish_c2",
-          "kind": "op",
-          "knobs": [],
-          "max_iterations": 1,
-          "notes": "",
-          "produces": [
-            "finish_c2_fact"
-          ],
-          "prompt_template": "",
-          "reads": [
-            "work.txt"
-          ],
-          "role": "ceo",
-          "score_effect": "affects",
-          "tools": [],
-          "writes": [
-            "finish_c2.txt"
-          ]
-        },
-        "op": "insert_after",
-        "target": "finish"
-      },
-      "seed_name": "fuzz_gate_loop",
-      "state_id": "638e88f8e3fb",
-      "step": 2
-    },
-    {
-      "decision": "accepted",
-      "edit": {
-        "op": "merge",
-        "steps": [
-          "finish",
-          "finish_c2"
-        ]
-      },
-      "seed_name": "fuzz_gate_loop",
-      "state_id": "310ab4f33d44",
-      "step": 3
-    },
-    {
-      "decision": "refused",
-      "edit": {
-        "first": "work",
-        "op": "reorder",
-        "second": "review"
+        "text": "Work on part 3 of the task."
       },
       "reason_codes": [
         "E-precondition"
       ],
       "reasons": [
-        "E-precondition: data dependency: 'review' reads ['work.txt'], which only 'work' produces, so the two cannot be swapped"
+        "E-precondition: 'gather' is a agent, not a fork; 'parallelize' runs steps beside a step that is not one"
       ],
-      "seed_name": "fuzz_gate_loop",
-      "step": 4
+      "seed_name": "fuzz_tool_step",
+      "step": 1
     },
     {
       "decision": "accepted",
       "edit": {
-        "before": "work",
-        "kind": "code",
+        "after": "gather",
+        "kind": "agent",
         "op": "insert",
-        "sees": [
-          "task",
-          "prepare"
-        ],
-        "takes_over": "prepare"
+        "takes_over": "gather"
       },
-      "seed_name": "fuzz_gate_loop",
-      "state_id": "55fb3fa5c9ee",
-      "step": 5
+      "seed_name": "fuzz_tool_step",
+      "state_id": "b9a4ac98ca53",
+      "step": 2
+    },
+    {
+      "decision": "refused",
+      "edit": {
+        "after": "intake",
+        "kind": "agent",
+        "op": "insert",
+        "takes_over": "ghost"
+      },
+      "reason_codes": [
+        "E-precondition"
+      ],
+      "reasons": [
+        "E-precondition: 'takes_over' names an existing step, not 'ghost'"
+      ],
+      "seed_name": "fuzz_tool_step",
+      "step": 3
     },
     {
       "decision": "refused",
       "edit": {
         "condition": null,
         "op": "add_edge",
-        "source": "work_prep",
-        "target": "review"
+        "source": "gather_next",
+        "target": "reason"
       },
       "reason_codes": [
-        "V4"
+        "E-shape"
       ],
       "reasons": [
-        "V4 [work_prep]: a non-gate node needs at most one out-edge, has 2"
+        "E-shape: edge ('gather_next', 'reason', '') already exists"
       ],
-      "seed_name": "fuzz_gate_loop",
-      "step": 6
-    },
-    {
-      "decision": "refused",
-      "edit": {
-        "fork": "review",
-        "op": "serialize"
-      },
-      "reason_codes": [
-        "E-precondition"
-      ],
-      "reasons": [
-        "E-precondition: 'review' is a gate, not a fork"
-      ],
-      "seed_name": "fuzz_gate_loop",
-      "step": 7
+      "seed_name": "fuzz_tool_step",
+      "step": 4
     },
     {
       "decision": "accepted",
       "edit": {
-        "name": "redo__system_prompt",
-        "op": "set_knob",
-        "value": "You are the redo step.\nprefer the simplest solution"
+        "after": "reason",
+        "kind": "agent",
+        "op": "insert",
+        "takes_over": "gather_next"
       },
-      "seed_name": "fuzz_gates",
-      "state_id": "049919b0bf66",
+      "seed_name": "fuzz_tool_step",
+      "state_id": "de0af59068d6",
+      "step": 5
+    },
+    {
+      "decision": "refused",
+      "edit": {
+        "after": "reason_next",
+        "judge": "agent",
+        "op": "route",
+        "to": {
+          "other": {
+            "kind": "code"
+          },
+          "proceed": "ship"
+        }
+      },
+      "reason_codes": [
+        "E-unread"
+      ],
+      "reasons": [
+        "E-unread: nothing reads the output of new step 'reason_next_other', so it changes no result (give the way's new step 'takes_over': reason_next)"
+      ],
+      "seed_name": "fuzz_tool_step",
+      "step": 6
+    },
+    {
+      "decision": "accepted",
+      "edit": {
+        "after": "gather_next_inputs",
+        "kind": "agent",
+        "op": "insert",
+        "takes_over": "gather_next_inputs"
+      },
+      "seed_name": "fuzz_tool_step",
+      "state_id": "c2f1b3d48b5b",
+      "step": 7
+    },
+    {
+      "decision": "refused",
+      "edit": {
+        "op": "add_edge",
+        "source": "decide",
+        "target": "decide_prompt"
+      },
+      "reason_codes": [
+        "V10",
+        "V4"
+      ],
+      "reasons": [
+        "V10: cycle through 'decide_prompt' avoids every gate; route every cycle through a gate with a bounded retry transition",
+        "V4 [decide]: a non-gate node needs at most one out-edge, has 2"
+      ],
+      "seed_name": "livemath_skill_graph",
       "step": 0
     },
     {
       "decision": "refused",
       "edit": {
-        "op": "remove_edge",
-        "source": "approve",
-        "target": "redo"
+        "op": "bypass",
+        "target": "notes_prompts"
       },
       "reason_codes": [
-        "V2",
-        "V5"
+        "V15",
+        "V7"
       ],
       "reasons": [
-        "V2 [redo]: node is not reachable from the start node",
-        "V5 [approve]: a gate needs at least two conditioned out-edges, has 1"
+        "V15 [hypotheses]: needs {{hypotheses_prompt}}, which some path to it does not produce first; an agent's inputs are required (a data pass's own files and facts stay inside its pass). A fact the runtime re-derives before each dispatch belongs in the node's feedback_keys, and an optional one goes inside {% if name %}...{% endif %}",
+        "V15 [precision]: needs {{precision_prompt}}, which some path to it does not produce first; an agent's inputs are required (a data pass's own files and facts stay inside its pass). A fact the runtime re-derives before each dispatch belongs in the node's feedback_keys, and an optional one goes inside {% if name %}...{% endif %}",
+        "V7 [hypotheses_task]: knob is declared but no node consumes it, so moving it cannot change the run",
+        "V7 [precision_task]: knob is declared but no node consumes it, so moving it cannot change the run"
       ],
-      "seed_name": "fuzz_gates",
+      "seed_name": "livemath_skill_graph",
       "step": 1
-    },
-    {
-      "decision": "refused",
-      "edit": {
-        "condition": "reject",
-        "op": "remove_edge",
-        "source": "triage",
-        "target": "drop"
-      },
-      "reason_codes": [
-        "V5"
-      ],
-      "reasons": [
-        "V5 [triage]: a gate needs at least two conditioned out-edges, has 1"
-      ],
-      "seed_name": "fuzz_gates",
-      "step": 2
     },
     {
       "decision": "accepted",
       "edit": {
         "node": {
-          "blocking": true,
-          "call": "",
-          "evaluator": "",
-          "id": "polish_c1",
-          "kind": "agent",
-          "knobs": [],
-          "max_iterations": 1,
-          "notes": "",
-          "produces": [],
-          "prompt_template": "New ask for polish_c1: {{draft}}",
-          "reads": [
-            "draft.txt"
+          "call": "refactory_dsh.snippet:run",
+          "code": "import json\ndef main(inp):\n    text = json.dumps(inp, sort_keys=True, default=str)\n    return {'facts': {'code1_fact': len(text)},\n            'files': {'code1.txt': text[:200]}}\n",
+          "id": "code1",
+          "inputs": [],
+          "kind": "op",
+          "produces": [
+            "code1_fact"
           ],
-          "role": "solver",
-          "score_effect": "affects",
-          "system_prompt_template": "You are copy polish_c1.",
-          "timeout_s": 60,
-          "tool_policy": "none",
-          "tools": [],
+          "reads": [
+            "answer.txt"
+          ],
           "writes": [
-            "polish_c1.txt"
+            "code1.txt"
           ]
         },
         "op": "insert_after",
-        "target": "archive"
+        "target": "prepare"
       },
-      "seed_name": "fuzz_gates",
-      "state_id": "f8101367b497",
-      "step": 3
+      "seed_name": "livemath_skill_graph",
+      "state_id": "17f563fbbf0f",
+      "step": 2
     },
     {
-      "decision": "refused",
-      "edit": {
-        "op": "rewire",
-        "sees": [
-          "approve"
-        ],
-        "step": "redo"
-      },
-      "reason_codes": [
-        "E-precondition"
-      ],
-      "reasons": [
-        "E-precondition: step 'approve''s outputs are not there on every path to the new step, so it cannot see them (missing on the polish --> approve path); 'sees' requires every path to carry the name, even when the step tolerates its absence"
-      ],
-      "seed_name": "fuzz_gates",
-      "step": 4
-    },
-    {
-      "decision": "refused",
+      "decision": "accepted",
       "edit": {
         "into": [
           {
             "kind": "agent",
-            "route": {
-              "effort": "low",
-              "model": "m-small"
-            },
-            "text": "Use {{shipped}} here."
+            "text": "Use {{answer_label}} here."
           },
           {
             "kind": "agent",
@@ -1116,924 +1828,97 @@
           }
         ],
         "op": "split",
-        "step": "approve"
+        "step": "code1"
       },
-      "reason_codes": [
-        "E-precondition"
-      ],
-      "reasons": [
-        "E-precondition: 'approve' is a gate; split works on a step (agent, op or code)"
-      ],
-      "seed_name": "fuzz_gates",
-      "step": 5
-    },
-    {
-      "decision": "refused",
-      "edit": {
-        "op": "rewire",
-        "sees": [
-          "archive"
-        ],
-        "step": "archive"
-      },
-      "reason_codes": [
-        "E-precondition"
-      ],
-      "reasons": [
-        "E-precondition: 'archive' is a plain op: what it reads is what its callable reads. Rewire an agent or a code step"
-      ],
-      "seed_name": "fuzz_gates",
-      "step": 6
-    },
-    {
-      "decision": "accepted",
-      "edit": {
-        "node": {
-          "evaluator": "structure_fuzz_graphs:proceed",
-          "gate_kind": "fn",
-          "id": "gate4",
-          "kind": "gate",
-          "max_iterations": 2
-        },
-        "op": "wrap",
-        "target": "triage"
-      },
-      "seed_name": "fuzz_gates",
-      "state_id": "ced8ea1707b2",
-      "step": 7
-    },
-    {
-      "decision": "refused",
-      "edit": {
-        "name": "escalate__system_prompt",
-        "op": "remove_knob"
-      },
-      "reason_codes": [
-        "V14",
-        "V7"
-      ],
-      "reasons": [
-        "V14 [escalate]: field binding references undeclared knob 'escalate__system_prompt'",
-        "V7 [escalate]: consumes undeclared knob 'escalate__system_prompt'"
-      ],
-      "seed_name": "fuzz_multi_terminal",
-      "step": 0
-    },
-    {
-      "decision": "accepted",
-      "edit": {
-        "id": "reject",
-        "op": "remove_node"
-      },
-      "seed_name": "fuzz_multi_terminal",
-      "state_id": "4974f9076077",
-      "step": 1
-    },
-    {
-      "decision": "refused",
-      "edit": {
-        "op": "bypass",
-        "target": "escalate"
-      },
-      "reason_codes": [
-        "E-precondition"
-      ],
-      "reasons": [
-        "E-precondition: 'escalate' has no successor to reconnect to"
-      ],
-      "seed_name": "fuzz_multi_terminal",
-      "step": 2
-    },
-    {
-      "decision": "accepted",
-      "edit": {
-        "new_id": "accept_d1",
-        "op": "duplicate",
-        "target": "accept"
-      },
-      "seed_name": "fuzz_multi_terminal",
-      "state_id": "763e843b6ed1",
-      "step": 3
-    },
-    {
-      "decision": "accepted",
-      "edit": {
-        "name": "escalate__system_prompt",
-        "op": "set_knob",
-        "value": "You are the escalate step.\nAlso, edit 1."
-      },
-      "seed_name": "fuzz_multi_terminal",
-      "state_id": "ee5a33d57f30",
-      "step": 4
-    },
-    {
-      "decision": "accepted",
-      "edit": {
-        "judge": "code",
-        "op": "loop",
-        "step": "escalate"
-      },
-      "seed_name": "fuzz_multi_terminal",
-      "state_id": "4ad697653e81",
-      "step": 5
-    },
-    {
-      "decision": "refused",
-      "edit": {
-        "node": {
-          "blocking": true,
-          "call": "",
-          "evaluator": "structure_fuzz_graphs:proceed",
-          "id": "route_c2",
-          "kind": "gate",
-          "knobs": [],
-          "max_iterations": 1,
-          "notes": "does route pass?",
-          "produces": [],
-          "prompt_template": "",
-          "reads": [
-            "label.txt"
-          ],
-          "role": "ceo",
-          "score_effect": "affects",
-          "tools": [],
-          "writes": []
-        },
-        "op": "insert_before",
-        "target": "accept"
-      },
-      "reason_codes": [
-        "V5"
-      ],
-      "reasons": [
-        "V5 [route_c2]: a gate must not have an unconditional out-edge; every edge out of a gate carries a verdict",
-        "V5 [route_c2]: a gate needs at least two conditioned out-edges, has 0"
-      ],
-      "seed_name": "fuzz_multi_terminal",
-      "step": 6
-    },
-    {
-      "decision": "accepted",
-      "edit": {
-        "op": "merge",
-        "steps": [
-          "accept",
-          "accept_d1"
-        ]
-      },
-      "seed_name": "fuzz_multi_terminal",
-      "state_id": "fab549d51fbf",
-      "step": 7
-    },
-    {
-      "decision": "refused",
-      "edit": {
-        "after": "outer_join",
-        "max": 2,
-        "op": "map",
-        "over": "outer_join",
-        "text": "Work on this element (1)."
-      },
-      "reason_codes": [
-        "E-precondition"
-      ],
-      "reasons": [
-        "E-precondition: 'outer_join' is a join; map works on a step (agent, op or code)"
-      ],
-      "seed_name": "fuzz_nested_fork",
-      "step": 0
-    },
-    {
-      "decision": "refused",
-      "edit": {
-        "op": "remove_edge",
-        "source": "outer",
-        "target": "outer_join"
-      },
-      "reason_codes": [
-        "V16"
-      ],
-      "reasons": [
-        "V16 [outer]: a fork's one unconditional out-edge leads to its join, where its branches meet; this fork has 0 out-edge(s)",
-        "V16 [outer]: fork 'outer': branches declare the same produced facts",
-        "V16 [outer_join]: a join belongs to exactly one fork (the one whose out-edge leads to it); this one belongs to none"
-      ],
-      "seed_name": "fuzz_nested_fork",
-      "step": 1
-    },
-    {
-      "decision": "refused",
-      "edit": {
-        "id": "outer",
-        "op": "remove_node"
-      },
-      "reason_codes": [
-        "V16",
-        "V2",
-        "V6"
-      ],
-      "reasons": [
-        "V16 [outer_join]: a join belongs to exactly one fork (the one whose out-edge leads to it); this one belongs to none",
-        "V2 [after_inner]: node is not reachable from the start node",
-        "V2 [deep_a]: node is not reachable from the start node",
-        "V2 [deep_b]: node is not reachable from the start node",
-        "V2 [end]: node is not reachable from the start node",
-        "V2 [inner]: node is not reachable from the start node",
-        "V2 [inner_join]: node is not reachable from the start node",
-        "V2 [outer_join]: node is not reachable from the start node",
-        "V2 [solo]: node is not reachable from the start node",
-        "V6 [after_inner]: reads 'deep_a.txt', which no node on a path from 'begin' to a terminal produces",
-        "V6 [after_inner]: reads 'deep_b.txt', which no node on a path from 'begin' to a terminal produces",
-        "V6 [end]: reads 'inner.txt', which no node on a path from 'begin' to a terminal produces",
-        "V6 [end]: reads 'solo.txt', which no node on a path from 'begin' to a terminal produces"
-      ],
-      "seed_name": "fuzz_nested_fork",
-      "step": 2
-    },
-    {
-      "decision": "refused",
-      "edit": {
-        "op": "text_patch"
-      },
-      "reason_codes": [
-        "E-op"
-      ],
-      "reasons": [
-        "E-op: unknown edit 'text_patch': text_patch was folded into set_knob: write {\"op\": \"set_knob\", \"name\": <knob>, \"patch\": [<text edits>], \"config\": {...}} (the old 'edits' list is set_knob's 'patch')"
-      ],
-      "seed_name": "fuzz_nested_fork",
+      "seed_name": "livemath_skill_graph",
+      "state_id": "9fc987d92344",
       "step": 3
     },
     {
       "decision": "refused",
       "edit": {
-        "name": "k3",
-        "op": "add_knob",
-        "spec": {
-          "default": "x",
-          "kind": "str"
-        }
-      },
-      "reason_codes": [
-        "V7"
-      ],
-      "reasons": [
-        "V7 [k3]: knob is declared but no node consumes it, so moving it cannot change the run"
-      ],
-      "seed_name": "fuzz_nested_fork",
-      "step": 4
-    },
-    {
-      "decision": "refused",
-      "edit": {
-        "copies": 2,
-        "op": "parallelize",
-        "steps": [
-          "inner"
-        ]
+        "after": "step_join",
+        "kind": "agent",
+        "op": "insert",
+        "takes_over": "step_fork"
       },
       "reason_codes": [
         "E-precondition"
       ],
       "reasons": [
-        "E-precondition: 'inner' is a fork; parallelize works on a step (agent, op or code)"
+        "E-precondition: 'step_fork' is a fork; only agent or op steps can be taken over"
       ],
-      "seed_name": "fuzz_nested_fork",
-      "step": 5
-    },
-    {
-      "decision": "accepted",
-      "edit": {
-        "op": "remove",
-        "step": "end"
-      },
-      "seed_name": "fuzz_nested_fork",
-      "state_id": "ccf6b2e8d5ba",
-      "step": 6
+      "seed_name": "livemath_skill_graph",
+      "step": 4
     },
     {
       "decision": "refused",
       "edit": {
-        "new_id": "inner_join_d4",
-        "op": "duplicate",
-        "target": "inner_join"
-      },
-      "reason_codes": [
-        "V16"
-      ],
-      "reasons": [
-        "V16 [inner_join_d4]: a join belongs to exactly one fork (the one whose out-edge leads to it); this one belongs to none"
-      ],
-      "seed_name": "fuzz_nested_fork",
-      "step": 7
-    },
-    {
-      "decision": "refused",
-      "edit": {
-        "before": "process",
+        "before": "finish",
         "kind": "agent",
         "op": "insert",
         "sees": [
-          "brief"
-        ]
-      },
-      "reason_codes": [
-        "E-unread"
-      ],
-      "reasons": [
-        "E-unread: nothing reads the output of new step 'process_prep', so it changes no result (no step can read it)"
-      ],
-      "seed_name": "fuzz_skip_path",
-      "step": 0
-    },
-    {
-      "decision": "refused",
-      "edit": {
-        "node": {
-          "blocking": true,
-          "call": "structure_fuzz_graphs:step",
-          "evaluator": "",
-          "id": "start_c2",
-          "kind": "op",
-          "knobs": [],
-          "max_iterations": 1,
-          "notes": "",
-          "produces": [
-            "start_c2_fact"
-          ],
-          "prompt_template": "",
-          "reads": [],
-          "role": "ceo",
-          "score_effect": "affects",
-          "tools": [],
-          "writes": [
-            "start_c2.txt"
-          ]
-        },
-        "op": "add_node",
-        "position": {
-          "detached": true
-        }
-      },
-      "reason_codes": [
-        "V2"
-      ],
-      "reasons": [
-        "V2 [start_c2]: node is not reachable from the start node"
-      ],
-      "seed_name": "fuzz_skip_path",
-      "step": 1
-    },
-    {
-      "decision": "accepted",
-      "edit": {
-        "branches": [
-          {
-            "call": "structure_fuzz_graphs:step",
-            "id": "op3",
-            "kind": "op",
-            "produces": [
-              "op3_fact"
-            ],
-            "reads": [
-              "brief.txt"
-            ],
-            "required_reads": [
-              "brief.txt"
-            ],
-            "writes": [
-              "op3.txt"
-            ]
-          },
-          {
-            "id": "agent4",
-            "kind": "agent",
-            "produces": [
-              "agent4_fact"
-            ],
-            "prompt_template": "{% if brief %}Something was graded.{% endif %}Go on.",
-            "reads": [],
-            "role": "solver",
-            "system_prompt_template": "You are agent4.",
-            "tool_policy": null,
-            "tools": [
-              "bash"
-            ],
-            "workspace": {
-              "kind": "scratch"
-            },
-            "writes": [
-              "agent4.txt"
-            ]
-          },
-          {
-            "call": "refactory_dsh.snippet:run",
-            "code": "import json\ndef main(inp):\n    text = json.dumps(inp, sort_keys=True, default=str)\n    return {'facts': {'code5_fact': len(text)},\n            'files': {'code5.txt': text[:200]}}\n",
-            "id": "code5",
-            "inputs": [
-              "brief"
-            ],
-            "kind": "op",
-            "produces": [
-              "code5_fact"
-            ],
-            "reads": [],
-            "writes": [
-              "code5.txt"
-            ]
-          }
-        ],
-        "op": "parallel",
-        "target": "process"
-      },
-      "seed_name": "fuzz_skip_path",
-      "state_id": "70e1b362f544",
-      "step": 2
-    },
-    {
-      "decision": "refused",
-      "edit": {
-        "after": "finalize",
-        "kind": "agent",
-        "op": "insert",
-        "takes_over": "op3"
-      },
-      "reason_codes": [
-        "E-precondition"
-      ],
-      "reasons": [
-        "E-precondition: 'op3' does not run before the new step on every path to it (missing on the has_case --skip--> finalize path); 'takes_over' names a step every run passes before the new one (not a step after it, on a sibling branch or on a branch a route can skip)"
-      ],
-      "seed_name": "fuzz_skip_path",
-      "step": 3
-    },
-    {
-      "decision": "refused",
-      "edit": {
-        "into": [
-          {
-            "kind": "code"
-          },
-          {
-            "kind": "code"
-          }
-        ],
-        "op": "split",
-        "step": "process_fork"
-      },
-      "reason_codes": [
-        "E-precondition"
-      ],
-      "reasons": [
-        "E-precondition: 'process_fork' is a fork; split works on a step (agent, op or code)"
-      ],
-      "seed_name": "fuzz_skip_path",
-      "step": 4
-    },
-    {
-      "decision": "refused",
-      "edit": {
-        "after": "process_fork",
-        "kind": "agent",
-        "op": "insert",
-        "sees": [
-          "agent4_fact"
+          "precision"
         ]
       },
       "reason_codes": [
         "E-precondition"
       ],
       "reasons": [
-        "E-precondition: 'process_fork' is a fork; add a step beside its branches with 'branch', or insert after one of its branches"
+        "E-precondition: step 'precision''s outputs are not there on every path to the new step, so it cannot see them (missing on the prepare --> code1_a path; \"after\" one of [decide, decide_prompt, extract_answer, precision, step_join] would reach it); 'sees' requires every path to carry the name, even when the step tolerates its absence"
       ],
-      "seed_name": "fuzz_skip_path",
+      "seed_name": "livemath_skill_graph",
       "step": 5
-    },
-    {
-      "decision": "refused",
-      "edit": {
-        "judge": "code",
-        "op": "loop",
-        "step": "process_fork"
-      },
-      "reason_codes": [
-        "E-precondition"
-      ],
-      "reasons": [
-        "E-precondition: 'process_fork' is a fork; loop works on a step (agent, op or code)"
-      ],
-      "seed_name": "fuzz_skip_path",
-      "step": 6
-    },
-    {
-      "decision": "refused",
-      "edit": {
-        "fork": "process_fork",
-        "kind": "code",
-        "op": "branch"
-      },
-      "reason_codes": [
-        "E-unread"
-      ],
-      "reasons": [
-        "E-unread: nothing reads the output of new step 'process_fork_branch', so it changes no result (no step can read it)"
-      ],
-      "seed_name": "fuzz_skip_path",
-      "step": 7
-    },
-    {
-      "decision": "accepted",
-      "edit": {
-        "new_id": "reason_d1",
-        "op": "duplicate",
-        "target": "reason"
-      },
-      "seed_name": "fuzz_tool_step",
-      "state_id": "532ae5686485",
-      "step": 0
-    },
-    {
-      "decision": "accepted",
-      "edit": {
-        "node": {
-          "blocking": true,
-          "call": "structure_fuzz_graphs:step",
-          "evaluator": "",
-          "id": "ship_c2",
-          "kind": "op",
-          "knobs": [],
-          "max_iterations": 1,
-          "notes": "",
-          "produces": [
-            "ship_c2_fact"
-          ],
-          "prompt_template": "",
-          "reads": [
-            "reasoning.txt"
-          ],
-          "required_reads": [
-            "reasoning.txt"
-          ],
-          "role": "ceo",
-          "score_effect": "affects",
-          "tools": [],
-          "writes": [
-            "ship_c2.txt"
-          ]
-        },
-        "op": "insert_after",
-        "target": "reason_d1"
-      },
-      "seed_name": "fuzz_tool_step",
-      "state_id": "15fb2a3f59d0",
-      "step": 1
-    },
-    {
-      "decision": "refused",
-      "edit": {
-        "op": "bypass",
-        "target": "ship"
-      },
-      "reason_codes": [
-        "E-precondition"
-      ],
-      "reasons": [
-        "E-precondition: 'ship' has no successor to reconnect to"
-      ],
-      "seed_name": "fuzz_tool_step",
-      "step": 2
-    },
-    {
-      "decision": "refused",
-      "edit": {
-        "name": "reason_d1__prompt_template",
-        "op": "set_knob",
-        "value": "Reason about the task.\n\n## Brief\nexplain each step"
-      },
-      "reason_codes": [
-        "E-knob"
-      ],
-      "reasons": [
-        "E-knob: knob 'reason_d1__prompt_template': template slot(s) ['brief'] required by node 'reason_d1''s prompt_template are missing from the new value"
-      ],
-      "seed_name": "fuzz_tool_step",
-      "step": 3
-    },
-    {
-      "decision": "refused",
-      "edit": {
-        "branches": [
-          {
-            "id": "agent3",
-            "kind": "agent",
-            "produces": [
-              "agent3_fact"
-            ],
-            "prompt_template": "Think about {{finished}}",
-            "reads": [],
-            "role": "solver",
-            "system_prompt_template": "You are agent3.",
-            "tool_policy": "none",
-            "writes": [
-              "agent3.txt"
-            ]
-          },
-          {
-            "call": "structure_fuzz_graphs:step",
-            "id": "op4",
-            "kind": "op",
-            "produces": [
-              "op4_fact"
-            ],
-            "reads": [],
-            "writes": [
-              "op4.txt"
-            ]
-          },
-          {
-            "id": "agent5",
-            "kind": "agent",
-            "produces": [
-              "agent5_fact"
-            ],
-            "prompt_template": "Think about {{ship_c2_fact}}",
-            "reads": [],
-            "role": "solver",
-            "system_prompt_template": "You are agent5.",
-            "tool_policy": null,
-            "tools": [
-              "bash"
-            ],
-            "workspace": {
-              "kind": "scratch"
-            },
-            "writes": [
-              "agent5.txt"
-            ]
-          }
-        ],
-        "op": "parallel",
-        "target": "ship_c2"
-      },
-      "reason_codes": [
-        "V15"
-      ],
-      "reasons": [
-        "V15 [agent3]: needs {{finished}}, which some path to it does not produce first; an agent's inputs are required (a data pass's own files and facts stay inside its pass). A fact the runtime re-derives before each dispatch belongs in the node's feedback_keys, and an optional one goes inside {% if name %}...{% endif %}"
-      ],
-      "seed_name": "fuzz_tool_step",
-      "step": 4
-    },
-    {
-      "decision": "refused",
-      "edit": {
-        "after": "reason_d1",
-        "kind": "agent",
-        "op": "insert",
-        "takes_over": "ship_c2"
-      },
-      "reason_codes": [
-        "E-precondition"
-      ],
-      "reasons": [
-        "E-precondition: 'ship_c2' does not run before the new step on every path to it (missing on the intake --> gather path); 'takes_over' names a step every run passes before the new one (not a step after it, on a sibling branch or on a branch a route can skip)"
-      ],
-      "seed_name": "fuzz_tool_step",
-      "step": 5
-    },
-    {
-      "decision": "refused",
-      "edit": {
-        "name": "reason_d1__system_prompt",
-        "op": "remove_knob"
-      },
-      "reason_codes": [
-        "V14",
-        "V7"
-      ],
-      "reasons": [
-        "V14 [reason_d1]: field binding references undeclared knob 'reason_d1__system_prompt'",
-        "V7 [reason_d1]: consumes undeclared knob 'reason_d1__system_prompt'"
-      ],
-      "seed_name": "fuzz_tool_step",
-      "step": 6
-    },
-    {
-      "decision": "accepted",
-      "edit": {
-        "name": "reason__system_prompt",
-        "op": "set_knob",
-        "value": "You are the reason step.\nAlso, edit 5."
-      },
-      "seed_name": "fuzz_tool_step",
-      "state_id": "53597d793f1f",
-      "step": 7
-    },
-    {
-      "decision": "refused",
-      "edit": {
-        "op": "duplicate",
-        "target": "ghost"
-      },
-      "reason_codes": [
-        "E-precondition"
-      ],
-      "reasons": [
-        "E-precondition: no node 'ghost' to duplicate"
-      ],
-      "seed_name": "livemath_skill_graph",
-      "step": 0
-    },
-    {
-      "decision": "refused",
-      "edit": {
-        "first": "compare",
-        "op": "reorder",
-        "second": "notes_prompts"
-      },
-      "reason_codes": [
-        "E-precondition"
-      ],
-      "reasons": [
-        "E-precondition: data dependency: 'notes_prompts' reads ['compare_notes.txt'], which only 'compare' produces, so the two cannot be swapped"
-      ],
-      "seed_name": "livemath_skill_graph",
-      "step": 1
-    },
-    {
-      "decision": "accepted",
-      "edit": {
-        "node": {
-          "blocking": true,
-          "call": "refactory_packages.livemath.skill_graph:decide_prompt",
-          "evaluator": "",
-          "id": "decide_prompt_c2",
-          "kind": "op",
-          "knobs": [
-            "decide_task"
-          ],
-          "max_iterations": 1,
-          "notes": "",
-          "produces": [
-            "decide_prompt"
-          ],
-          "prompt_template": "",
-          "reads": [
-            "compare_notes.txt",
-            "precision_notes.txt",
-            "hypotheses_notes.txt"
-          ],
-          "required_reads": [
-            "compare_notes.txt"
-          ],
-          "role": "ceo",
-          "score_effect": "affects",
-          "tools": [],
-          "writes": []
-        },
-        "op": "insert_after",
-        "target": "compare"
-      },
-      "seed_name": "livemath_skill_graph",
-      "state_id": "afe1953c8d77",
-      "step": 2
-    },
-    {
-      "decision": "refused",
-      "edit": {
-        "name": "k3",
-        "op": "add_knob",
-        "spec": {
-          "default": "x",
-          "kind": "str"
-        }
-      },
-      "reason_codes": [
-        "V7"
-      ],
-      "reasons": [
-        "V7 [k3]: knob is declared but no node consumes it, so moving it cannot change the run"
-      ],
-      "seed_name": "livemath_skill_graph",
-      "step": 3
-    },
-    {
-      "decision": "refused",
-      "edit": {
-        "op": "remove",
-        "step": "decide_prompt_c2"
-      },
-      "reason_codes": [
-        "E-duplicate"
-      ],
-      "reasons": [
-        "E-duplicate: this state already exists in the search as candidate 5341439d7f5b, so evaluating it again would spend a batch slot on a point already scored; propose a different change"
-      ],
-      "seed_name": "livemath_skill_graph",
-      "step": 4
-    },
-    {
-      "decision": "accepted",
-      "edit": {
-        "name": "decide__system_prompt",
-        "op": "set_knob",
-        "value": "You are an expert mathematical reasoning agent solving multiple-choice questions.\n\n## Skill\n## Final Answer\n- Output the final answer as the single option label only.\n\n## Task Format\nYou will receive one mathematics multiple-choice question and its answer choices.\nReason carefully about quantifiers, hypotheses, extremal wording, and exact equality conditions.\n\n## Answer Format\nThink step by step, then provide your final answer inside <answer>...</answer> tags.\nInside the tags, output only the single choice label, such as A or C.\n\nExample:"
-      },
-      "seed_name": "livemath_skill_graph",
-      "state_id": "caec7b61e5fe",
-      "step": 5
-    },
-    {
-      "decision": "refused",
-      "edit": {
-        "into": [
-          {
-            "blocking": true,
-            "call": "",
-            "evaluator": "",
-            "id": "data_c4",
-            "kind": "data",
-            "knobs": [
-              "data_parallelism"
-            ],
-            "max_iterations": 1,
-            "notes": "",
-            "parallelism_knob": "data_parallelism",
-            "produces": [
-              "item_scores"
-            ],
-            "prompt_template": "",
-            "reads": [],
-            "role": "ceo",
-            "score_effect": "affects",
-            "subgraph_entry": "prepare",
-            "subgraph_exit": "extract_answer",
-            "task_ref": "refactory_packages.livemath.tasks:LiveMathTask",
-            "tools": [],
-            "writes": [
-              "current_item.json"
-            ]
-          },
-          {
-            "blocking": true,
-            "call": "refactory_packages.livemath.skill_graph:notes_prompts",
-            "evaluator": "",
-            "id": "notes_prompts_c5",
-            "kind": "op",
-            "knob_outputs": {
-              "hypotheses_prompt": [
-                "hypotheses_task"
-              ],
-              "precision_prompt": [
-                "precision_task"
-              ]
-            },
-            "knobs": [
-              "precision_task",
-              "hypotheses_task"
-            ],
-            "max_iterations": 1,
-            "notes": "",
-            "produces": [
-              "precision_prompt",
-              "hypotheses_prompt"
-            ],
-            "prompt_template": "",
-            "reads": [
-              "compare_notes.txt"
-            ],
-            "required_reads": [
-              "compare_notes.txt"
-            ],
-            "role": "ceo",
-            "score_effect": "affects",
-            "tools": [],
-            "writes": []
-          }
-        ],
-        "op": "split",
-        "target": "extract_answer"
-      },
-      "reason_codes": [
-        "E-precondition"
-      ],
-      "reasons": [
-        "E-precondition: 'data_c4' is a 'data'; split's two steps are each one of ['agent', 'op']"
-      ],
-      "seed_name": "livemath_skill_graph",
-      "step": 6
     },
     {
       "decision": "accepted",
       "edit": {
         "fork": "step_fork",
-        "op": "serialize"
+        "kind": "agent",
+        "op": "branch"
       },
       "seed_name": "livemath_skill_graph",
-      "state_id": "6265159ffeb3",
+      "state_id": "6cf7b6903e5a",
+      "step": 6
+    },
+    {
+      "decision": "refused",
+      "edit": {
+        "node": {
+          "call": "refactory_dsh.snippet:run",
+          "code": "def main(inp:\n    return {}\n",
+          "id": "code5",
+          "inputs": [],
+          "kind": "op",
+          "produces": [
+            "code5_fact"
+          ],
+          "reads": [
+            "compare_notes.txt"
+          ],
+          "writes": [
+            "code5.txt"
+          ]
+        },
+        "op": "wrap",
+        "target": "step_fork"
+      },
+      "reason_codes": [
+        "V15",
+        "V16",
+        "V18"
+      ],
+      "reasons": [
+        "V15 [decide_prompt]: fills {{step_fork_branch}} into the knobs it reads, which some path to it does not produce first; an optional one goes inside {% if name %}...{% endif %}",
+        "V16 [step_fork]: a fork's one unconditional out-edge leads to its join, where its branches meet; this fork leads to 'code5', which is not a join",
+        "V16 [step_fork]: fork 'step_fork': branches declare the same produced facts",
+        "V16 [step_join]: a join belongs to exactly one fork (the one whose out-edge leads to it); this one belongs to none",
+        "V18 [code5]: code node: code does not parse: line 1: '(' was never closed"
+      ],
+      "seed_name": "livemath_skill_graph",
       "step": 7
     }
   ],
   "edits_per_walk": 8,
-  "seed": 20261127
+  "seed": 20261131
 }

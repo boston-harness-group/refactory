@@ -1080,24 +1080,42 @@ def test_the_decision_record_fails_on_a_changed_message(monkeypatch):
     assert diffs, "the record should have detected the message change"
 
 
-def test_mutation_takeover_false_no_outputs_is_caught(monkeypatch):
-    """When ``_take_over_plan`` claims 'has no outputs to take over' for a step that
-    does have outputs, the ``refusal_names`` invariant catches the lie."""
+def test_mutation_takeover_historical_bug_is_caught(monkeypatch):
+    """The historical bug combined the kind check and the no-outputs check into
+    one ``if``: ``kind not in ('agent', 'op') or not (writes or produces)``
+    with message ``'X' is a {kind} with no outputs to take over``.  For a
+    non-agent/op node that HAS outputs (a data node), the 'no outputs' claim
+    is false.  The checker must flag a ``refusal_names`` violation in the quick
+    tier, and the decision record must differ from the fixture."""
     from refactory_dsh.nn import core_ops
 
-    original = core_ops._take_over_plan
+    original_plan = core_ops._take_over_plan
+    original_route = core_ops._route_take_over
 
-    def sabotaged(graph, state, target_id, side, anchor, *, only=None):
+    def buggy_plan(graph, state, target_id, side, anchor, *, only=None):
         if isinstance(target_id, str) and target_id in graph.nodes:
             target = graph.nodes[target_id]
-            if target.kind not in ("agent", "op"):
+            if target.kind not in ("agent", "op") or not (target.writes or target.produces):
                 raise core_ops._Refused(
-                    f"{target_id!r} is a {target.kind}; only agent or op steps can be taken over")
-            raise core_ops._Refused(f"{target_id!r} has no outputs to take over")
-        return original(graph, state, target_id, side, anchor, only=only)
+                    f"'{target_id}' is a {target.kind} with no outputs to take over")
+        return original_plan(graph, state, target_id, side, anchor, only=only)
 
-    monkeypatch.setattr(core_ops, "_take_over_plan", sabotaged)
-    _finds("refusal_names", seeds=("fuzz_dataflow", "fuzz_draft_review", "fuzz_skip_path"))
+    def buggy_route(graph, state, anchor, spec):
+        target_id = spec.get("takes_over")
+        if isinstance(target_id, str) and target_id in graph.nodes:
+            target = graph.nodes[target_id]
+            if target.kind not in ("agent", "op") or not (target.writes or target.produces):
+                raise core_ops._Refused(
+                    f"'{target_id}' is a {target.kind} with no outputs to take over")
+        return original_route(graph, state, anchor, spec)
+
+    monkeypatch.setattr(core_ops, "_take_over_plan", buggy_plan)
+    monkeypatch.setattr(core_ops, "_route_take_over", buggy_route)
+    _finds("refusal_names", seeds=("fuzz_data_pass", "fuzz_gates", "fuzz_skip_path"))
+    old = sf.load_record()
+    new = sf.generate_record()
+    diffs = sf.diff_records(old, new)
+    assert diffs, "decision record should differ with the historical bug"
 
 
 def test_mutation_compound_refusal_names_are_checked(monkeypatch):
