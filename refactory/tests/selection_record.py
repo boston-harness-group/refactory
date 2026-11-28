@@ -37,6 +37,7 @@ from test_skillopt import MODE_ID, TRAIN_IDS, VAL_IDS, _patch_mode, _write_parts
 from test_validation_selection import FitProbe, _level
 
 FIXTURE = Path(__file__).parent / "fixtures" / "selection_record.json"
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 # ---------------------------------------------------------------------------
 # ScenarioProbe: FitProbe that can simulate train failures
@@ -51,8 +52,6 @@ class ScenarioProbe(FitProbe):
     FAIL_LEVELS: set[int] = set()
 
     def run(self, workdir, **kwargs):  # type: ignore[no-untyped-def]
-        from pathlib import Path
-
         level = int(self.values()["level"])
         if level in ScenarioProbe.FAIL_LEVELS:
             return RunResult(exit_ok=False, error="simulated train failure",
@@ -388,44 +387,6 @@ def _real_scenarios() -> list[ScenarioSpec]:
 # ---------------------------------------------------------------------------
 
 
-def _map_scenario(
-    scenario: ScenarioSpec,
-) -> tuple[dict[int, float], dict[int, float], set[int], list[list[int]]]:
-    """Map scenario labels to FitProbe integer levels.
-
-    Returns (train_map, val_map, fail_levels, plan) where plan is a list of
-    lists of child levels, one per epoch.
-    """
-    train_map: dict[int, float] = {}
-    val_map: dict[int, float] = {}
-    fail_levels: set[int] = set()
-    plan: list[list[int]] = []
-
-    level = 0
-    for rnd in scenario.rounds:
-        for cspec in rnd.candidates:
-            ts = cspec.get("train_score")
-            if ts is not None:
-                train_map[level] = ts
-            elif not cspec.get("exit_ok", True):
-                fail_levels.add(level)
-            vs = cspec.get("val_score")
-            if vs is not None:
-                val_map[level] = vs
-            level += 1
-
-    for rnd in scenario.rounds[1:]:
-        plan.append([
-            sum(len(r.candidates) for r in scenario.rounds[:i])
-            + j
-            for i, r in enumerate(scenario.rounds)
-            if r is rnd
-            for j in range(len(rnd.candidates))
-        ])
-
-    return train_map, val_map, fail_levels, plan
-
-
 def _map_scenario_simple(
     scenario: ScenarioSpec,
 ) -> tuple[dict[int, float], dict[int, float], set[int], list[list[int]]]:
@@ -457,7 +418,6 @@ def _map_scenario_simple(
             level += 1
         plan.append(round_levels)
 
-    # plan[0] is the seed (not proposed); plan[1:] are proposal rounds
     proposal_plan = plan[1:]
     return train_map, val_map, fail_levels, proposal_plan
 
@@ -466,19 +426,15 @@ def _map_scenario_simple(
 # Patching context
 # ---------------------------------------------------------------------------
 
+_VAL_MAP: dict[int, float] = {}
+
 
 @contextlib.contextmanager
-def _patched_scores(
-    train_map: dict[int, float],
-    val_map: dict[int, float],
-    fail_levels: set[int],
-):  # type: ignore[no-untyped-def]
-    """Patch ScenarioProbe.TRAIN, .FAIL_LEVELS, ValidationGate.val_score,
-    Loop._seed_population, and expensive I/O helpers for the duration of a
-    scenario run."""
+def _patched_harness():  # type: ignore[no-untyped-def]
+    """Patch Loop I/O helpers and ``ValidationGate.val_score`` for the
+    duration of a full generation run.  Score maps are set per-scenario
+    via ``_set_scenario_scores``."""
     saved = {
-        "TRAIN": dict(getattr(ScenarioProbe, "TRAIN", {})),
-        "FAIL": set(getattr(ScenarioProbe, "FAIL_LEVELS", set())),
         "val_score": ValidationGate.val_score,
         "seed_pop": Loop._seed_population,
         "journal": Loop._journal,
@@ -488,6 +444,7 @@ def _patched_scores(
         "write_cand": Loop._write_candidate,
         "save_strat": Loop._save_strategy_state,
         "measure": Loop._measure,
+        "context": Loop._context,
     }
 
     def _fast_measure(  # type: ignore[no-untyped-def]
@@ -495,27 +452,23 @@ def _patched_scores(
         gold_feedback=False, item_gate=None, item_slots=False,
         stop_event=None, repeats=None, traces=True,
     ):
-        workdir.mkdir(parents=True, exist_ok=True)
         from refactory_dsh import task as _t
 
+        workdir.mkdir(parents=True, exist_ok=True)
         _t.write_subset(workdir, part, self.config.holdout, seed=seed,
                         gold_feedback=gold_feedback)
         if self._parts_manifest is not None:
             manifest_src = self.root / _t.MANIFEST
             if manifest_src.exists():
-                import shutil as _sh
-
-                _sh.copyfile(manifest_src, workdir / _t.MANIFEST)
+                shutil.copyfile(manifest_src, workdir / _t.MANIFEST)
         mode = self.mode_class(state=candidate.state)
         result = mode.evaluate(workdir)
         with self._state_lock:
             self.measurements += 1
         return result, {"count": 1, "complete": True}
 
-    ScenarioProbe.TRAIN = dict(train_map)
-    ScenarioProbe.FAIL_LEVELS = set(fail_levels)
     ValidationGate.val_score = staticmethod(  # type: ignore[assignment]
-        lambda run, cand: float(val_map.get(_level(cand), 0.0))
+        lambda run, cand: float(_VAL_MAP.get(_level(cand), 0.0))
     )
     Loop._seed_population = lambda self, seed: None  # type: ignore[assignment]
     Loop._journal = lambda self, *a, **kw: None  # type: ignore[assignment]
@@ -526,11 +479,23 @@ def _patched_scores(
     Loop._save_strategy_state = lambda self, *a, **kw: None  # type: ignore[assignment]
     Loop._measure = _fast_measure  # type: ignore[assignment]
 
+    from refactory_dsh.optim.base import ProposalContext
+
+    def _minimal_context(self):  # type: ignore[no-untyped-def]
+        return ProposalContext(
+            epoch=self.epoch, generation=self.generation,
+            mode_name=self.mode_id, elite=int(self.config.elite),
+            val_scores=self._val_scores(),
+            val_item_scores=self._val_item_scores(),
+            preset=self.config.edit_preset,
+            selection=self.selection_mode(),
+        )
+
+    Loop._context = _minimal_context  # type: ignore[assignment]
+
     try:
         yield
     finally:
-        ScenarioProbe.TRAIN = saved["TRAIN"]
-        ScenarioProbe.FAIL_LEVELS = saved["FAIL"]
         ValidationGate.val_score = saved["val_score"]  # type: ignore[assignment]
         Loop._seed_population = saved["seed_pop"]  # type: ignore[assignment]
         Loop._journal = saved["journal"]  # type: ignore[assignment]
@@ -539,7 +504,20 @@ def _patched_scores(
         Loop._write_state = saved["write_state"]  # type: ignore[assignment]
         Loop._write_candidate = saved["write_cand"]  # type: ignore[assignment]
         Loop._save_strategy_state = saved["save_strat"]  # type: ignore[assignment]
+        Loop._context = saved["context"]  # type: ignore[assignment]
         Loop._measure = saved["measure"]  # type: ignore[assignment]
+
+
+def _set_scenario_scores(
+    train_map: dict[int, float],
+    val_map: dict[int, float],
+    fail_levels: set[int],
+) -> None:
+    """Update the per-scenario score maps (called inside ``_patched_harness``)."""
+    global _VAL_MAP  # noqa: PLW0603
+    ScenarioProbe.TRAIN = dict(train_map)
+    ScenarioProbe.FAIL_LEVELS = set(fail_levels)
+    _VAL_MAP = dict(val_map)
 
 
 # ---------------------------------------------------------------------------
@@ -552,114 +530,103 @@ def _run_scenario(
     selection_mode: str,
     picker_name: str,
     batch_size: int,
-    seed: int = 42,
-    *,
-    work_dir: Path | None = None,
+    plan: list[list[int]],
+    parts_path: Path,
+    work_dir: Path,
 ) -> ScenarioResult:
-    """Drive the real Loop through ``scenario`` and capture decisions."""
+    """Drive the real Loop through ``scenario`` and capture decisions.
 
-    train_map, val_map, fail_levels, plan = _map_scenario_simple(scenario)
+    Called inside ``_patched_harness`` and ``_patch_mode`` contexts, with
+    score maps already set via ``_set_scenario_scores``.
+    """
+    n_epochs = max(1, len(scenario.rounds) - 1)
+    config = LoopConfig(
+        epochs=n_epochs,
+        batch_size=batch_size,
+        optimizer="random",
+        seed=42,
+        runs_root=work_dir / "run",
+        allowed_ops=("set_knob",),
+        max_evaluations=500,
+        holdout=0.0,
+        selection=selection_mode,
+        parent_picker=picker_name,
+        parts_manifest=str(parts_path),
+        early_stop_patience=scenario.early_stop_patience,
+        early_stop_at_full_val=scenario.early_stop_at_full_val,
+        max_concurrent_evaluations=1,
+    )
 
-    tmp_dir = work_dir or Path(tempfile.mkdtemp(prefix="selrec_"))
-    own_tmp = work_dir is None
-    try:
-        parts_path = _write_parts(tmp_dir)
+    loop = Loop(MODE_ID, config, project=PROJECT_ROOT)
 
-        with _patched_scores(train_map, val_map, fail_levels):
-            with _patch_mode(ScenarioProbe):
-                n_epochs = max(1, len(scenario.rounds) - 1)
-                config = LoopConfig(
-                    epochs=n_epochs,
-                    batch_size=batch_size,
-                    optimizer="random",
-                    seed=seed,
-                    runs_root=tmp_dir / "run",
-                    allowed_ops=("set_knob",),
-                    max_evaluations=500,
-                    holdout=0.0,
-                    selection=selection_mode,
-                    parent_picker=picker_name,
-                    parts_manifest=str(parts_path),
-                    early_stop_patience=scenario.early_stop_patience,
-                    early_stop_at_full_val=scenario.early_stop_at_full_val,
-                )
+    proposer = ScenarioOptimizer(list(plan))
+    if picker_name and hasattr(loop.optimizer, "proposer"):
+        loop.optimizer.proposer = proposer  # type: ignore[union-attr]
+    else:
+        loop.optimizer = proposer
 
-                loop = Loop(MODE_ID, config, project=Path("."))
+    snapshots: list[dict[str, Any]] = []
+    _original_gate_pop = Loop._gate_population
 
-                # Replace the proposer, preserving the PickedParent wrapper
-                proposer = ScenarioOptimizer(list(plan))
-                if picker_name and hasattr(loop.optimizer, "proposer"):
-                    loop.optimizer.proposer = proposer  # type: ignore[union-attr]
-                else:
-                    loop.optimizer = proposer
+    def _capturing_gate_pop(run):  # type: ignore[no-untyped-def]
+        cache_before = len(loop._gate().cache)
+        acc_before = len(loop._gate_accepted)
+        rej_before = len(loop._gate_rejected)
 
-                # Hook _gate_population to capture per-round decisions
-                snapshots: list[dict[str, Any]] = []
-                _original_gate_pop = Loop._gate_population
+        _original_gate_pop(loop, run)
 
-                def _capturing_gate_pop(run):  # type: ignore[no-untyped-def]
-                    cache_before = len(loop._gate().cache)
-                    acc_before = len(loop._gate_accepted)
-                    rej_before = len(loop._gate_rejected)
+        new = (len(loop._gate_accepted) - acc_before
+               + len(loop._gate_rejected) - rej_before)
+        if new == 0:
+            return
 
-                    _original_gate_pop(loop, run)
-
-                    new = (len(loop._gate_accepted) - acc_before
-                           + len(loop._gate_rejected) - rej_before)
-                    if new == 0:
-                        return
-
-                    loop._count_stale_epoch()
-                    gate = loop._gate()
-                    early = loop._early_stop_reason() if loop.config.val_gate else ""
-
-                    snapshots.append({
-                        "gate_accepted": list(loop._gate_accepted),
-                        "gate_rejected": list(loop._gate_rejected),
-                        "incumbent": gate.current_id,
-                        "best_id": gate.best_id,
-                        "best_score": gate.best_score,
-                        "leaderboard": [c.id for c in loop.leaderboard()],
-                        "pool": ([c.id for c in loop._pool()]
-                                 if loop.selection_mode() == "pool" else []),
-                        "early_stop": early,
-                        "val_evaluations": len(gate.cache) - cache_before,
-                        "parents": [c.id for c in loop.select_parents(batch_size)],
-                    })
-
-                loop._gate_population = _capturing_gate_pop  # type: ignore[assignment]
-
-                loop.run()
-
-        # Build the result from snapshots
+        loop._count_stale_epoch()
         gate = loop._gate()
-        total_val = sum(s["val_evaluations"] for s in snapshots)
+        early = loop._early_stop_reason() if loop.config.val_gate else ""
 
-        decisions = [
-            DecisionRecord(
-                round_idx=i,
-                gate_accepted=s["gate_accepted"],
-                gate_rejected=s["gate_rejected"],
-                pool=s["pool"],
-                incumbent=s["incumbent"],
-                leaderboard=s["leaderboard"],
-                parents_chosen=s["parents"],
-                picker_name=picker_name or "default",
-                early_stop=s["early_stop"],
-                val_evaluations=s["val_evaluations"],
-            )
-            for i, s in enumerate(snapshots)
-        ]
+        snapshots.append({
+            "gate_accepted": list(loop._gate_accepted),
+            "gate_rejected": list(loop._gate_rejected),
+            "incumbent": gate.current_id,
+            "best_id": gate.best_id,
+            "best_score": gate.best_score,
+            "leaderboard": [c.id for c in loop.leaderboard()],
+            "pool": ([c.id for c in loop._pool()]
+                     if loop.selection_mode() == "pool" else []),
+            "early_stop": early,
+            "val_evaluations": len(gate.cache) - cache_before,
+            "parents": [c.id for c in loop.select_parents(batch_size)],
+        })
 
-        return ScenarioResult(
-            decisions=decisions,
-            final_winner=gate.best_id,
-            final_winner_val=gate.best_score if gate.best_id else None,
-            total_val_evaluations=total_val,
+    loop._gate_population = _capturing_gate_pop  # type: ignore[assignment]
+
+    loop.run()
+
+    gate = loop._gate()
+    total_val = sum(s["val_evaluations"] for s in snapshots)
+
+    decisions = [
+        DecisionRecord(
+            round_idx=i,
+            gate_accepted=s["gate_accepted"],
+            gate_rejected=s["gate_rejected"],
+            pool=s["pool"],
+            incumbent=s["incumbent"],
+            leaderboard=s["leaderboard"],
+            parents_chosen=s["parents"],
+            picker_name=picker_name or "default",
+            early_stop=s["early_stop"],
+            val_evaluations=s["val_evaluations"],
         )
-    finally:
-        if own_tmp:
-            shutil.rmtree(tmp_dir, ignore_errors=True)
+        for i, s in enumerate(snapshots)
+    ]
+
+    return ScenarioResult(
+        decisions=decisions,
+        final_winner=gate.best_id,
+        final_winner_val=gate.best_score if gate.best_id else None,
+        total_val_evaluations=total_val,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -690,31 +657,45 @@ def _result_to_dict(r: ScenarioResult) -> dict[str, Any]:
     }
 
 
-def generate_record() -> dict[str, Any]:
-    """Run all scenarios under all compatible combinations and return the record."""
+def generate_record(*, keys: set[str] | None = None) -> dict[str, Any]:
+    """Run scenarios under compatible combinations and return the record.
+
+    When *keys* is given, only the matching ``scenario|mode|picker|batch``
+    entries are generated (for fast sabotage checks).
+    """
     record: dict[str, Any] = {}
     tmp_root = Path(tempfile.mkdtemp(prefix="selrec_root_"))
+    parts_path = _write_parts(tmp_root)
     combo = 0
 
     try:
-        all_scenarios = [(fn, fn()) for fn in SYNTHETIC_SCENARIOS]
-        for real in _real_scenarios():
-            all_scenarios.append((None, real))
+        all_scenarios: list[ScenarioSpec] = [fn() for fn in SYNTHETIC_SCENARIOS]
+        all_scenarios.extend(_real_scenarios())
 
-        for _fn, scenario in all_scenarios:
-            for mode in SELECTION_MODES:
-                for picker in PICKERS:
-                    for batch in BATCH_SIZES:
-                        if not _is_compatible(mode, picker, batch):
-                            continue
-                        key = f"{scenario.label}|{mode}|{picker or 'none'}|batch{batch}"
-                        work = tmp_root / str(combo)
-                        work.mkdir()
-                        result = _run_scenario(
-                            scenario, mode, picker, batch, work_dir=work,
-                        )
-                        record[key] = _result_to_dict(result)
-                        combo += 1
+        with _patch_mode(ScenarioProbe):
+            with _patched_harness():
+                for scenario in all_scenarios:
+                    train_map, val_map, fail_levels, plan = (
+                        _map_scenario_simple(scenario))
+                    _set_scenario_scores(train_map, val_map, fail_levels)
+
+                    for mode in SELECTION_MODES:
+                        for picker in PICKERS:
+                            for batch in BATCH_SIZES:
+                                if not _is_compatible(mode, picker, batch):
+                                    continue
+                                key = (f"{scenario.label}|{mode}"
+                                       f"|{picker or 'none'}|batch{batch}")
+                                if keys is not None and key not in keys:
+                                    continue
+                                work = tmp_root / str(combo)
+                                work.mkdir()
+                                result = _run_scenario(
+                                    scenario, mode, picker, batch,
+                                    list(plan), parts_path, work,
+                                )
+                                record[key] = _result_to_dict(result)
+                                combo += 1
     finally:
         shutil.rmtree(tmp_root, ignore_errors=True)
 
