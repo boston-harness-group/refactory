@@ -355,6 +355,9 @@ part of the structure produces it.
 - Say where each pattern comes from: a step (node), an edge, a setting, or the
   pipeline's structure.
 - Patterns must generalise beyond specific items.
+- For each pattern, say whether the same pattern also appears in the failed items you
+  can see (contrast), or say you cannot tell. This distinguishes a pattern that
+  predicts success from one that happens everywhere.
 - Do not propose changes: say what happens, not what to do.
 
 {claims}
@@ -385,6 +388,7 @@ FAILURE_ANSWER = f"""Write one JSON object and nothing else:
  "findings": [{{"finding": "<what goes wrong, in one or two sentences>",
                {_WHERE},
                {_STEPS},
+               "can_step_fix_it": "<can the step showing the symptom fix it? e.g. a verification step that has no access to the correct answer cannot detect a plausible wrong value; short>",
                "items": ["<item id>", ...],
                "impact": "high|medium|low",
                "evidence": ["<a short verbatim quote from a trace>", ...]}}]}}
@@ -395,6 +399,8 @@ Rules:
 - Every finding names the items it covers (ids from this batch) and quotes them.
 - "steps" is optional: give the parts the items show, with step ids from the pipeline;
   leave out any part that does not apply or cannot be told from them.
+- "can_step_fix_it": whether the step where the symptom shows could fix the problem on
+  its own, or whether the fix must come from elsewhere.
 - "impact": how much of the score it costs.
 """
 
@@ -403,6 +409,7 @@ SUCCESS_ANSWER = f"""Write one JSON object and nothing else:
 {{"batch_size": <number of items you read>,
  "findings": [{{"finding": "<what the passing items do right, in one or two sentences>",
                {_WHERE},
+               "also_in_failures": "<does the same pattern appear in failed items you can see? yes/no/cannot tell>",
                "items": ["<item id>", ...],
                "impact": "high|medium|low",
                "evidence": ["<a short verbatim quote from a trace>", ...]}}]}}
@@ -410,6 +417,8 @@ SUCCESS_ANSWER = f"""Write one JSON object and nothing else:
 Rules:
 - At most {{limit}} findings, the most important first; fewer if warranted.
 - Every finding names the items it covers (ids from this batch) and quotes them.
+- "also_in_failures": whether the same pattern also appears in the failed items (contrast).
+  A pattern that also appears in failures does not predict success.
 - "impact": how much of the score it carries.
 """
 
@@ -498,6 +507,86 @@ def _analyst_frame(ctx: Any, kind: str, index: int, total: int, count: int,
             f"\n\n## Answer\n{answer}")
 
 
+# ── flip-item contrast ────────────────────────────────────────────────────
+
+
+CONTRAST_SYSTEM = """\
+You are a contrast analyst for a multi-step AI pipeline: a graph of steps (nodes)
+connected by edges, each step configured by settings (knobs) such as its prompt.
+
+You are given items that PASSED under one candidate pipeline and FAILED under another.
+For each item you see the passing and failing traces side by side. Find what differed
+between the two runs that made one succeed and the other fail.
+
+## Analysis process
+1. For each item, compare the passing and failing traces step by step.
+2. Find the step(s) where the traces diverge and what the passing run did differently.
+3. Identify COMMON contrast patterns across items (not individual edge cases).
+4. Say where each pattern comes from: a step (node), an edge, a setting, or the
+   pipeline's structure.
+5. Do not propose changes: say what differed, not what to do.
+
+{claims}
+
+You reply with JSON only.""".format(claims=evidence.CLAIMS)
+
+CONTRAST_ANSWER = f"""Write one JSON object and nothing else:
+
+{{"batch_size": <number of items you compared>,
+ "findings": [{{"finding": "<what differed between passing and failing runs>",
+               {_WHERE},
+               {_STEPS},
+               "items": ["<item id>", ...],
+               "impact": "high|medium|low",
+               "evidence": ["<a short verbatim quote from one of the traces>", ...]}}]}}
+
+Rules:
+- At most {{limit}} findings, the most important first; fewer if warranted, none if
+  nothing is common.
+- Every finding names the items it covers (ids from this batch) and quotes them.
+- "steps" is optional: give the parts the items show.
+- "impact": how much of the score the contrast explains.
+"""
+
+
+def contrast_batch(ctx: Any, flip_items: Sequence[Mapping[str, Any]],
+                   pipeline: str, room: int = ANALYST_ROOM
+                   ) -> tuple[str, dict[str, int]] | None:
+    """One contrast analyst call: for each flip item, the passing and failing traces side
+    by side. Returns ``(prompt, clip_counts)`` or ``None`` without flip items."""
+    if not flip_items:
+        return None
+    settled = shown_settled(pipeline, ctx.item_records)
+    answer = CONTRAST_ANSWER.replace("{limit}", str(FINDINGS_PER_ANALYST))
+    head = (f"# Contrast analysis -- items that pass under one candidate and fail under another\n\n"
+            f"Mode: `{ctx.mode_name}`.\n\n"
+            f"## The pipeline\n{pipeline}\n\n"
+            f"{_objective_text(ctx)}{_memory_text(ctx)}"
+            f"## Items with both passing and failing runs ({len(flip_items)} item(s))\n"
+            f"For each item: a passing trace and a failing trace. Each trace reads as: "
+            f"{evidence.TRACE_FORM}.\n\n")
+    tail = f"\n\n## Answer\n{answer}"
+    blocks = []
+    clip = {"items": 0, "chars": 0}
+    item_room = max(ITEM_FLOOR, (room - len(CONTRAST_SYSTEM) - len(head) - len(tail)) // max(1, len(flip_items)) // 2)
+    for fi in flip_items:
+        item_id = fi["item"]
+        pass_text = item_text(fi["pass_record"], settled=settled)
+        fail_text = item_text(fi["fail_record"], settled=settled)
+        if len(pass_text) > item_room:
+            pass_text = fit_item(fi["pass_record"], item_room, "contrast room", settled=settled)
+            clip["items"] += 1
+            clip["chars"] += len(item_text(fi["pass_record"], settled=settled)) - len(pass_text)
+        if len(fail_text) > item_room:
+            fail_text = fit_item(fi["fail_record"], item_room, "contrast room", settled=settled)
+            clip["items"] += 1
+            clip["chars"] += len(item_text(fi["fail_record"], settled=settled)) - len(fail_text)
+        blocks.append(f"### Item `{item_id}` (pass rate {fi['pass_rate']:.0%})\n\n"
+                      f"**Passing run:**\n{pass_text}\n\n"
+                      f"**Failing run:**\n{fail_text}")
+    return head + "\n\n".join(blocks) + tail, clip
+
+
 # ── what an analyst wrote ──────────────────────────────────────────────────
 
 
@@ -562,8 +651,10 @@ def finding(raw: Any, kind: str, items: set[str]) -> dict[str, Any] | None:
     except (TypeError, ValueError):
         merged_from = 1
     kept = [i for i in cited if i in items]
+    can_fix = str(raw.get("can_step_fix_it") or "").strip()
     return {"source": source, "finding": text, "where": _where(raw.get("where")),
             "steps": _steps(raw.get("steps")),
+            **({"can_step_fix_it": can_fix} if can_fix else {}),
             "items": kept, "not_in_batch": [i for i in cited if i not in items],
             "support": len(kept), "impact": impact if impact in IMPACTS else "",
             "batches": merged_from, "evidence": _strings(raw.get("evidence"))[:EVIDENCE_PER_FINDING]}
@@ -729,9 +820,14 @@ def finding_line(rank: int, entry: Mapping[str, Any]) -> str:
         head.append(f"from {entry['batches']} findings")
     roles = steps_text(entry.get("steps")) if entry.get("source", "failure") == "failure" else ""
     action = f" -- steps: {roles}" if roles else ""
+    can_fix = entry.get("can_step_fix_it")
+    fix_note = f" -- can the step fix it: {_cut(can_fix)}" if can_fix else ""
+    targeted = entry.get("already_targeted")
+    target_note = f" -- ALREADY TARGETED in {targeted}" if targeted else ""
     quotes = [f'"{_cut(q)}"' for q in entry.get("evidence") or ()]
     return (f"{rank}. [{'; '.join(head)}] {_cut(entry.get('finding'))} "
-            f"-- where: {_where_text(entry.get('where') or {})}{action}"
+            f"-- where: {_where_text(entry.get('where') or {})}{action}{fix_note}"
+            f"{target_note}"
             + (" -- evidence: " + " | ".join(quotes) if quotes else ""))
 
 
@@ -750,25 +846,67 @@ def steps_text(steps: Any) -> str:
     return "; ".join(parts)
 
 
-def section_lines(analysis: Mapping[str, Any] | None) -> list[str]:
+def _mark_targeted(findings: list[dict[str, Any]],
+                   targets: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    """Mark findings that match earlier proposals' targets as already targeted."""
+    if not targets:
+        return findings
+    for f in findings:
+        text = str(f.get("finding", "")).lower()
+        where = f.get("where") or {}
+        nodes = {str(n).lower() for n in where.get("nodes") or ()}
+        knobs = {str(k).lower() for k in where.get("knobs") or ()}
+        for t in targets:
+            t_text = str(t.get("targets", "")).lower()
+            t_edits = t.get("edits") or []
+            t_round = t.get("round")
+            t_change = t.get("change", "")
+            # Match by overlapping step/knob names or similar finding text.
+            t_names = set()
+            for e in (t_edits if isinstance(t_edits, list) else [t_edits]):
+                if isinstance(e, dict):
+                    for key in ("name", "target", "node"):
+                        v = e.get(key)
+                        if isinstance(v, str):
+                            t_names.add(v.lower())
+                        elif isinstance(v, dict) and v.get("id"):
+                            t_names.add(str(v["id"]).lower())
+            overlap = bool(nodes & t_names or knobs & t_names)
+            if overlap or (len(text) > 20 and len(t_text) > 20
+                           and any(word in t_text for word in text.split()[:5] if len(word) > 4)):
+                label = f"round {t_round}" if t_round is not None else "earlier"
+                if t_change:
+                    label += f"; score change: {t_change}"
+                f["already_targeted"] = label
+                break
+    return findings
+
+
+def section_lines(analysis: Mapping[str, Any] | None,
+                  proposal_targets: Sequence[Mapping[str, Any]] = ()) -> list[str]:
     """"What the analysts found, ranked", for the proposal request; nothing without an
     analysis."""
     if not analysis:
         return []
     done = [b for b in analysis.get("batches") or () if not b.get("error")]
     by_kind = {kind: [b for b in done if b.get("kind") == kind] for kind in KINDS}
+    contrast = [b for b in done if b.get("kind") == "contrast"]
+    desc = (f"{sum(len(b['items']) for b in by_kind['failure'])} failed item(s) in "
+            f"{len(by_kind['failure'])} batch(es) and "
+            f"{sum(len(b['items']) for b in by_kind['success'])} passed item(s) in "
+            f"{len(by_kind['success'])} batch(es) of up to {analysis.get('group_size')}")
+    if contrast:
+        desc += (f", plus {sum(len(b['items']) for b in contrast)} item(s) compared "
+                 "in a contrast batch (same item, passing vs failing run)")
     lines = [
         "## What the analysts found, ranked",
         f"Before this request, analysts read the train items of the candidate being edited "
         f"in full (each step's input and output, the answer and the grader's feedback): "
-        f"{sum(len(b['items']) for b in by_kind['failure'])} failed item(s) in "
-        f"{len(by_kind['failure'])} batch(es) and "
-        f"{sum(len(b['items']) for b in by_kind['success'])} passed item(s) in "
-        f"{len(by_kind['success'])} batch(es) of up to {analysis.get('group_size')}. Their "
+        f"{desc}. Their "
         "findings were merged and ordered by how many items each covers, then its impact; "
         "every finding is shown. Each says what happens, where in the pipeline, on which items, "
         "with quotes from the traces; none says what to change."]
-    found = list(analysis.get("findings") or ())
+    found = _mark_targeted(list(analysis.get("findings") or ()), proposal_targets)
     if not found:
         lines.append("(The analysts found no common pattern.)")
     lines += [finding_line(rank, entry) for rank, entry in enumerate(found, 1)]

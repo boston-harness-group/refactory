@@ -6369,6 +6369,9 @@ class Loop(OuterLoop):
             step_routes=(self.optimizer.step_routes.offered()
                          if getattr(self.optimizer, "step_routes", None) is not None else {}),
             time_facts=self._time_facts(board),
+            summary=self._summary_data(board),
+            flip_items=self._flip_items() if self.config.analysts else [],
+            proposal_targets=self._proposal_targets() if self.config.analysts else [],
         )
 
     def _checkpoint_board(self, n: int) -> list[Candidate]:
@@ -6532,6 +6535,89 @@ class Loop(OuterLoop):
             if values:
                 scores.append(sum(values) / len(values))
         return round(max(scores) - min(scores), 3) if len(scores) > 1 else None
+
+    def _summary_data(self, board: list[Candidate]) -> dict[str, Any]:
+        """Computed summary data for the request (`optim.request_summary`)."""
+        from refactory_dsh.optim import request_summary
+
+        edited_id = self._edited_id(board)
+        best_id = board[0].id if board else None
+        edited_records = list(self._train_item_records.get(edited_id or "", []))
+        best_records = (list(self._train_item_records.get(best_id or "", []))
+                        if best_id and best_id != edited_id else None)
+        # The analysis findings for by-step, when available.
+        last_analysis = None
+        for entry in reversed(self._analyses or []):
+            if entry.get("candidate") == edited_id:
+                last_analysis = entry
+                break
+        findings = list(last_analysis.get("findings") or ()) if last_analysis else None
+        # History with parent scores for change_history.
+        history_with_parents = []
+        by_id = {c.id: c for c in self.population}
+        for c in [c for c in self.population if c.evaluated]:
+            parent = by_id.get(c.parent or "")
+            history_with_parents.append({
+                "edits": c.own_edits(), "score": c.score,
+                "parent_score": parent.score if parent else None})
+        return {
+            "noise": request_summary.build_noise(
+                self._records_by_epoch, self._train_item_records),
+            "item_stability": request_summary.build_item_stability(
+                self._train_item_records),
+            "by_group": request_summary.build_by_group(edited_records, best_records),
+            "by_step": request_summary.build_by_step(edited_records, findings),
+            "change_history": request_summary.build_change_history(history_with_parents),
+        }
+
+    def _flip_items(self) -> list[dict[str, Any]]:
+        """Items that passed under some candidate and failed under another in this run,
+        for the flip-item contrast analyst batch. Each: ``{"item", "pass_rate",
+        "scorings", "pass_record", "fail_record"}``. Capped at 8, picked by
+        pass rate closest to 0.5."""
+        by_item: dict[str, dict[str, dict[str, Any]]] = {}
+        for cid, records in self._train_item_records.items():
+            for r in records:
+                item_id = str(r.get("id", ""))
+                if item_id:
+                    by_item.setdefault(item_id, {})[cid] = r
+        flips = []
+        for item_id, cid_records in by_item.items():
+            passes = [(cid, r) for cid, r in cid_records.items() if r.get("passed")]
+            fails = [(cid, r) for cid, r in cid_records.items() if not r.get("passed")]
+            if passes and fails:
+                rate = len(passes) / (len(passes) + len(fails))
+                flips.append({"item": item_id, "pass_rate": round(rate, 3),
+                              "scorings": len(passes) + len(fails),
+                              "pass_record": passes[0][1],
+                              "fail_record": fails[0][1]})
+        flips.sort(key=lambda f: abs(f["pass_rate"] - 0.5))
+        return flips[:8]
+
+    def _proposal_targets(self) -> list[dict[str, Any]]:
+        """What earlier proposals in this run targeted, for marking analyst findings as
+        already targeted. Each: ``{"round", "targets", "change"}``."""
+        targets = []
+        for cid, record in self.proposals.items():
+            if not isinstance(record, dict):
+                continue
+            prediction = str(record.get("prediction") or "")
+            addresses = str(record.get("addresses") or "")
+            rationale = str(record.get("rationale") or "")
+            edits = record.get("edits") or []
+            epoch = record.get("epoch")
+            if not (prediction or addresses or rationale):
+                continue
+            candidate = next((c for c in self.population if c.id == cid), None)
+            change = ""
+            if candidate is not None:
+                parent = next((c for c in self.population if c.id == candidate.parent), None)
+                if parent is not None and candidate.score is not None and parent.score is not None:
+                    change = f"{candidate.score - parent.score:+.4g}"
+            targets.append({
+                "round": epoch, "targets": " ".join(filter(None, [addresses, prediction])),
+                "change": change, "edits": edits})
+        return targets
 
     def _reply_judge(self) -> Any:
         """How a step's reply is read as an item's answer, from the mode's Tasks

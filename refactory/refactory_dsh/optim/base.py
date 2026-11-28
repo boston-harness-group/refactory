@@ -1256,6 +1256,17 @@ class ProposalContext:
     #: "parent"}``), so the model does not duplicate them. Shown as facts, not
     #: instructions.
     prior_proposals: list[dict[str, Any]] = field(default_factory=list)
+    #: Computed summary data (`optim.request_summary`): noise, item stability, by group,
+    #: by step and history by kind of change, from the loop's own records. Empty says
+    #: nothing.
+    summary: dict[str, Any] = field(default_factory=dict)
+    #: Flip items for the analyst stage: items that passed under some candidate and failed
+    #: under another in this run, each with its passing and failing candidate ids, for the
+    #: flip-item contrast batch (`optim.analysts`). Empty says nothing.
+    flip_items: list[dict[str, Any]] = field(default_factory=list)
+    #: What earlier proposals in this run targeted (each: ``{"round", "targets", "change"}``),
+    #: for marking analyst findings as already targeted. Empty says nothing.
+    proposal_targets: list[dict[str, Any]] = field(default_factory=list)
 
     def _settled(self) -> frozenset[str]:
         """The lines an item's step does not repeat (`settled_for`) over this request's
@@ -1466,6 +1477,7 @@ class ProposalContext:
                              gated=self.selection),
             *time_lines(self.time_facts),
             *([self.steering, ""] if self.steering.strip() else []),
+            *_summary_section(self.summary),
             *_strategy_section(self.strategy, self.strategy_name),
             # 1-2: the score (above), then the pipeline once, in the view's lines.
             "## The pipeline you may edit",
@@ -1487,7 +1499,7 @@ class ProposalContext:
         # 4: what the analysts found, failures and successes.
         if self.analysis is not None:
             from .analysts import section_lines
-            sections += ["", *section_lines(self.analysis)]
+            sections += ["", *section_lines(self.analysis, self.proposal_targets)]
         # 5: the steps' settings, what the author says, the blocks it may insert.
         sections += [
             "",
@@ -1506,7 +1518,9 @@ class ProposalContext:
                "to improve the number.", ""] if self.insertable else []),
             *_blocks_section(self.insertable, self.catalogue),
         ]
-        # 6: the items themselves, chosen rather than clipped.
+        # 6: the items themselves, chosen rather than clipped. When analysts ran, inline
+        # traces are omitted: the proposer may ask for specific items' traces via
+        # ``need_traces`` in its reply.
         if self.item_records:
             sections += ["", *_item_evidence(self.item_records)]
             sections += ["", *_trajectories(
@@ -1515,7 +1529,8 @@ class ProposalContext:
                 analysed=(None if self.analysis is None
                           else list(self.analysis.get("findings") or ())),
                 omissions=self.omissions, settled=self._settled(),
-                shown_room=self.shown_items_room, sizes=self.fit_sizes)]
+                shown_room=self.shown_items_room, sizes=self.fit_sizes,
+                inline_traces=self.analysis is None)]
         if self.prior_proposals:
             sections += ["", *_prior_proposals_lines(self.prior_proposals)]
         # 7: the reference, last and once: the operations, how nodes compose, what each
@@ -1572,7 +1587,7 @@ class ProposalContext:
         sections += ["", "## Answer", answer_instructions(
             self.catalogue, parsimony=self.parsimony,
             items=_item_count(self.item_records) if self.score_is_item_mean else 0,
-            code_nodes=self.code_nodes)]
+            code_nodes=self.code_nodes, analysts_ran=self.analysis is not None)]
         if self.max_edits > 1:
             sections += ["", bundle_instructions(self.max_edits, self.catalogue,
                                                  proposals=self.proposals)]
@@ -1820,6 +1835,15 @@ def levels_instructions(levels: Sequence[str], *, code_nodes: bool = False) -> l
 #: Keys of ``ProposalContext.strategy`` that are not a decision of the outer loop: the
 #: run's resolved search contract rides in the same dict and is not rendered here.
 _NOT_DECISIONS = ("search_contract",)
+def _summary_section(summary: Mapping[str, Any] | None) -> list[str]:
+    """The computed summary from the run's own records (`optim.request_summary`)."""
+    if not summary:
+        return []
+    from .request_summary import section_lines
+
+    return [*section_lines(summary), ""]
+
+
 #: Decision keys said first, as sentences, in this order.
 _DECISION_LEAD = ("purpose", "why")
 
@@ -3041,11 +3065,13 @@ def compute_policy(parsimony: float | None, *, item_mean: bool = False,
 
 
 def answer_instructions(catalogue: Sequence[dict[str, Any]], *, parsimony: float | None = None,
-                        items: int = 0, code_nodes: bool = False) -> str:
+                        items: int = 0, code_nodes: bool = False,
+                        analysts_ran: bool = False) -> str:
     """The answer format and its rules, with examples for what this run permits.
 
     ``items`` is the number of train items when the raw score is known to be their
     mean (0 otherwise): only then does the size cost line compare a node with one item.
+    ``analysts_ran``: when ``True``, the ``need_traces`` field is offered.
     """
     structural = structural_example(catalogue)
     ops = {op.get("op") for op in catalogue}
@@ -3071,7 +3097,9 @@ def answer_instructions(catalogue: Sequence[dict[str, Any]], *, parsimony: float
            'beside or after what, once it is made>",'] if structural is not None else []),
         '                "prediction": "<expected effect: which steps\' outputs or which '
         'items change, and how>",',
-        '                "confidence": 0.0}]}',
+        '                "confidence": 0.0}]',
+        *((' "need_traces": ["<item id>", ...]',) if analysts_ran else ()),
+        '}',
         "",
         "Rules:",
         '- A parameter move is {"op": "set_knob", "name": "<parameter>", "value": <value>} or, '
@@ -3129,6 +3157,14 @@ def answer_instructions(catalogue: Sequence[dict[str, Any]], *, parsimony: float
         "  you expect and how you could be wrong.",
         "- If the evidence justifies no change, return an empty proposal list and say why.",
     ]
+    if analysts_ran:
+        lines += [
+            '- `need_traces` (optional): up to 3 item ids whose full traces you want to '
+            'read before your final answer. If you include this field, the traces are sent '
+            'in a follow-up message and your final answer is taken from that turn. At most '
+            'one such request per proposal. Only ask when the table above does not give you '
+            'enough to decide.',
+        ]
     return "\n".join(lines) + "\n"
 
 
@@ -3844,7 +3880,8 @@ def _trajectories(records: Sequence[dict[str, Any]], *, budget: int = TRAJECTORY
                   analysed: Sequence[dict[str, Any]] | None = None,
                   omissions: list[dict[str, Any]] | None = None,
                   settled: Collection[str] | None = None,
-                  shown_room: int = 0, sizes: dict[str, int] | None = None) -> list[str]:
+                  shown_room: int = 0, sizes: dict[str, int] | None = None,
+                  inline_traces: bool = True) -> list[str]:
     """Every train item of the candidate being edited, each as `ITEM_FORM` says; an item's
     error is said where "Item results" lists its cause (`error_refs`). ``sizes`` gets the
     characters the items picked and shown in full take (``items``).
@@ -3860,6 +3897,10 @@ def _trajectories(records: Sequence[dict[str, Any]], *, budget: int = TRAJECTORY
     section, which take the readers' place: no reader findings are shown, and the
     items they cite are shown in full first (one per finding in turn, failure findings
     first, each kind in rank order).
+
+    ``inline_traces``: when ``False`` (analysts ran), the "Some items in full" section is
+    omitted; only the "Every item" table is shown. The proposer may then ask for specific
+    items' traces via ``need_traces`` in its reply.
     """
     items = _ordered_items(records)
     if not items:
@@ -3872,18 +3913,24 @@ def _trajectories(records: Sequence[dict[str, Any]], *, budget: int = TRAJECTORY
     refs = error_refs(_pipeline_items(records))
     # How each step runs is said at its first run in the request (`evidence.said_once`).
     how: set[tuple[str, str]] = set()
-    if _all_whole(items, budget):
+    if _all_whole(items, budget) and inline_traces:
         return header + [f"Every item. {ITEM_FORM}",
                          *(line for r in items
                            for line in ("", evidence.said_once(_trajectory(
                                r, ITEM_TEXT_MAX, omissions, settled, refs), how)))]
     if analysed is not None:
-        # The analysts' findings are their own section, before this one; the items they
-        # cite are shown in full first (``_cited_items``).
-        lines = header + [
-            "Not every item is shown in full here. The analysts' ranked findings above "
-            "cover them all; here is a table of every item, then the items the rule below "
-            "picks, each whole."]
+        if not inline_traces:
+            lines = header + [
+                "The analysts' ranked findings above cover every item in full; "
+                "here is a table of every item. You may ask for up to 3 items' full "
+                "traces in your reply (the `need_traces` field)."]
+        else:
+            # The analysts' findings are their own section, before this one; the items they
+            # cite are shown in full first (``_cited_items``).
+            lines = header + [
+                "Not every item is shown in full here. The analysts' ranked findings above "
+                "cover them all; here is a table of every item, then the items the rule below "
+                "picks, each whole."]
         findings = _analysed_findings(analysed)
     else:
         lines = header + [
@@ -3934,6 +3981,23 @@ def _trajectories(records: Sequence[dict[str, Any]], *, budget: int = TRAJECTORY
                          f"{', '.join(str(i) for i in failure.get('items') or ())} -- could "
                          f"not be read: {_clip(failure.get('error'), 300)}; those items are in "
                          "the table.)")
+    if not inline_traces:
+        # No "Some items in full": only the table, with no pointers to items below.
+        from .analysts import metadata_text as _meta_text
+
+        lines += ["", "### Every item",
+                  _table_filled(["item", "outcome", "expected", "predicted", "grader",
+                                 "error", "group", "first wrong step", "history"],
+                         [[r.get("id"), _outcome(r),
+                           _clip(_expected(r), _TABLE_CELL_CHARS),
+                           _clip(r.get("prediction"), _TABLE_CELL_CHARS),
+                           _clip(r.get("fail_reason") if not r.get("passed") else "",
+                                 _TABLE_CELL_CHARS),
+                           _clip(r.get("error_text"), _TABLE_CELL_CHARS),
+                           _clip(_meta_text(r), _TABLE_CELL_CHARS),
+                           _clip(_first_wrong_step(r, analysed), _TABLE_CELL_CHARS),
+                           _history_cell(r, False)] for r in items])]
+        return lines
     failing, passing, cited = _shown_items(items, findings)
     measured: set[tuple[str, str]] = set()
     failing, passing, left_out, cuts = _fit_shown(
@@ -3997,6 +4061,47 @@ def _history_cell(record: Mapping[str, Any], below: bool) -> str:
     if not said:
         return ""
     return "(below)" if below else said.removeprefix("history: ")
+
+
+def render_traces_for_items(item_ids: Sequence[str],
+                            records: Sequence[dict[str, Any]],
+                            settled: Collection[str] | None = None) -> str:
+    """Render full traces for specific items, for a ``need_traces`` follow-up turn."""
+    by_id = {str(r.get("id")): r for r in _ordered_items(records)}
+    refs = error_refs(_pipeline_items(records))
+    how: set[tuple[str, str]] = set()
+    lines = [f"# Full traces for {len(item_ids)} requested item(s)",
+             f"Each item in full: {ITEM_FORM}"]
+    shown = 0
+    for item_id in item_ids:
+        record = by_id.get(item_id)
+        if record is None:
+            lines += ["", f"Item {item_id}: not found in the train items."]
+            continue
+        lines += ["", evidence.said_once(
+            _trajectory(record, ITEM_TEXT_MAX, None, settled, refs), how)]
+        shown += 1
+    if not shown:
+        lines.append("(No matching items found.)")
+    lines += ["", "## Answer",
+              "Now give your final answer: the same JSON object as before "
+              "(diagnosis, proposals, confidence). Do not ask for more traces."]
+    return "\n".join(lines)
+
+
+def _first_wrong_step(record: Mapping[str, Any],
+                      analysed: Sequence[Mapping[str, Any]] | None) -> str:
+    """The step where things first went wrong for this item, from the analysts' findings;
+    empty when not attributed."""
+    item_id = str(record.get("id", ""))
+    if not analysed or not item_id:
+        return ""
+    for f in analysed:
+        steps = f.get("steps") if isinstance(f.get("steps"), Mapping) else {}
+        first = steps.get("first_wrong")
+        if isinstance(first, str) and first and item_id in [str(i) for i in f.get("items") or ()]:
+            return first
+    return ""
 
 
 #: The fields of a core operator's older written-out form (`core_ops`: 'target' and a
