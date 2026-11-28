@@ -180,77 +180,99 @@ def test_section_replay(fixtures: dict, fixture_name: str, entry_idx: int) -> No
 # ── sabotage checks ────────────────────────────────────────────────────
 
 
-def _first_refused(fixtures_list: list[Path]) -> tuple[dict, dict, str]:
-    """Return (fixture, entry, fixture_name) for the first refused entry."""
-    for path in fixtures_list:
-        fixture = _load_fixture(path)
-        for entry in fixture["refusals"]:
-            if not entry["expected"]["accepted"]:
-                return fixture, entry, path.stem
-    pytest.skip("no refused entries in any fixture")
-    raise AssertionError  # unreachable
+def _find_refused_by_code(
+    code: str, fixtures_map: dict[str, dict[str, Any]],
+) -> tuple[dict, dict, str] | None:
+    """Return (fixture, entry, fixture_name) for the first entry refused with *code*."""
+    for name, fixture in sorted(fixtures_map.items()):
+        for entry in fixture.get("refusals", []):
+            exp = entry["expected"]
+            if not exp["accepted"] and code in exp.get("codes", []):
+                return fixture, entry, name
+    return None
 
 
-def test_sabotage_refusal_message_change() -> None:
-    """Changing one word of a refusal message makes the replay detect it."""
-    fixture, entry, name = _first_refused(_fixture_files())
-    states = fixture["states"]
-    parent_state = states[entry["parent_state_ref"]]
-    seed_state = states[fixture["seed_state_digest"]]
-
+def _replay_one(fixture: dict, entry: dict) -> dict[str, Any]:
     mode_cls = _resolve_mode(fixture["mode"], PROJECT)
     assert mode_cls is not None
+    states = fixture["states"]
+    seed_state = states[fixture["seed_state_digest"]]
+    parent_state = states[entry["parent_state_ref"]]
     protected, graders, invariants = _mode_protection(mode_cls, seed_state)
-
-    actual = replay_attempt(
+    return replay_attempt(
         entry["edit"], parent_state, seed_state, protected, graders, invariants,
         frozen=fixture.get("frozen", []),
     )
 
-    # Tamper the expected: the replay's actual result should differ
-    tampered = dict(entry["expected"])
-    reasons = list(tampered["reasons"])
-    reasons[0] = reasons[0] + " TAMPERED"
-    tampered["reasons"] = reasons
-    assert actual != tampered, "replay should catch a tampered refusal message"
-    # But the actual matches the original expected
-    assert actual == entry["expected"]
 
+def test_sabotage_refusal_message(fixtures: dict) -> None:
+    """Monkeypatching a refusal message in product code makes the replay detect it."""
+    import refactory_dsh.optim.base as base_mod
 
-def test_sabotage_flip_refusal() -> None:
-    """Flipping a refusal (claiming it was accepted) is caught by replay."""
-    fixture, entry, name = _first_refused(_fixture_files())
-    states = fixture["states"]
-    parent_state = states[entry["parent_state_ref"]]
-    seed_state = states[fixture["seed_state_digest"]]
+    hit = _find_refused_by_code("E-too-many-edits", fixtures)
+    if hit is None:
+        pytest.skip("no E-too-many-edits refusal in fixtures")
+    fixture, entry, name = hit
 
-    mode_cls = _resolve_mode(fixture["mode"], PROJECT)
-    assert mode_cls is not None
-    protected, graders, invariants = _mode_protection(mode_cls, seed_state)
+    original_rule = base_mod.COUNTING_RULE
+    try:
+        base_mod.COUNTING_RULE = original_rule.replace("changes", "SABOTAGED")
+        actual = _replay_one(fixture, entry)
+    finally:
+        base_mod.COUNTING_RULE = original_rule
 
-    actual = replay_attempt(
-        entry["edit"], parent_state, seed_state, protected, graders, invariants,
-        frozen=fixture.get("frozen", []),
-    )
-
-    flipped = {"accepted": True, "candidate_digest": "fake", "candidate_id": "fake"}
-    assert actual != flipped, "replay should catch a flipped refusal"
+    assert actual != entry["expected"], (
+        "replay must detect a changed refusal message in product code")
     assert not actual["accepted"]
 
 
-def test_sabotage_section_change() -> None:
-    """Changing one line of a rendered section is caught by replay."""
-    fixtures_list = _fixture_files()
-    if not fixtures_list:
-        pytest.skip("no fixtures")
-    fixture = _load_fixture(fixtures_list[0])
-    if not fixture.get("sections"):
-        pytest.skip("no section entries")
-    sec_entry = fixture["sections"][0]
+def test_sabotage_loosen_check(fixtures: dict) -> None:
+    """Monkeypatching a limit so a recorded refusal is accepted breaks the replay."""
+    import refactory_dsh.optim.base as base_mod
+    import tests.proposer_replay as replay_mod
+
+    hit = _find_refused_by_code("E-too-many-edits", fixtures)
+    if hit is None:
+        pytest.skip("no E-too-many-edits refusal in fixtures")
+    fixture, entry, name = hit
+
+    orig_base = base_mod.MAX_EDITS_PER_PROPOSAL
+    orig_replay = replay_mod.MAX_EDITS_PER_PROPOSAL
+    orig_cls = base_mod.Optimizer.max_edits
+    try:
+        base_mod.MAX_EDITS_PER_PROPOSAL = 9999
+        replay_mod.MAX_EDITS_PER_PROPOSAL = 9999
+        base_mod.Optimizer.max_edits = 9999
+        actual = _replay_one(fixture, entry)
+    finally:
+        base_mod.MAX_EDITS_PER_PROPOSAL = orig_base
+        replay_mod.MAX_EDITS_PER_PROPOSAL = orig_replay
+        base_mod.Optimizer.max_edits = orig_cls
+
+    assert actual != entry["expected"], (
+        "replay must detect a loosened check that flips a refusal to acceptance")
+
+
+def test_sabotage_section_builder(fixtures: dict) -> None:
+    """Monkeypatching a section builder line in product code breaks the replay."""
+    import refactory_dsh.optim.base as base_mod
+
+    fixture = None
+    sec_entry = None
+    for f in sorted(fixtures.values(), key=lambda x: x["mode"]):
+        for s in f.get("sections", []):
+            if "pipeline_view" in s.get("sections", {}):
+                fixture = f
+                sec_entry = s
+                break
+        if fixture is not None:
+            break
+    if fixture is None:
+        pytest.skip("no section with pipeline_view in fixtures")
+
     states = fixture["states"]
     state = states[sec_entry["state_ref"]]
     seed_state = states[fixture["seed_state_digest"]]
-
     mode_cls = _resolve_mode(fixture["mode"], PROJECT)
     assert mode_cls is not None
     try:
@@ -258,21 +280,22 @@ def test_sabotage_section_change() -> None:
     except Exception:
         protected, graders = (), ()
 
-    actual = render_sections(state, mode_cls, fixture.get("edit_preset", "broad"),
-                             protected, graders)
+    original_lead = base_mod.PIPELINE_VIEW_LEAD
+    try:
+        base_mod.PIPELINE_VIEW_LEAD = "SABOTAGED LEAD LINE"
+        actual = render_sections(state, mode_cls,
+                                 fixture.get("edit_preset", "broad"),
+                                 protected, graders)
+    finally:
+        base_mod.PIPELINE_VIEW_LEAD = original_lead
 
-    for key, expected_text in sec_entry["sections"].items():
-        assert actual[key] == expected_text, f"section {key!r} should match"
-        tampered = expected_text + "\nTAMPERED LINE"
-        assert actual[key] != tampered, f"tampered {key!r} should be caught"
+    expected_pv = sec_entry["sections"]["pipeline_view"]
+    assert actual["pipeline_view"] != expected_pv, (
+        "replay must detect a changed section builder line in product code")
 
 
-def test_pure_move_does_not_break() -> None:
-    """A pure move (helper to another module with re-export) does not break.
-
-    The replay uses the same functions regardless of where they live; this test
-    verifies the import chain works and the first entry still replays correctly.
-    """
+def test_pure_move_does_not_break(fixtures: dict) -> None:
+    """A pure move (helper to another module with re-export) does not break."""
     import importlib
     mod = importlib.import_module("refactory_dsh.optim.base")
     for name in ("Candidate", "Proposal", "candidate_id", "proposal_refusal",
@@ -280,27 +303,12 @@ def test_pure_move_does_not_break() -> None:
                  "pipeline_view_lines"):
         assert hasattr(mod, name), f"{name} missing from refactory_dsh.optim.base"
 
-    fixtures_list = _fixture_files()
-    if not fixtures_list:
-        pytest.skip("no fixtures")
-    fixture = _load_fixture(fixtures_list[0])
+    fixture = next(iter(sorted(fixtures.values(), key=lambda x: x["mode"])))
     if not fixture["refusals"]:
         pytest.skip("no refusals")
 
-    entry = fixture["refusals"][0]
-    states = fixture["states"]
-    parent_state = states[entry["parent_state_ref"]]
-    seed_state = states[fixture["seed_state_digest"]]
-
-    mode_cls = _resolve_mode(fixture["mode"], PROJECT)
-    assert mode_cls is not None
-    protected, graders, invariants = _mode_protection(mode_cls, seed_state)
-
-    actual = replay_attempt(
-        entry["edit"], parent_state, seed_state, protected, graders, invariants,
-        frozen=fixture.get("frozen", []),
-    )
-    assert actual == entry["expected"]
+    actual = _replay_one(fixture, fixture["refusals"][0])
+    assert actual == fixture["refusals"][0]["expected"]
 
 
 # ── regen helper ────────────────────────────────────────────────────────
