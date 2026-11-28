@@ -166,6 +166,22 @@ def _new_steps(parent: Any, child: Any) -> set[str]:
     return nodes(child) - nodes(parent)
 
 
+def _proposal_edits_from_review(raw: dict[str, Any]) -> tuple[list[dict[str, Any]], str]:
+    """Parse edits from a smoke review's revised proposal reply."""
+    if not isinstance(raw, dict):
+        return [], "not a JSON object"
+    listed = raw.get("edits")
+    if isinstance(listed, list) and listed:
+        steps = [e for e in listed if isinstance(e, dict) and "op" in e]
+        return steps, "" if steps else "no edit objects in edits list"
+    if "op" in raw:
+        return [raw], ""
+    edit = raw.get("edit")
+    if isinstance(edit, dict) and "op" in edit:
+        return [edit], ""
+    return [], "no edit found"
+
+
 class LoopError(RuntimeError):
     """The run cannot proceed. Always names what is wrong with the mode."""
 
@@ -980,6 +996,11 @@ class Loop(OuterLoop):
         #: replayed), so no graph is smoked twice, and how many smoke runs each had.
         self._smoke_verdicts: dict[str, dict[str, Any]] = {}
         self._smoke_runs: dict[str, int] = {}
+        #: The smoke run's RunResult for each passing candidate, keyed by candidate id,
+        #: so the smoke output review can read the item records. Cleared each epoch.
+        self._smoke_results: dict[str, tuple[Any, Any]] = {}
+        #: Smoke output review decisions, keyed by candidate id.
+        self._smoke_review_decisions: dict[str, dict[str, Any]] = {}
         #: The wiring review of each candidate whose edit added wiring warnings
         #: (``wiring_review`` events, live and replayed; `_wiring_check`), by the id of
         #: the candidate reviewed and of the one it became, so none is asked twice.
@@ -3605,6 +3626,15 @@ class Loop(OuterLoop):
             "accepted_ops": self._op_mix(),
         }
 
+    def _smoke_review_report(self) -> dict[str, Any]:
+        decisions = list(self._smoke_review_decisions.values())
+        return {
+            "total": len(decisions),
+            "kept": sum(1 for d in decisions if d.get("decision") == "keep"),
+            "revised": sum(1 for d in decisions if d.get("decision") == "revised"),
+            "dropped": sum(1 for d in decisions if d.get("decision") == "drop"),
+        }
+
     # ── optimizer ──────────────────────────────────────────────────────────
     def optimizer_step(
         self, run: Run | None = None
@@ -4489,8 +4519,7 @@ class Loop(OuterLoop):
                         continue
                     accepted_ids.add(outcome.id)
                     accepted.append(outcome)
-                    if defer_smoke:
-                        smoke_meta[outcome.id] = (proposal, parent)
+                    smoke_meta[outcome.id] = (proposal, parent)
                     if repaired_from and getattr(self, "_repaired_level", ""):
                         level = self._repaired_level  # the fix's level, as E-level judged it
                     if self._levels_wanted:
@@ -4517,6 +4546,8 @@ class Loop(OuterLoop):
             self._defer_smoke = False
             accepted = self._smoke_check_batch(run, accepted, smoke_meta)
         self._defer_smoke = False
+        if accepted:
+            accepted = self._smoke_review_candidates(run, accepted, smoke_meta)
         refused = sum(1 for r in self.rejections[before_all:] if not r.repaired)
         self._refusal_pressure = refused / max(1, refused + len(accepted))
         self.attempts_used.append(rounds)
@@ -5683,6 +5714,7 @@ class Loop(OuterLoop):
             **({"optimizer_memory": memory_report(self._memory_passes, self._memory)}
                if self._memory_passes else {}),
             "selection": self._selection_report(),
+            **({"smoke_review": self._smoke_review_report()} if self._smoke_review_decisions else {}),
             **({"integrity": self._integrity_report(best)} if self._integrity_on() else {}),
             # Every evaluation that had an item a harness fault failed: the items,
             # those a rerun recovered, and those left out of its score (`_settle_incidents`).
@@ -7619,6 +7651,8 @@ class Loop(OuterLoop):
             self._journal("rollouts", rollouts=self.rollouts)
             self._progress("smoke", candidate=candidate.id, parent=parent.id, items=len(items),
                            outcome=outcome, errors=errors, error=record.get("error"))
+            if outcome != "failed":
+                self._smoke_results[candidate.id] = (result, workdir)
         return [self._smoke_refusal(record)] if outcome == "failed" else candidate
 
     def _smoke_outcome(self, result: Any, measurements: Mapping[str, Any]
@@ -7757,6 +7791,160 @@ class Loop(OuterLoop):
             elif cand.id not in smoke_meta:
                 final.append(cand)
         return final
+
+    # ── smoke output review ──────────────────────────────────────────────────
+    def _smoke_review_candidates(
+        self,
+        run: Run,
+        accepted: list[Candidate],
+        smoke_meta: dict[str, tuple[Proposal, Candidate]],
+    ) -> list[Candidate]:
+        """Review each accepted candidate's smoke output with the proposer.
+
+        Only candidates that add or change a step and have smoke results are
+        reviewed.  The proposer replies keep (proceed), drop (withdraw), or a
+        revised proposal (re-checked and re-smoked, at most once).
+        """
+        from refactory_dsh.optim.smoke_review import (
+            build_review_block, review_needed, KEEP, DROP, REVISED,
+        )
+
+        if self._custom_strategy is not None:
+            return accepted
+        if not hasattr(self.optimizer, "uses_model") or not self.optimizer.uses_model:
+            return accepted
+
+        final: list[Candidate] = []
+        kept = 0
+        revised = 0
+        dropped = 0
+        for candidate in accepted:
+            meta = smoke_meta.get(candidate.id)
+            if meta is None:
+                final.append(candidate)
+                continue
+            proposal, parent = meta
+            smoke_data = self._smoke_results.get(candidate.id)
+            if smoke_data is None:
+                final.append(candidate)
+                continue
+            result, workdir = smoke_data
+            if not review_needed(parent, candidate):
+                final.append(candidate)
+                continue
+            try:
+                block = build_review_block(parent, candidate, result, smoke_workdir=workdir)
+            except Exception as exc:
+                import warnings
+                warnings.warn(f"smoke review: could not build review block for {candidate.id}: "
+                              f"{type(exc).__name__}: {exc}", RuntimeWarning, stacklevel=2)
+                final.append(candidate)
+                continue
+            if block is None:
+                final.append(candidate)
+                continue
+            try:
+                decision, revision_data = self._smoke_review_call(
+                    candidate, parent, proposal, block)
+            except Exception as exc:
+                import warnings
+                warnings.warn(f"smoke review: call failed for {candidate.id}: "
+                              f"{type(exc).__name__}: {exc}", RuntimeWarning, stacklevel=2)
+                final.append(candidate)
+                continue
+            record = {"id": candidate.id, "parent": parent.id, "epoch": self.epoch,
+                      "decision": decision, "block_chars": len(block)}
+            self._smoke_review_decisions[candidate.id] = record
+            self._journal("smoke_review", **record)
+            if decision == KEEP:
+                kept += 1
+                final.append(candidate)
+            elif decision == DROP:
+                dropped += 1
+                self.rejections.append(
+                    Rejection(attempt=1, edit=proposal.edit,
+                              reasons=["E-smoke-review: the proposer withdrew this proposal "
+                                       "after reviewing its smoke output"],
+                              rationale=proposal.rationale, dropped="smoke-review"))
+            elif decision == REVISED and revision_data is not None:
+                revised += 1
+                revised_candidate = self._apply_smoke_revision(
+                    run, parent, proposal, revision_data)
+                if revised_candidate is not None:
+                    final.append(revised_candidate)
+                else:
+                    final.append(candidate)
+                    kept += 1
+            else:
+                kept += 1
+                final.append(candidate)
+        if kept + revised + dropped > 0:
+            self._progress("smoke_review", kept=kept, revised=revised, dropped=dropped)
+        return final
+
+    def _smoke_review_call(
+        self,
+        candidate: Candidate,
+        parent: Candidate,
+        proposal: Proposal,
+        block: str,
+    ) -> tuple[str, dict[str, Any] | None]:
+        """Make the review call and parse the reply."""
+        from refactory_dsh.optim.smoke_review import parse_review_reply, review_call_text
+
+        text = review_call_text(block)
+        call = {"kind": "smoke_review", "epoch": self.epoch,
+                "candidate": candidate.id, "parent": parent.id,
+                "prompt": text, "system": getattr(self.optimizer, "_system", "")}
+        system = getattr(self.optimizer, "_system", "")
+        reply, error, _overflow, _attempt = self.optimizer._complete(call, text, system)
+        if reply is None:
+            return "keep", None
+        decision, payload = parse_review_reply(reply)
+        self.optimizer.record_call(**call, reply=reply, decision=decision,
+                                   error=None)
+        return decision, payload
+
+    def _apply_smoke_revision(
+        self,
+        run: Run,
+        parent: Candidate,
+        original: Proposal,
+        revision_data: dict[str, Any],
+    ) -> Candidate | None:
+        """Apply a revised proposal from the smoke review.
+
+        The revision goes through the same checks as any proposal: refusals,
+        integrity review, smoke run.  Returns the new candidate, or ``None``
+        if the revision is refused.
+        """
+        steps, _why = _proposal_edits_from_review(revision_data)
+        if not steps:
+            return None
+        revised_proposal = Proposal(
+            edits=tuple(steps),
+            rationale=original.rationale,
+            prediction=original.prediction,
+            confidence=original.confidence,
+            parent=parent.id,
+            addresses=original.addresses,
+            flow_change=original.flow_change,
+        )
+        self._defer_smoke = False
+        outcome = run.attempt(revised_proposal, parent)
+        if isinstance(outcome, Candidate):
+            self._proposal_notes[outcome.id] = {
+                **(self._proposal_notes.get(original.parent or "") or {}),
+                "rationale": original.rationale,
+                "prediction": original.prediction,
+                "smoke_revised": True,
+            }
+            return outcome
+        if isinstance(outcome, list):
+            self.rejections.append(
+                Rejection(attempt=1, edit=revised_proposal.edit,
+                          reasons=outcome, rationale=original.rationale))
+        return None
 
     def _integrity_of(self, candidate_id: str) -> dict[str, Any] | None:
         """The latest proposal verdict on ``candidate_id`` (the change ledger's column);
@@ -8355,6 +8543,10 @@ class Loop(OuterLoop):
                 rescore_measurements += int((record.get("measurements") or {}).get("count", 0))
                 self._smoke_verdicts[cid] = {k: v for k, v in record.items() if k != "event"}
                 self._smoke_runs[cid] = self._smoke_runs.get(cid, 0) + 1
+            elif event == "smoke_review":
+                cid = str(record.get("id"))
+                self._smoke_review_decisions[cid] = {
+                    k: v for k, v in record.items() if k != "event"}
             elif event == "wiring_review":
                 # Kept so a resumed run does not ask about the same edit's wiring again.
                 held = {k: v for k, v in record.items() if k != "event"}
