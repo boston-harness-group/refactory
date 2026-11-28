@@ -6,19 +6,7 @@ from refactory_dsh.nn.graph import Graph, Node
 
 from ._common import NEUTRAL_STEP, STEP_KINDS, _Refused, _default_wired, _edits, verdict_rule
 from .state import _forks_naming, _fresh, _kind_of, _sealed, _text_of, _uses_tools
-from .visibility import _with_sections
-
-import sys as _sys
-
-
-class _Proxy:
-    """Late-bound lookup on the core_ops package for monkeypatch compat."""
-    __slots__ = ()
-    def __getattr__(self, name):
-        return getattr(_sys.modules['refactory_dsh.nn.core_ops'], name)
-
-
-_co = _Proxy()
+from .visibility import _strip_unseen, _with_sections
 
 
 def _spec(raw: Any, *, default_kind: str = "agent", default_text: str = NEUTRAL_STEP) -> dict:
@@ -55,8 +43,6 @@ def _spec(raw: Any, *, default_kind: str = "agent", default_text: str = NEUTRAL_
         default_text if kind == "agent" else "")}
 
 
-
-
 def _default_code(facts: Sequence[str], files: Sequence[str] = ()) -> str:
     """Code that joins what the step was given into each fact and file it declares."""
     return ("def main(inp):\n"
@@ -65,8 +51,6 @@ def _default_code(facts: Sequence[str], files: Sequence[str] = ()) -> str:
             "    text = '\\n\\n'.join(parts)\n"
             f"    return {{'facts': {{name: text for name in {list(facts)!r}}},\n"
             f"            'files': {{name: text for name in {list(files)!r}}}}}\n")
-
-
 
 
 def _copy_spec(node: Node, state: Mapping[str, Any]) -> dict:
@@ -82,8 +66,6 @@ def _copy_spec(node: Node, state: Mapping[str, Any]) -> dict:
         # (a take-over of several files, a fallback's) sees the copy as the tool step it is.
         spec["tools"] = list(node.tools)
     return spec
-
-
 
 
 def _output_renames(source: Node, facts: Sequence[str], files: Sequence[str]
@@ -105,8 +87,6 @@ def _output_renames(source: Node, facts: Sequence[str], files: Sequence[str]
         if table:
             out[key] = table
     return out or None
-
-
 
 
 def _step_nodes(graph: Graph, state: Mapping[str, Any], spec: dict, node_id: str,
@@ -132,7 +112,7 @@ def _step_nodes(graph: Graph, state: Mapping[str, Any], spec: dict, node_id: str
     source = like or settings_from
     out: list[dict[str, Any]] = []
     if kind == "agent":
-        text = _co._strip_unseen(spec["text"] or NEUTRAL_STEP,
+        text = _strip_unseen(spec["text"] or NEUTRAL_STEP,
                              set(facts) | set(state.get("knobs") or {}))
         tools = spec.get("tools")
         if not tools and like is not None and _sealed(like):
@@ -189,7 +169,7 @@ def _step_nodes(graph: Graph, state: Mapping[str, Any], spec: dict, node_id: str
                 and not spec.get("reads"):
             # Wired by default, so given the item's input files by default too.
             _default_wired(node_id)
-        carried = _co._carried_knobs("agent", text, node["system_prompt_template"], knobs)
+        carried = _carried_knobs("agent", text, node["system_prompt_template"], knobs)
         if carried:
             node["knobs"] = carried
         out.append(node)
@@ -231,8 +211,6 @@ def _step_nodes(graph: Graph, state: Mapping[str, Any], spec: dict, node_id: str
     return out
 
 
-
-
 def _shared_knobs(*nodes: Node) -> list[str]:
     """The knobs these steps read that are not their own (``<id>__...``): a mode's knobs,
     which the step taking their place reads on, so none is left read by nothing (V7)."""
@@ -242,8 +220,6 @@ def _shared_knobs(*nodes: Node) -> list[str]:
         out += [k for k in node.knobs if not k.startswith(f"{node.id}__") and k not in bound
                 and k not in out]
     return out
-
-
 
 
 def _carried_knobs(kind: str, text: str | None, system: str | None,
@@ -260,8 +236,6 @@ def _carried_knobs(kind: str, text: str | None, system: str | None,
     return [k for k in shared if k in named]
 
 
-
-
 def _orphaned_knobs(before: Mapping[str, Any], after: Mapping[str, Any]) -> list[str]:
     """Knobs a step of ``before`` read that no step of ``after`` reads: the settings of the
     steps an operator removed or replaced, which go with them."""
@@ -272,12 +246,8 @@ def _orphaned_knobs(before: Mapping[str, Any], after: Mapping[str, Any]) -> list
     return sorted(k for k in read_before if k not in read_after and k in declared)
 
 
-
-
 def _drop_orphans(build: "_Steps") -> None:
     build.add([{"op": "remove_knob", "name": k} for k in _orphaned_knobs(build.start, build.state)])
-
-
 
 
 def _frozen_settings(graph: Graph, state: Mapping[str, Any], gone: set[str]) -> list[str]:
@@ -288,13 +258,9 @@ def _frozen_settings(graph: Graph, state: Mapping[str, Any], gone: set[str]) -> 
                   and ((knobs.get(k) or {}).get("spec") or {}).get("frozen"))
 
 
-
-
 def _chain(nodes: Sequence[dict[str, Any]]) -> tuple[str, str]:
     """The first and last id of a new step's nodes (its collect step, then itself)."""
     return str(nodes[0]["id"]), str(nodes[-1]["id"])
-
-
 
 
 def _add_chain(nodes: Sequence[dict[str, Any]], position: dict[str, Any]) -> list[dict]:
@@ -307,8 +273,6 @@ def _add_chain(nodes: Sequence[dict[str, Any]], position: dict[str, Any]) -> lis
     return steps
 
 
-
-
 def _add_detached(nodes: Sequence[dict[str, Any]], exact: Collection[str] = ()) -> list[dict]:
     steps = [{"op": "add_node", "node": node, "position": {"detached": True},
               **({"_exact": True} if node["id"] in exact else {})} for node in nodes]
@@ -316,8 +280,6 @@ def _add_detached(nodes: Sequence[dict[str, Any]], exact: Collection[str] = ()) 
         steps.append({"op": "add_edge", "source": first["id"], "target": second["id"],
                       "condition": None})
     return steps
-
-
 
 
 def _respec(state: Mapping[str, Any], node_id: str, new_state: dict[str, Any],
@@ -356,8 +318,6 @@ def _respec(state: Mapping[str, Any], node_id: str, new_state: dict[str, Any],
     return steps + restore
 
 
-
-
 def _renamed(state: Mapping[str, Any], old: str, new: Sequence[str], *, joins: bool = True,
              forks: bool = True) -> list[dict]:
     """Respec steps, judged on ``state``, for every fork naming ``old`` as a branch and every
@@ -383,18 +343,14 @@ def _renamed(state: Mapping[str, Any], old: str, new: Sequence[str], *, joins: b
                                   for s in ([*new] if name == old else [name])]
         else:
             continue
-        more = _co._respec(current, node_id, changed)
+        more = _respec(current, node_id, changed)
         steps += more
         current = _simulate(current, more)
     return steps
 
 
-
-
 def _simulate(state: Mapping[str, Any], steps: Sequence[dict]) -> dict[str, Any]:
     return _edits().apply_many(steps, state)
-
-
 
 
 class _Steps:

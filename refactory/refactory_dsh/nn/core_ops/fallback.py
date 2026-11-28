@@ -5,22 +5,12 @@ from typing import Any, Mapping, Sequence
 from refactory_dsh.nn.graph import Graph, Node
 
 from ._common import TOOLS_HINTS, _Refused, _edits
-from .state import _available, _consumed, _fresh
-from .build import _Steps, _add_detached, _chain, _spec, _step_nodes
+from .state import _available, _consumed, _fresh, _sole_out
+from .build import _Steps, _add_detached, _chain, _respec, _spec, _step_nodes
 from .loop import _pass_of
 from .split_op import _verdict_read
-
-import sys as _sys
-
-
-class _Proxy:
-    """Late-bound lookup on the core_ops package for monkeypatch compat."""
-    __slots__ = ()
-    def __getattr__(self, name):
-        return getattr(_sys.modules['refactory_dsh.nn.core_ops'], name)
-
-
-_co = _Proxy()
+from .visibility import _seen
+from .checks import _plain_step
 
 
 def _fallback_spec(edit: dict, step: Node) -> dict:
@@ -32,11 +22,9 @@ def _fallback_spec(edit: dict, step: Node) -> dict:
     return spec
 
 
-
-
 def _pre_fallback(edit: dict, state: dict) -> str | None:
     graph = _edits()._graph(state)
-    node = _co._plain_step(graph, edit.get("step"), "fallback")
+    node = _plain_step(graph, edit.get("step"), "fallback")
     if _pass_of(graph, node.id) is None:
         raise _Refused(f"{node.id!r} runs outside any per-item pass; a fallback answers for "
                        "a step that runs once per item")
@@ -45,7 +33,7 @@ def _pre_fallback(edit: dict, state: dict) -> str | None:
                        f"{graph.fallback_gate(node.id)!r}")
     if not (node.writes or node.produces):
         raise _Refused(f"{node.id!r} has no outputs for a fallback to write")
-    onward = _co._sole_out(graph, node.id)
+    onward = _sole_out(graph, node.id)
     if onward is not None and graph.nodes[onward].kind == "join":
         raise _Refused(f"{node.id!r} ends a fork branch; insert a step after it first, or "
                        "give the fallback to a step inside the branch")
@@ -54,8 +42,6 @@ def _pre_fallback(edit: dict, state: dict) -> str | None:
     if spec.get("id") is not None and spec["id"] in graph.nodes:
         raise _Refused(f"node {spec['id']!r} already exists")
     return None
-
-
 
 
 def _expand_fallback(edit: dict, state: dict) -> list[dict]:
@@ -73,11 +59,11 @@ def _expand_fallback(edit: dict, state: dict) -> list[dict]:
     gate_id = _fresh(graph, f"{node.id}_failed")
     node_id = spec.get("id") or _fresh(graph, f"{node.id}_fallback", (gate_id,))
     there = _available(graph).get(node.id, set())
-    seen = _co._seen(graph, state, there, _consumed(node, state), spec.get("sees"))
+    seen = _seen(graph, state, there, _consumed(node, state), spec.get("sees"))
     nodes = _step_nodes(graph, state, spec, node_id, seen, writes=list(node.writes),
                         produces=list(node.produces),
                         settings_from=node if node.kind == "agent" else None)
-    onward = _co._sole_out(graph, node.id)
+    onward = _sole_out(graph, node.id)
     if onward is None:
         onward = _fresh(graph, f"{node.id}_done", (gate_id, *(str(n["id"]) for n in nodes)))
         build.add([{"op": "add_node", "position": {"after": node.id}, "node": {
@@ -95,8 +81,6 @@ def _expand_fallback(edit: dict, state: dict) -> list[dict]:
                {"op": "add_edge", "source": nodes[-1]["id"], "target": onward,
                 "condition": None}])
     return build.steps
-
-
 
 
 def _fallback_parts(graph: Graph, step: str) -> tuple[str, str, set[str], list]:
@@ -125,8 +109,6 @@ def _fallback_parts(graph: Graph, step: str) -> tuple[str, str, set[str], list]:
     return gate, onward, way, rejoins
 
 
-
-
 def _at_rejoin(graph: Graph, step: str, nodes: Sequence[dict[str, Any]]) -> list[dict]:
     """Primitive steps adding a new step's nodes where ``step``'s two ways (it answered, or
     its fallback did) rejoin: both lead to the new step, which leads where they led."""
@@ -143,8 +125,6 @@ def _at_rejoin(graph: Graph, step: str, nodes: Sequence[dict[str, Any]]) -> list
     return steps
 
 
-
-
 def _fallback_owner(graph: Graph, node_id: str) -> str | None:
     """The step with a fallback that ``node_id`` is, or whose fallback gate or fallback's
     way it is on; else None."""
@@ -154,8 +134,6 @@ def _fallback_owner(graph: Graph, node_id: str) -> str | None:
             if node_id in {step, gate, *way}:
                 return step
     return None
-
-
 
 
 def _unfallback(state: Mapping[str, Any], step: str) -> list[dict]:
@@ -179,7 +157,7 @@ def _unfallback(state: Mapping[str, Any], step: str) -> list[dict]:
         build.add([{"op": "remove_node", "id": onward}])
         for data_id in exits:
             data = build.graph.nodes[data_id].to_state()
-            build.add(_co._respec(build.state, data_id, {**data, "subgraph_exit": step}))
+            build.add(_respec(build.state, data_id, {**data, "subgraph_exit": step}))
     else:
         build.add([{"op": "add_edge", "source": step, "target": onward, "condition": None}])
     return build.steps

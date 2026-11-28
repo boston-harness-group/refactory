@@ -7,23 +7,11 @@ from refactory_dsh.nn.graph import Graph, Node
 
 from ._common import TASK, _Refused, _edits
 from .state import _available, _consumed, _kind_of, _knob_values, _task_knob
-from .visibility import _readable, _with_sections
-from .build import _Steps
-from .checks import _owned
+from .visibility import _readable, _seen, _strip_unseen, _with_sections
+from .build import _Steps, _renamed, _respec
+from .checks import _owned, _plain_step
 from .remove import _bypass, _replace_hint
 from .parallelize import _tools_beside
-
-import sys as _sys
-
-
-class _Proxy:
-    """Late-bound lookup on the core_ops package for monkeypatch compat."""
-    __slots__ = ()
-    def __getattr__(self, name):
-        return getattr(_sys.modules['refactory_dsh.nn.core_ops'], name)
-
-
-_co = _Proxy()
 
 
 def _rewire_seen(graph: Graph, state: Mapping[str, Any], edit: Mapping[str, Any], node: Node
@@ -39,12 +27,10 @@ def _rewire_seen(graph: Graph, state: Mapping[str, Any], edit: Mapping[str, Any]
     if helper is not None:
         now = (now - {("fact", gather)}) | _consumed(graph.nodes[helper], state)
     if edit.get("text") is not None and "sees" not in edit:
-        seen = _co._seen(graph, state, there, _readable(graph, state, now), None)
+        seen = _seen(graph, state, there, _readable(graph, state, now), None)
     else:
-        seen = _co._seen(graph, state, there, set(), edit.get("sees", [TASK]))
+        seen = _seen(graph, state, there, set(), edit.get("sees", [TASK]))
     return gather, helper, now, seen
-
-
 
 
 def _own_text_slots(graph: Graph, state: Mapping[str, Any], node: Node, text: str,
@@ -89,11 +75,9 @@ def _own_text_slots(graph: Graph, state: Mapping[str, Any], node: Node, text: st
                            f"{add}")
 
 
-
-
 def _pre_rewire(edit: dict, state: dict) -> str | None:
     graph = _edits()._graph(state)
-    node = _co._plain_step(graph, edit.get("step"), "rewire")
+    node = _plain_step(graph, edit.get("step"), "rewire")
     kind = _kind_of(node)
     if kind == "op":
         raise _Refused(f"{node.id!r} is a plain op: what it reads is what its callable reads. "
@@ -123,7 +107,7 @@ def _pre_rewire(edit: dict, state: dict) -> str | None:
             return None
         text = str(_knob_values(state).get(knob) if knob else node.prompt_template)
         keep = {name for k, name in seen if k == "fact"} | set(state.get("knobs") or {}) | {gather}
-        if text.strip() and not _co._strip_unseen(text, keep).strip():
+        if text.strip() and not _strip_unseen(text, keep).strip():
             raise _Refused(f"{node.id!r}'s whole prompt is a fact it would no longer see, so "
                            "rewiring would leave it no instructions; name that fact's step in "
                            "'sees', or "
@@ -131,13 +115,9 @@ def _pre_rewire(edit: dict, state: dict) -> str | None:
     return None
 
 
-
-
 #: How a rewire refusal names the rewire that gives the step its own text (checked like
 #: a replacing hint, `optim.base.checked_hint`).
 OWN_TEXT_HINT = "give it its own text with "
-
-
 
 
 def _own_text_hint(node: Node, state: dict, sees: Any) -> str:
@@ -154,8 +134,6 @@ def _own_text_hint(node: Node, state: dict, sees: Any) -> str:
     return f"give it your own text: {_replace_hint(node, state, sees)}"
 
 
-
-
 def _expand_rewire(edit: dict, state: dict) -> list[dict]:
     from refactory_dsh.nn.operators import collect_node
 
@@ -169,7 +147,7 @@ def _expand_rewire(edit: dict, state: dict) -> list[dict]:
     if _kind_of(node) == "code":
         new_state.update({"reads": files, "inputs": facts})
         new_state.pop("required_reads", None)
-        build.add(_co._respec(build.state, node.id, new_state))
+        build.add(_respec(build.state, node.id, new_state))
         return build.steps
     knob = _task_knob(node)
     before = text = str(_knob_values(state).get(knob) if knob else node.prompt_template)
@@ -189,7 +167,7 @@ def _expand_rewire(edit: dict, state: dict) -> list[dict]:
     if files and not sealed:
         keep.add(gather)
         facts.append(gather)
-    new_text = _with_sections(_co._strip_unseen(text, keep), facts)
+    new_text = _with_sections(_strip_unseen(text, keep), facts)
     for key in ("reads", "required_reads", "inputs"):
         new_state.pop(key, None)
     if sealed and files:
@@ -200,10 +178,10 @@ def _expand_rewire(edit: dict, state: dict) -> list[dict]:
     # Its own prompt knob (`<id>__...`) goes and comes back with it (`_respec`), at the new
     # text, so the restored value already holds the new slots.
     own_knob = knob is not None and knob.startswith(f"{node.id}__")
-    build.add(_co._respec(build.state, node.id, new_state,
+    build.add(_respec(build.state, node.id, new_state,
                       values={knob: new_text} if own_knob else None))
     if files and not sealed:
-        build.add(_co._renamed(build.state, node.id, [gather], joins=False))
+        build.add(_renamed(build.state, node.id, [gather], joins=False))
         build.add([{"op": "add_node", "position": {"before": node.id},
                     "node": collect_node(gather, files, gather,
                                          notes=f"Hands {node.id} the files it sees.")}])

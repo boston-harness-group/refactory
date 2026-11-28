@@ -7,29 +7,16 @@ from refactory_dsh.nn.graph import Node
 
 from ._common import _Refused, _edits
 from .state import _consumed, _data_ends, _outputs, _require_step
-from .build import _Steps, _frozen_settings, _simulate
-from .checks import _losses, _owned, _upstream
+from .build import _Steps, _drop_orphans, _frozen_settings, _renamed, _respec, _simulate
+from .checks import _losses, _owned, _strip_steps, _upstream
 from .map_op import _map_removed, _pre_remove_map, _remove_map
 from .fallback import _fallback_owner, _unfallback
-
-import sys as _sys
-
-
-class _Proxy:
-    """Late-bound lookup on the core_ops package for monkeypatch compat."""
-    __slots__ = ()
-    def __getattr__(self, name):
-        return getattr(_sys.modules['refactory_dsh.nn.core_ops'], name)
-
-
-_co = _Proxy()
+from .serialize import _serialize_steps
 
 
 #: What a replacing hint adds when the step taking the place is code.
 CODE_HINT_NOTE = (" (its default code joins what it is given; give 'text', your def main(inp), "
                   "for your own)")
-
-
 
 
 def _replace_hint(node: Node, state: dict, sees: Any = None) -> str:
@@ -52,8 +39,6 @@ def _replace_hint(node: Node, state: dict, sees: Any = None) -> str:
         return ("replacing it is refused too ("
                 f"{refused.removeprefix('E-precondition: ')})")
     return f"replace it with {json.dumps(edit)}" + ("" if node.kind == "agent" else CODE_HINT_NOTE)
-
-
 
 
 def _pre_remove(edit: dict, state: dict) -> str | None:
@@ -132,8 +117,6 @@ def _pre_remove(edit: dict, state: dict) -> str | None:
     return None
 
 
-
-
 def _bypass(state: Mapping[str, Any], node_id: str) -> list[dict]:
     """Primitive steps that take one plain step out, judged on ``state``: forks and joins
     that name it name its neighbours on the branch instead, then each predecessor leads to
@@ -147,9 +130,9 @@ def _bypass(state: Mapping[str, Any], node_id: str) -> list[dict]:
     for fork_id in heads_in:
         join = graph.fork_join(fork_id)
         heads = [e.target for e in succ if e.target != join]
-        build.add(_co._renamed(build.state, node_id, heads, joins=False))
+        build.add(_renamed(build.state, node_id, heads, joins=False))
     if ends_join:
-        build.add(_co._renamed(build.state, node_id, [e.source for e in preds], forks=False))
+        build.add(_renamed(build.state, node_id, [e.source for e in preds], forks=False))
     edges = []
     for incoming in preds:
         for outgoing in succ:
@@ -163,18 +146,14 @@ def _bypass(state: Mapping[str, Any], node_id: str) -> list[dict]:
     return build.steps
 
 
-
-
 def _fold_forks(state: Mapping[str, Any]) -> list[dict]:
     """Serialize every fork left with one branch or none."""
     graph = _edits()._graph(state)
     for fork in sorted(graph.nodes.values(), key=lambda n: n.id):
         if fork.kind == "fork" and len(fork.targets) <= 1:
-            steps = _co._serialize_steps(state, fork.id)
-            return steps + _co._fold_forks(_simulate(state, steps))
+            steps = _serialize_steps(state, fork.id)
+            return steps + _fold_forks(_simulate(state, steps))
     return []
-
-
 
 
 def _expand_remove(edit: dict, state: dict) -> list[dict]:
@@ -185,7 +164,7 @@ def _expand_remove(edit: dict, state: dict) -> list[dict]:
         # what it was before it; removing the step it answers for takes it out first.
         build.add(_unfallback(state, owner))
         if edit["step"] != owner:
-            _co._drop_orphans(build)
+            _drop_orphans(build)
             return build.steps
         state = build.state
     graph = build.graph
@@ -219,13 +198,13 @@ def _expand_remove(edit: dict, state: dict) -> list[dict]:
     else:
         gone = {node.id, *_owned(graph, node.id, state)}
         _hard, strip, drop = _losses(graph, state, gone)
-        build.add(_co._strip_steps(state, strip))
+        build.add(_strip_steps(state, strip))
         for reader, names in sorted(drop.items()):
             changed = build.graph.nodes[reader].to_state()
             changed["reads"] = [r for r in changed.get("reads") or () if r not in names]
-            build.add(_co._respec(build.state, reader, changed))
+            build.add(_respec(build.state, reader, changed))
         for helper in [*_owned(graph, node.id, state), node.id]:
             build.add(_bypass(build.state, helper))
-    build.add(_co._fold_forks(build.state))
-    _co._drop_orphans(build)
+    build.add(_fold_forks(build.state))
+    _drop_orphans(build)
     return build.steps

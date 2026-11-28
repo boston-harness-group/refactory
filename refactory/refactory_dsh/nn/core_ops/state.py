@@ -8,18 +8,6 @@ from refactory_dsh.tool_policy import POLICIES as TOOL_POLICIES
 
 from ._common import _Refused, _edits
 
-import sys as _sys
-
-
-class _Proxy:
-    """Late-bound lookup on the core_ops package for monkeypatch compat."""
-    __slots__ = ()
-    def __getattr__(self, name):
-        return getattr(_sys.modules['refactory_dsh.nn.core_ops'], name)
-
-
-_co = _Proxy()
-
 
 def _knob_values(state: Mapping[str, Any]) -> dict[str, Any]:
     return {name: (entry or {}).get("value") for name, entry in (state.get("knobs") or {}).items()}

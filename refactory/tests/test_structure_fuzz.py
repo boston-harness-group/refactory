@@ -39,6 +39,7 @@ from unittest import mock
 import pytest
 
 import structure_fuzz as sf
+from conftest import patch_core_op
 from refactory_dsh import seal
 from refactory_dsh.nn import edits as edits_mod
 from refactory_dsh.nn.operators import MAP_CALL
@@ -443,7 +444,7 @@ def test_mutation_grader_without_the_provenance_rule_is_caught(monkeypatch):
     monkeypatch.setattr(validate_mod, "grader_issues", lambda *args, **kwargs: [])
     # The walks' leaking step is one nothing reads; that refusal (E-unread) is not V17's.
     from refactory_dsh.nn import core_ops
-    monkeypatch.setattr(core_ops, "unread_by_bundle", lambda *args, **kwargs: None)
+    patch_core_op(monkeypatch, "unread_by_bundle", lambda *args, **kwargs: None)
     _finds("grader", seeds=("fuzz_data_pass", "fuzz_dataflow"), walker=True, edits=600, seed=1,
            code_nodes=False)
 
@@ -998,7 +999,7 @@ def test_mutation_refusal_names_catches_a_false_producer(monkeypatch):
         real = original(graph, name)
         return [*real, "ghost_node_that_does_not_exist"] if real else real
 
-    monkeypatch.setattr(core_ops, "_producers_of", wrong_producers)
+    patch_core_op(monkeypatch, "_producers_of", wrong_producers)
     _finds("refusal_names", seeds=("fuzz_skip_path", "fuzz_gates", "fuzz_fork_join"))
 
 
@@ -1015,7 +1016,7 @@ def test_mutation_refusal_suggestion_catches_a_bad_anchor(monkeypatch):
             return [graph.start]
         return real
 
-    monkeypatch.setattr(core_ops, "_placement_anchors", wrong_anchors)
+    patch_core_op(monkeypatch, "_placement_anchors", wrong_anchors)
     _finds("refusal_suggestion", seeds=("fuzz_skip_path", "fuzz_gates"))
 
 
@@ -1073,7 +1074,7 @@ def test_the_decision_record_fails_on_a_changed_message(monkeypatch):
         hint = original_hint(graph, name, kind, keys=keys)
         return hint.replace("missing on the", "absent on the") if hint else hint
 
-    monkeypatch.setattr(core_ops, "_not_on_every_path_hint", tweaked_hint)
+    patch_core_op(monkeypatch, "_not_on_every_path_hint", tweaked_hint)
     old = sf.load_record()
     new = sf.generate_record()
     diffs = sf.diff_records(old, new)
@@ -1109,8 +1110,8 @@ def test_mutation_takeover_historical_bug_is_caught(monkeypatch):
                     f"'{target_id}' is a {target.kind} with no outputs to take over")
         return original_route(graph, state, anchor, spec)
 
-    monkeypatch.setattr(core_ops, "_take_over_plan", buggy_plan)
-    monkeypatch.setattr(core_ops, "_route_take_over", buggy_route)
+    patch_core_op(monkeypatch, "_take_over_plan", buggy_plan)
+    patch_core_op(monkeypatch, "_route_take_over", buggy_route)
     _finds("refusal_names", seeds=("fuzz_data_pass", "fuzz_gates", "fuzz_skip_path"))
     old = sf.load_record()
     new = sf.generate_record()
@@ -1130,7 +1131,7 @@ def test_mutation_compound_refusal_names_are_checked(monkeypatch):
                 f"{node.id!r} is a agent; {what} works on a step (agent, op or code)")
         return node
 
-    monkeypatch.setattr(core_ops, "_plain_step", sabotaged)
+    patch_core_op(monkeypatch, "_plain_step", sabotaged)
     fuzzer = sf.Fuzzer(42, walker=False, compound=0.5,
                        seed_names=("fuzz_gates", "fuzz_draft_review"))
     fuzzer.run(300)
@@ -1333,7 +1334,7 @@ def test_mutation_fork_no_join_checker_catches_wrong_kind(monkeypatch):
             raise core_ops._Refused(f"fork {ops[0]!r} has no join after it")
         raise core_ops._Refused(f"fork {fork.id!r} has no join after it")
 
-    monkeypatch.setattr(core_ops, "_join_of", buggy)
+    patch_core_op(monkeypatch, "_join_of", buggy)
     _finds("refusal_names", seeds=("fuzz_fork_join", "fuzz_nested_fork"))
 
 
@@ -1351,7 +1352,7 @@ def test_mutation_out_edge_count_checker_catches_wrong_count(monkeypatch):
                 "operator cannot tell which one to follow")
         return None
 
-    monkeypatch.setattr(core_ops, "_sole_out", buggy)
+    patch_core_op(monkeypatch, "_sole_out", buggy)
     _finds("refusal_names", seeds=("fuzz_gates", "fuzz_dataflow"))
 
 
@@ -1380,8 +1381,8 @@ def test_mutation_no_outputs_checker_catches_false_claim(monkeypatch):
                     f"'{target_id}' has no outputs to take over")
         return original_route(graph, state, anchor, spec)
 
-    monkeypatch.setattr(core_ops, "_take_over_plan", buggy_plan)
-    monkeypatch.setattr(core_ops, "_route_take_over", buggy_route)
+    patch_core_op(monkeypatch, "_take_over_plan", buggy_plan)
+    patch_core_op(monkeypatch, "_route_take_over", buggy_route)
     _finds("refusal_names", seeds=("fuzz_data_pass", "fuzz_gates"))
 
 
@@ -1398,6 +1399,6 @@ def test_mutation_takeover_suggestion_checker_catches_bad_anchor(monkeypatch):
         bad = [t for t in targets if t not in (good or [])]
         return bad[:3] if bad else good
 
-    monkeypatch.setattr(core_ops, "_placement_anchors", bad_anchors)
+    patch_core_op(monkeypatch, "_placement_anchors", bad_anchors)
     _finds("refusal_suggestion", seeds=("fuzz_data_pass", "fuzz_gates",
                                         "fuzz_skip_path"), edits=4000)

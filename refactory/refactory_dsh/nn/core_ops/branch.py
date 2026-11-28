@@ -5,21 +5,10 @@ from typing import Any, Mapping
 from refactory_dsh.nn.graph import Graph, Node
 
 from ._common import MAX_BRANCHES, NEUTRAL_STEP, _Refused, _edits
-from .state import _available, _consumed, _fresh, _outputs, _require_step, _task_inputs
-from .build import _Steps, _add_detached, _chain, _copy_spec, _spec, _step_nodes
+from .state import _available, _consumed, _fresh, _join_of, _outputs, _require_step, _task_inputs
+from .build import _Steps, _add_detached, _chain, _copy_spec, _respec, _spec, _step_nodes
 from .placement import _new_facts, _place_all
-
-import sys as _sys
-
-
-class _Proxy:
-    """Late-bound lookup on the core_ops package for monkeypatch compat."""
-    __slots__ = ()
-    def __getattr__(self, name):
-        return getattr(_sys.modules['refactory_dsh.nn.core_ops'], name)
-
-
-_co = _Proxy()
+from .visibility import _seen
 
 
 def _pre_branch(edit: dict, state: dict) -> str | None:
@@ -28,7 +17,7 @@ def _pre_branch(edit: dict, state: dict) -> str | None:
     if fork.kind != "fork":
         raise _Refused(f"{fork.id!r} is a {fork.kind}, not a fork; 'parallelize' runs steps "
                        "beside a step that is not one")
-    _co._join_of(graph, fork)
+    _join_of(graph, fork)
     if len(fork.targets) >= MAX_BRANCHES:
         raise _Refused(f"fork {fork.id!r} already has {len(fork.targets)} branches")
     if edit.get("optional") is not None and not isinstance(edit.get("optional"), bool):
@@ -37,8 +26,6 @@ def _pre_branch(edit: dict, state: dict) -> str | None:
     if spec.get("id") is not None and spec["id"] in graph.nodes:
         raise _Refused(f"node {spec['id']!r} already exists")
     return None
-
-
 
 
 def _branch_spec(edit: dict, graph: Graph, fork: Node, state: Mapping[str, Any]) -> dict:
@@ -53,13 +40,11 @@ def _branch_spec(edit: dict, graph: Graph, fork: Node, state: Mapping[str, Any])
                  else NEUTRAL_STEP)
 
 
-
-
 def _expand_branch(edit: dict, state: dict) -> list[dict]:
     build = _Steps(state)
     graph = build.graph
     fork = graph.nodes[edit["fork"]]
-    join = _co._join_of(graph, fork)
+    join = _join_of(graph, fork)
     preds = [e.source for e in graph.in_edges(fork.id)]
     there = set(_available(graph).get(fork.id, set()))
     view: set[tuple[str, str]] = set()
@@ -70,7 +55,7 @@ def _expand_branch(edit: dict, state: dict) -> list[dict]:
     spec = _branch_spec(edit, graph, fork, state)
     node_id = spec.get("id") or _fresh(graph, f"{fork.id}_branch")
     nodes = _step_nodes(graph, state, spec, node_id,
-                        _co._seen(graph, state, there, view, spec.get("sees")))
+                        _seen(graph, state, there, view, spec.get("sees")))
     head, end = _chain(nodes)
     # Given at all, 'optional' is a setting the search can move: the branch's first step
     # binds it to a knob of its own (`Graph.optional_targets_of`), and what reads the
@@ -93,8 +78,8 @@ def _expand_branch(edit: dict, state: dict) -> list[dict]:
     join_state = join.to_state()
     join_state["sources"] = [*join.sources, end]
     build.add(knob_steps)
-    build.add(_co._respec(build.state, fork.id, fork_state))
-    build.add(_co._respec(build.state, join.id, join_state))
+    build.add(_respec(build.state, fork.id, fork_state))
+    build.add(_respec(build.state, join.id, join_state))
     build.add(_add_detached(nodes))
     build.add([{"op": "add_edge", "source": end, "target": join.id, "condition": None}])
     build.add(set_steps)

@@ -6,18 +6,7 @@ from refactory_dsh.nn.graph import Graph, Node
 
 from ._common import _Refused, _edits
 from .state import _consumed, _outputs, _require_step, _task_knob
-
-import sys as _sys
-
-
-class _Proxy:
-    """Late-bound lookup on the core_ops package for monkeypatch compat."""
-    __slots__ = ()
-    def __getattr__(self, name):
-        return getattr(_sys.modules['refactory_dsh.nn.core_ops'], name)
-
-
-_co = _Proxy()
+from .visibility import _strip_unseen
 
 
 def _plain_step(graph: Graph, node_id: Any, what: str) -> Node:
@@ -27,14 +16,10 @@ def _plain_step(graph: Graph, node_id: Any, what: str) -> Node:
     return node
 
 
-
-
 def _slots_in_field(node: Node) -> set[str]:
     from refactory_dsh.nn.validate import template_names
 
     return template_names(str(node.prompt_template or ""))
-
-
 
 
 def _losses(graph: Graph, state: Mapping[str, Any], gone: set[str]
@@ -79,8 +64,6 @@ def _losses(graph: Graph, state: Mapping[str, Any], gone: set[str]
     return hard, strip, drop
 
 
-
-
 def _strip_steps(state: Mapping[str, Any], strip: Mapping[str, set[str]]) -> list[dict]:
     graph = _edits()._graph(state)
     steps = []
@@ -90,12 +73,10 @@ def _strip_steps(state: Mapping[str, Any], strip: Mapping[str, set[str]]) -> lis
         from refactory_dsh.nn.validate import template_names
 
         keep = template_names(value) - set(names)
-        new = _co._strip_unseen(value, keep | set(state.get("knobs") or {})).rstrip()
+        new = _strip_unseen(value, keep | set(state.get("knobs") or {})).rstrip()
         if new != value:
             steps.append({"op": "set_knob", "name": knob, "value": new})
     return steps
-
-
 
 
 def _owned(graph: Graph, step: str, state: Mapping[str, Any]) -> list[str]:
@@ -114,8 +95,6 @@ def _owned(graph: Graph, step: str, state: Mapping[str, Any]) -> list[str]:
     return out
 
 
-
-
 def _inputs_helper(graph: Graph, step: str, state: Mapping[str, Any]) -> str | None:
     """The ``collect`` step an operator put in front of ``step`` for it alone
     (`_owned`), which the pipeline view folds into the step; ``None`` when it has none."""
@@ -123,15 +102,11 @@ def _inputs_helper(graph: Graph, step: str, state: Mapping[str, Any]) -> str | N
     return helper if helper in _owned(graph, step, state) else None
 
 
-
-
 def _head(graph: Graph, step: str, state: Mapping[str, Any]) -> str:
     """Where a way into ``step`` enters: its own collect step when it has one (the view
     shows the two as one step), else the step itself. An edge to the step that skipped its
     collect would run it without the files it is handed."""
     return _inputs_helper(graph, step, state) or step
-
-
 
 
 def _upstream(graph: Graph, node_id: str) -> set[str]:

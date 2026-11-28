@@ -8,18 +8,6 @@ from refactory_dsh.nn.graph import Graph
 from ._common import FILES_HEADING, TASK, _Refused
 from .state import _available, _grader_side, _outputs, _task_inputs
 
-import sys as _sys
-
-
-class _Proxy:
-    """Late-bound lookup on the core_ops package for monkeypatch compat."""
-    __slots__ = ()
-    def __getattr__(self, name):
-        return getattr(_sys.modules['refactory_dsh.nn.core_ops'], name)
-
-
-_co = _Proxy()
-
 
 def _readable(graph: Graph, state: Mapping[str, Any], names: set[tuple[str, str]]
               ) -> set[tuple[str, str]]:
@@ -27,8 +15,6 @@ def _readable(graph: Graph, state: Mapping[str, Any], names: set[tuple[str, str]
     knobs = set(state.get("knobs") or {})
     return {(kind, name) for kind, name in names - _grader_side(graph, state)
             if not (kind == "fact" and name in knobs)}
-
-
 
 
 def _no_task(graph: Graph, state: Mapping[str, Any], there: set[tuple[str, str]]) -> str:
@@ -57,25 +43,18 @@ def _no_task(graph: Graph, state: Mapping[str, Any], there: set[tuple[str, str]]
     return f"{why}; name the facts or steps it sees"
 
 
-
-
 #: How many of the names a new step could see a refusal lists.
 SEES_NAMES_SHOWN = 24
-
 
 
 #: How many valid "after" anchors a placement hint lists.
 _PLACEMENT_SHOWN = 6
 
 
-
-
 def _producers_of(graph: Graph, name: str) -> list[str]:
     """Step ids that write or produce ``name`` (file or fact)."""
     return sorted(node_id for node_id, node in graph.nodes.items()
                   if name in node.writes or name in node.produces)
-
-
 
 
 def _placement_anchors(graph: Graph, name: str, kind: str | None = None, *,
@@ -91,8 +70,6 @@ def _placement_anchors(graph: Graph, name: str, kind: str | None = None, *,
     return sorted(node_id for node_id in graph.nodes
                   if node_id in reachable
                   and keys & (avail.get(node_id, set()) | _outputs(graph.nodes[node_id])))
-
-
 
 
 def _missing_edge_hint(graph: Graph, name: str,
@@ -124,8 +101,6 @@ def _missing_edge_hint(graph: Graph, name: str,
     return ""
 
 
-
-
 def _not_on_every_path_hint(graph: Graph, name: str,
                             kind: str | None = None, *,
                             keys: set[tuple[str, str]] | None = None) -> str:
@@ -135,7 +110,7 @@ def _not_on_every_path_hint(graph: Graph, name: str,
     ``keys`` overrides the ``(kind, name)`` pairs used for the availability check (for a
     step id whose outputs are a known set, not necessarily named after the step).
     """
-    producers = _co._producers_of(graph, name)
+    producers = _producers_of(graph, name)
     parts: list[str] = []
     if producers:
         shown = producers[:_PLACEMENT_SHOWN]
@@ -145,7 +120,7 @@ def _not_on_every_path_hint(graph: Graph, name: str,
     edge = _missing_edge_hint(graph, name, kind, keys=keys)
     if edge:
         parts.append(f"missing on the {edge} path")
-    anchors = _co._placement_anchors(graph, name, kind, keys=keys)
+    anchors = _placement_anchors(graph, name, kind, keys=keys)
     if anchors:
         shown = anchors[:_PLACEMENT_SHOWN]
         more = f" (+{len(anchors) - _PLACEMENT_SHOWN} more)" \
@@ -154,8 +129,6 @@ def _not_on_every_path_hint(graph: Graph, name: str,
     elif producers:
         parts.append("no placement puts it on every path")
     return "; ".join(parts)
-
-
 
 
 def _seen(graph: Graph, state: Mapping[str, Any], there: set[tuple[str, str]],
@@ -186,7 +159,7 @@ def _seen(graph: Graph, state: Mapping[str, Any], there: set[tuple[str, str]],
                 made = _outputs(graph.nodes[name]) & there
                 if not made:
                     all_outputs = _outputs(graph.nodes[name])
-                    hint = _co._not_on_every_path_hint(graph, name,
+                    hint = _not_on_every_path_hint(graph, name,
                                                    keys=all_outputs)
                     raise _Refused(
                         f"step {name!r}'s outputs are not there on every path to "
@@ -197,9 +170,9 @@ def _seen(graph: Graph, state: Mapping[str, Any], there: set[tuple[str, str]],
             elif ("fact", name) in there or ("file", name) in there:
                 chosen |= {key for key in (("fact", name), ("file", name)) if key in there}
             else:
-                producers = _co._producers_of(graph, name)
+                producers = _producers_of(graph, name)
                 if producers:
-                    hint = _co._not_on_every_path_hint(graph, name)
+                    hint = _not_on_every_path_hint(graph, name)
                     raise _Refused(
                         f"'sees' names {name!r}, which exists in the graph "
                         f"({hint}) but is not there before the new step on "
@@ -220,8 +193,6 @@ def _seen(graph: Graph, state: Mapping[str, Any], there: set[tuple[str, str]],
                 and any(("fact", f) in chosen for f in node.produces):
             chosen.discard(("file", node.writes[0]))
     return sorted(chosen, key=lambda key: (key[0] != "fact", key[1]))
-
-
 
 
 def _strip_unseen(text: str, keep: set[str]) -> str:
@@ -254,14 +225,10 @@ def _strip_unseen(text: str, keep: set[str]) -> str:
     return result
 
 
-
-
 def _heading(name: str) -> str:
     if name.endswith("_inputs"):
         return f"{FILES_HEADING} ({name})"
     return name.replace("_", " ").strip().capitalize() or name
-
-
 
 
 def _with_sections(text: str, facts: Sequence[str]) -> str:

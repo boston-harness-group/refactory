@@ -6,31 +6,17 @@ from typing import Any, Mapping
 from refactory_dsh.nn.graph import Graph, GraphError, Node
 
 from ._common import MAX_ROUTES, NEUTRAL_REVIEW, NEUTRAL_ROUTE, _Refused, _edits
-from .state import _available, _downstream, _fresh, _outputs
-from .visibility import _readable
+from .state import _available, _downstream, _fresh, _outputs, _sole_out
+from .visibility import _not_on_every_path_hint, _readable, _seen
 from .build import _Steps, _add_chain, _add_detached, _copy_spec, _spec, _step_nodes
-from .placement import _new_facts, _place_all
-from .checks import _head, _upstream
-from .insert import _neighbour_view, _runs_first_on_every_path
+from .placement import _new_facts, _place, _place_all, _readers_from
+from .checks import _head, _plain_step, _upstream
+from .insert import _neighbour_view, _runs_first_on_every_path, _unscored_take_over
 from .loop import _forward_flow, _gate_state, _judge, _judge_spec, _reach
 from .fallback import _at_rejoin, _fallback_parts
 
-import sys as _sys
-
-
-class _Proxy:
-    """Late-bound lookup on the core_ops package for monkeypatch compat."""
-    __slots__ = ()
-    def __getattr__(self, name):
-        return getattr(_sys.modules['refactory_dsh.nn.core_ops'], name)
-
-
-_co = _Proxy()
-
 
 _LABEL = re.compile(r"[A-Za-z][A-Za-z0-9_-]*")
-
-
 
 
 def _route_next(graph: Graph, step: str) -> str | None:
@@ -38,9 +24,7 @@ def _route_next(graph: Graph, step: str) -> str | None:
     fallback, where its two ways rejoin."""
     if graph.falls_back(step):
         return _fallback_parts(graph, step)[1]
-    return _co._sole_out(graph, step)
-
-
+    return _sole_out(graph, step)
 
 
 def _routes(edit: dict, graph: Graph, anchor: Node,
@@ -59,7 +43,7 @@ def _routes(edit: dict, graph: Graph, anchor: Node,
                   if anchor.kind == "agent" else {"kind": "agent", "text": NEUTRAL_REVIEW})
         if anchor.kind == "agent":
             try:
-                _co._route_take_over(graph, state, anchor, _spec({**revise, "takes_over": anchor.id}))
+                _route_take_over(graph, state, anchor, _spec({**revise, "takes_over": anchor.id}))
                 revise["takes_over"] = anchor.id
             except (_Refused, GraphError):
                 pass  # refused here, or a graph whose cycle the edit's own checks refuse
@@ -69,12 +53,10 @@ def _routes(edit: dict, graph: Graph, anchor: Node,
     return to
 
 
-
-
 def _pre_route(edit: dict, state: dict) -> str | None:
     graph = _edits()._graph(state)
-    anchor = _co._plain_step(graph, edit.get("after"), "route")
-    if _co._sole_out(graph, anchor.id) is None:
+    anchor = _plain_step(graph, edit.get("after"), "route")
+    if _sole_out(graph, anchor.id) is None:
         raise _Refused(f"{anchor.id!r} is the last step of its pass or run; route after a step "
                        "that has a next step")
     _judge(edit)
@@ -104,10 +86,8 @@ def _pre_route(edit: dict, state: dict) -> str | None:
         else:
             spec = _spec(target)
             if spec.get("takes_over") is not None:
-                _co._route_take_over(graph, state, anchor, spec)
+                _route_take_over(graph, state, anchor, spec)
     return None
-
-
 
 
 def _route_take_over(graph: Graph, state: Mapping[str, Any], anchor: Node,
@@ -125,7 +105,7 @@ def _route_take_over(graph: Graph, state: Mapping[str, Any], anchor: Node,
     if not (target.writes or target.produces):
         raise _Refused(f"{target_id!r} has no outputs to take over")
     if target_id != anchor.id and not _runs_first_on_every_path(graph, target_id, [anchor.id]):
-        hint = _co._not_on_every_path_hint(graph, target_id)
+        hint = _not_on_every_path_hint(graph, target_id)
         raise _Refused(f"{target_id!r} does not run before the route on every path "
                        f"({hint}); a way's "
                        "new step takes over a step every run passes before it")
@@ -133,14 +113,12 @@ def _route_take_over(graph: Graph, state: Mapping[str, Any], anchor: Node,
         raise _Refused(f"{target_id!r} writes {len(target.writes)} files, and a new agent step "
                        "without tools writes only its reply; take it over with a code step")
     succ = _route_next(graph, anchor.id)
-    unscored = _co._unscored_take_over(graph, state, target,
+    unscored = _unscored_take_over(graph, state, target,
                                    _downstream(graph, succ) if succ is not None else set())
     if unscored:
         raise _Refused(f"nothing after the route reads {target_id!r}'s outputs ({unscored}), "
                        "so taking it over changes nothing")
     return target
-
-
 
 
 def _expand_route(edit: dict, state: dict) -> list[dict]:
@@ -157,7 +135,7 @@ def _expand_route(edit: dict, state: dict) -> list[dict]:
     avail = _available(graph)
     there = avail.get(anchor.id, set()) | _outputs(anchor)
     view = _neighbour_view(graph, state, anchor)
-    seen = _co._seen(graph, state, there, view, edit.get("sees"))
+    seen = _seen(graph, state, there, view, edit.get("sees"))
     gate_id = edit.get("id") or _fresh(graph, f"{anchor.id}_route")
     taken = [gate_id]
     is_sealed = bool(edit.get("sealed"))
@@ -189,9 +167,9 @@ def _expand_route(edit: dict, state: dict) -> list[dict]:
         spec = _spec(target)
         node_id = spec.get("id") or _fresh(graph, f"{anchor.id}_{label}", taken)
         taken.append(node_id)
-        over = (_co._route_take_over(graph, state, anchor, spec)
+        over = (_route_take_over(graph, state, anchor, spec)
                 if spec.get("takes_over") is not None else None)
-        way_seen = _co._seen(graph, state, there, view, spec.get("sees"))
+        way_seen = _seen(graph, state, there, view, spec.get("sees"))
         if over is not None and spec.get("sees") is None:
             # By default it sees what it rewrites, wherever before the route that was made.
             from refactory_dsh.workspace import is_session_log
@@ -218,6 +196,6 @@ def _expand_route(edit: dict, state: dict) -> list[dict]:
         else:
             new_facts += _new_facts(nodes)
     for fact in new_facts:
-        build.add(_co._place(build.state, fact, readers=_co._readers_from(build.graph, succ, build.state),
+        build.add(_place(build.state, fact, readers=_readers_from(build.graph, succ, build.state),
                          guarded=True))
     return build.steps

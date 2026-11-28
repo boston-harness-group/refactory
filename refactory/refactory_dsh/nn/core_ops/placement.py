@@ -8,19 +8,7 @@ from refactory_dsh.nn.graph import Graph, Node
 from ._common import _edits
 from .state import _available, _consumed, _downstream, _task_knob
 from .visibility import _heading
-from .build import _Steps
-
-import sys as _sys
-
-
-class _Proxy:
-    """Late-bound lookup on the core_ops package for monkeypatch compat."""
-    __slots__ = ()
-    def __getattr__(self, name):
-        return getattr(_sys.modules['refactory_dsh.nn.core_ops'], name)
-
-
-_co = _Proxy()
+from .build import _Steps, _respec
 
 
 def _filled_text_knobs(node: Node, state: Mapping[str, Any],
@@ -38,8 +26,6 @@ def _filled_text_knobs(node: Node, state: Mapping[str, Any],
     return [name for name in names
             if ((knobs.get(name) or {}).get("spec") or {}).get("kind") == "str"
             and name not in dead]
-
-
 
 
 def _dead_in(graph: Graph, node: Node, state: Mapping[str, Any]) -> dict[str, list[str]]:
@@ -68,8 +54,6 @@ def _dead_in(graph: Graph, node: Node, state: Mapping[str, Any]) -> dict[str, li
     return out
 
 
-
-
 def dead_text_knobs(state: Mapping[str, Any]) -> dict[str, tuple[str, list[str]]]:
     """Every text knob an op fills whose text reaches no step any more: knob -> (an op
     filling it, the outputs carrying it that nothing reads), e.g. a prompt an op builds for
@@ -88,11 +72,9 @@ def dead_text_knobs(state: Mapping[str, Any]) -> dict[str, tuple[str, list[str]]
     for name, found in dead_by.items():
         if ((knobs.get(name) or {}).get("spec") or {}).get("kind") != "str":
             continue
-        if set(readers.get(name, ())) <= {op for op, _outs in found}:
+        if set(readers.get(name, ())) <= {op for op, _outputs in found}:  # noqa: F811
             out[name] = found[0]
     return out
-
-
 
 
 def dead_knob_reason(name: str, state: Mapping[str, Any],
@@ -118,12 +100,8 @@ def dead_knob_reason(name: str, state: Mapping[str, Any],
             f"which no step reads any more{reached}")
 
 
-
-
 def _fills(node: Node, state: Mapping[str, Any], graph: Graph | None = None) -> bool:
     return node.kind in ("op", "gate") and bool(_filled_text_knobs(node, state, graph))
-
-
 
 
 def _readers_from(graph: Graph, node_id: str, state: Mapping[str, Any]) -> list[str]:
@@ -156,8 +134,6 @@ def _readers_from(graph: Graph, node_id: str, state: Mapping[str, Any]) -> list[
                 order.append(target)
             queue.append(target)
     return order
-
-
 
 
 def _place(state: Mapping[str, Any], fact: str, *, readers: Sequence[str],
@@ -221,8 +197,6 @@ def _place(state: Mapping[str, Any], fact: str, *, readers: Sequence[str],
     return []
 
 
-
-
 def _reslotted(state: Mapping[str, Any], node: Node, fact: str, section: str) -> list[dict]:
     """The steps that give agent ``node``, whose prompt is no knob, ``section`` (the slot
     for ``fact``) after its prompt, in place (`_respec`): its id, outputs, settings and
@@ -234,9 +208,7 @@ def _reslotted(state: Mapping[str, Any], node: Node, fact: str, section: str) ->
         return []
     new_state = node.to_state()
     new_state["prompt_template"] = f"{text.rstrip()}\n\n{section}".lstrip()
-    return _co._respec(state, node.id, new_state)
-
-
+    return _respec(state, node.id, new_state)
 
 
 def _place_all(build: _Steps, facts: Sequence[str], *, after: str, to: str | None = None,
@@ -255,12 +227,10 @@ def _place_all(build: _Steps, facts: Sequence[str], *, after: str, to: str | Non
                 f"would never reach it; insert before {owners[0]} instead", code="E-wiring")
     for fact in facts:
         graph = build.graph
-        readers = _co._readers_from(graph, after, build.state)
+        readers = _readers_from(graph, after, build.state)
         if readers and readers[0] == after:
             readers = readers[1:]
-        build.add(_co._place(build.state, fact, readers=readers, to=to, guarded=guarded))
-
-
+        build.add(_place(build.state, fact, readers=readers, to=to, guarded=guarded))
 
 
 def _new_facts(nodes: Sequence[dict[str, Any]]) -> list[str]:

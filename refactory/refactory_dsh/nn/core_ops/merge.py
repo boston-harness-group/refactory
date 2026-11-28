@@ -6,23 +6,12 @@ from typing import Any, Mapping
 from refactory_dsh.nn.graph import Node
 
 from ._common import _Refused, _edits
-from .state import _available, _consumed, _data_ends, _forks_naming, _fresh, _outputs, _sealed, _text_of, _uses_tools
-from .build import _Steps, _add_chain, _frozen_settings, _spec, _step_nodes
-from .checks import _inputs_helper
+from .state import _available, _consumed, _data_ends, _forks_naming, _fresh, _outputs, _sealed, _sole_out, _text_of, _uses_tools
+from .build import _Steps, _add_chain, _carried_knobs, _drop_orphans, _frozen_settings, _shared_knobs, _spec, _step_nodes
+from .checks import _inputs_helper, _plain_step
 from .remove import _bypass
 from .parallelize import _chain_of
-
-import sys as _sys
-
-
-class _Proxy:
-    """Late-bound lookup on the core_ops package for monkeypatch compat."""
-    __slots__ = ()
-    def __getattr__(self, name):
-        return getattr(_sys.modules['refactory_dsh.nn.core_ops'], name)
-
-
-_co = _Proxy()
+from .visibility import _seen
 
 
 def _merge_tools(edit: Mapping[str, Any], a: Node, b: Node) -> list[str]:
@@ -33,12 +22,8 @@ def _merge_tools(edit: Mapping[str, Any], a: Node, b: Node) -> list[str]:
     return list(dict.fromkeys(t for n in (a, b) if _sealed(n) for t in n.tools))
 
 
-
-
 def _merge_kind(edit: dict, a: Node, b: Node) -> str:
     return edit.get("kind") or ("agent" if "agent" in (a.kind, b.kind) else "code")
-
-
 
 
 def _merge_text(edit: dict, a: Node, b: Node, kind: str, state: Mapping[str, Any]) -> str:
@@ -59,16 +44,14 @@ def _merge_text(edit: dict, a: Node, b: Node, kind: str, state: Mapping[str, Any
     return text
 
 
-
-
 def _pre_merge(edit: dict, state: dict) -> str | None:
     graph = _edits()._graph(state)
     ids = edit.get("steps")
     if not isinstance(ids, list) or len(ids) != 2 or not all(isinstance(i, str) for i in ids):
         raise _Refused("'steps' names two consecutive steps")
-    a, b = (_co._plain_step(graph, i, "merge") for i in ids)
+    a, b = (_plain_step(graph, i, "merge") for i in ids)
     _chain_of(graph, [a.id, b.id], state)
-    _co._sole_out(graph, b.id)
+    _sole_out(graph, b.id)
     for node in (a, b):
         if _forks_naming(graph, node.id):
             raise _Refused(f"{node.id!r} is a fork's branch or a join's source")
@@ -91,16 +74,14 @@ def _pre_merge(edit: dict, state: dict) -> str | None:
             and "exit" in _data_ends(graph, b.id):
         raise _Refused("the two steps start and end the same pass or run")
     _spec({**edit, "kind": kind})
-    carried = _co._carried_knobs(kind, _merge_text(edit, a, b, kind, state), edit.get("system"),
-                             _co._shared_knobs(a, b))
+    carried = _carried_knobs(kind, _merge_text(edit, a, b, kind, state), edit.get("system"),
+                             _shared_knobs(a, b))
     frozen = [k for k in _frozen_settings(graph, state, {a.id, b.id}) if k not in carried]
     if frozen:
         raise _Refused(f"{a.id!r} and {b.id!r} alone read the frozen knob(s) {frozen}")
     if edit.get("id") is not None and edit["id"] in graph.nodes:
         raise _Refused(f"node {edit['id']!r} already exists")
     return None
-
-
 
 
 def _expand_merge(edit: dict, state: dict) -> list[dict]:
@@ -130,10 +111,10 @@ def _expand_merge(edit: dict, state: dict) -> list[dict]:
                   "kind": kind, "text": text, **({"tools": tools} if tools else {})})
     node_id = spec.get("id") or _fresh(graph, f"{a.id}_{b.id}")
     nodes = _step_nodes(graph, state, spec, node_id,
-                        _co._seen(graph, state, there, view, spec.get("sees")),
+                        _seen(graph, state, there, view, spec.get("sees")),
                         writes=list(b.writes), produces=list(b.produces),
                         settings_from=a if a.kind == "agent" else (b if b.kind == "agent" else None),
-                        knobs=_co._shared_knobs(a, b))
+                        knobs=_shared_knobs(a, b))
     if "exit" in _data_ends(graph, b.id):
         build.add(_add_chain(nodes, {"after": b.id}))
         build.add([{"op": "add_edge", "source": e.source, "target": nodes[0]["id"],
@@ -143,5 +124,5 @@ def _expand_merge(edit: dict, state: dict) -> list[dict]:
         build.add([{"op": "add_edge", "source": nodes[-1]["id"], "target": e.target,
                     "condition": e.condition} for e in graph.out_edges(b.id)])
     build.add([{"op": "remove_node", "id": a.id}, {"op": "remove_node", "id": b.id}])
-    _co._drop_orphans(build)
+    _drop_orphans(build)
     return build.steps

@@ -6,23 +6,12 @@ from typing import Any, Mapping, Sequence
 from refactory_dsh.nn.graph import Graph, Node
 
 from ._common import NEUTRAL_STEP, TOOLS_HINTS, _Refused, _edits
-from .state import _available, _consumed, _downstream, _fresh, _outputs, _require_step
-from .build import _Steps, _add_chain, _chain, _copy_spec, _output_renames, _spec, _step_nodes
+from .state import _available, _consumed, _downstream, _fresh, _outputs, _require_step, _sole_out
+from .build import _Steps, _add_chain, _chain, _copy_spec, _output_renames, _renamed, _respec, _spec, _step_nodes
 from .placement import _new_facts, _place_all
 from .loop import _forward_flow, _reach
 from .fallback import _at_rejoin, _fallback_parts
-
-import sys as _sys
-
-
-class _Proxy:
-    """Late-bound lookup on the core_ops package for monkeypatch compat."""
-    __slots__ = ()
-    def __getattr__(self, name):
-        return getattr(_sys.modules['refactory_dsh.nn.core_ops'], name)
-
-
-_co = _Proxy()
+from .visibility import _not_on_every_path_hint, _seen
 
 
 def _where(edit: dict, graph: Graph) -> tuple[str, Node]:
@@ -42,8 +31,6 @@ def _where(edit: dict, graph: Graph) -> tuple[str, Node]:
     return side, anchor
 
 
-
-
 def _neighbour_view(graph: Graph, state: Mapping[str, Any], node: Node) -> set[tuple[str, str]]:
     """What a step put after ``node`` sees by default: what ``node`` takes in and makes; for
     a join, what its branches take in and make."""
@@ -60,13 +47,9 @@ def _neighbour_view(graph: Graph, state: Mapping[str, Any], node: Node) -> set[t
     return _consumed(node, state) | _outputs(node)
 
 
-
-
 def _insert_default(anchor: Node, state: Mapping[str, Any]) -> dict:
     return _copy_spec(anchor, state) if anchor.kind == "agent" else \
         {"kind": "agent", "text": NEUTRAL_STEP}
-
-
 
 
 def _insert_spec(edit: dict, anchor: Node, state: Mapping[str, Any]) -> dict:
@@ -76,8 +59,6 @@ def _insert_spec(edit: dict, anchor: Node, state: Mapping[str, Any]) -> dict:
     return _spec({**copied, **given}, default_kind=default["kind"],
                  default_text=default["text"] if given.get("kind") in (None, default["kind"])
                  else NEUTRAL_STEP)
-
-
 
 
 def _pre_insert(edit: dict, state: dict) -> str | None:
@@ -90,7 +71,7 @@ def _pre_insert(edit: dict, state: dict) -> str | None:
         if anchor.kind == "gate":
             raise _Refused(f"{anchor.id!r} is a gate whose out-edges carry verdicts; insert "
                            "before the step a verdict leads to")
-        _co._sole_out(graph, anchor.id)
+        _sole_out(graph, anchor.id)
     elif anchor.kind in ("join", "data"):
         raise _Refused(f"{anchor.id!r} is a {anchor.kind}; insert after it, or before the "
                        "step it leads to")
@@ -99,7 +80,7 @@ def _pre_insert(edit: dict, state: dict) -> str | None:
         raise _Refused(f"node {spec['id']!r} already exists")
     if edit.get("takes_over") is not None:
         target_id, only = _parse_takes_over(edit["takes_over"])
-        target = _co._take_over_plan(graph, state, target_id, side, anchor, only=only)[0]
+        target = _take_over_plan(graph, state, target_id, side, anchor, only=only)[0]
         if only is not None:
             if spec["kind"] == "agent" and not spec.get("tools"):
                 raise _Refused("a selective 'takes_over' ([step, output, ...]) adds files the new "
@@ -110,8 +91,6 @@ def _pre_insert(edit: dict, state: dict) -> str | None:
                            "step without tools writes only its reply; take it over with a "
                            f"code step{TOOLS_HINTS[0]}")
     return None
-
-
 
 
 def _successors(graph: Graph, node_id: str, back: set[tuple[str, str]]) -> list[str]:
@@ -126,8 +105,6 @@ def _successors(graph: Graph, node_id: str, back: set[tuple[str, str]]) -> list[
     if node.kind == "data" and node.subgraph_entry:
         out.append(node.subgraph_entry)
     return out
-
-
 
 
 def _runs_first_on_every_path(graph: Graph, target_id: str, before: Sequence[str]) -> bool:
@@ -161,8 +138,6 @@ def _runs_first_on_every_path(graph: Graph, target_id: str, before: Sequence[str
     return all(step == target_id or step not in reached for step in before)
 
 
-
-
 def _code_text(node: Node, state: Mapping[str, Any]) -> str | None:
     """A code step's code (its own, or the knob bound to it); None when the step's
     callable is not code this module can read."""
@@ -174,8 +149,6 @@ def _code_text(node: Node, state: Mapping[str, Any]) -> str | None:
         if field_name == "code":
             return str(((state.get("knobs") or {}).get(knob) or {}).get("value") or "")
     return str(node.code or "")
-
-
 
 
 def _marked(node: Node, mark: str) -> bool:
@@ -191,14 +164,10 @@ def _marked(node: Node, mark: str) -> bool:
         return False
 
 
-
-
 def _by_declaration(node: Node) -> bool:
     """Whether an op or gate's callable reads, writes and sets only what its node declares
     (marked `nn.by_declaration`), so its inputs and outputs can be renamed."""
     return _marked(node, "by_declaration")
-
-
 
 
 def _roles(node: Node) -> tuple[str, ...] | None:
@@ -214,8 +183,6 @@ def _roles(node: Node) -> tuple[str, ...] | None:
     except Exception:  # noqa: BLE001 - an unresolvable call is V8's to report
         return None
     return tuple(roles) if roles is not None else None
-
-
 
 
 def _read_renames(node: Node, files: Mapping[str, str]) -> dict[str, str] | None:
@@ -238,16 +205,12 @@ def _read_renames(node: Node, files: Mapping[str, str]) -> dict[str, str] | None
     return after if after != before else None
 
 
-
-
 def _names_itself(node: Node, code: str | None, name: str) -> bool:
     """Whether ``node`` may name ``name`` itself (its code says it, or its callable is not
     marked `nn.by_declaration`): renaming its declaration does not reach it."""
     if code is not None:
         return re.search(rf"\b{re.escape(name)}\b", code) is not None
     return not _by_declaration(node)
-
-
 
 
 def _parse_takes_over(takes: Any) -> tuple[str, frozenset[str] | None]:
@@ -260,8 +223,6 @@ def _parse_takes_over(takes: Any) -> tuple[str, frozenset[str] | None]:
         return takes[0], frozenset(takes[1:])
     raise _Refused("'takes_over' names a step (all its outputs), or [step, output, ...] "
                    "for specific outputs")
-
-
 
 
 def _take_over_plan(graph: Graph, state: Mapping[str, Any], target_id: Any, side: str,
@@ -315,7 +276,7 @@ def _take_over_plan(graph: Graph, state: Mapping[str, Any], target_id: Any, side
                    if (n.kind == "fork" and anchor.id in n.targets)
                    or (n.kind == "data" and n.subgraph_entry == anchor.id)]
     if not _runs_first_on_every_path(graph, target_id, before):
-        hint = _co._not_on_every_path_hint(graph, target_id)
+        hint = _not_on_every_path_hint(graph, target_id)
         raise _Refused(f"{target_id!r} does not run before the new step on every path to it "
                        f"({hint}); "
                        "'takes_over' names a step every run passes before the new one (not a "
@@ -386,7 +347,7 @@ def _take_over_plan(graph: Graph, state: Mapping[str, Any], target_id: Any, side
             raise _Refused(f"{node_id!r} reads {target_id!r}'s output {', '.join(map(repr, named))} "
                            "in its code or feedback keys, which 'takes_over' cannot rename; take "
                            "over a step no such step reads, or change that step first")
-    unscored = _co._unscored_take_over(graph, state, target, after, only=only)
+    unscored = _unscored_take_over(graph, state, target, after, only=only)
     if unscored:
         raise _Refused(f"nothing after the new step reads {target_id!r}'s outputs ({unscored}), "
                        "so taking it over changes nothing; take over a step whose output a "
@@ -398,8 +359,6 @@ def _take_over_plan(graph: Graph, state: Mapping[str, Any], target_id: Any, side
     renames = _output_renames(target, [names.get(("fact", n), n) for n in target.produces],
                               [names.get(("file", n), n) for n in target.writes])
     return target, names, readers, texts, renames, group
-
-
 
 
 def _writer_group(graph: Graph, state: Mapping[str, Any], target: Node,
@@ -424,8 +383,6 @@ def _writer_group(graph: Graph, state: Mapping[str, Any], target: Node,
         if not around & later:
             group.add(node_id)
     return group
-
-
 
 
 def _unscored_take_over(graph: Graph, state: Mapping[str, Any], target: Node,
@@ -453,8 +410,6 @@ def _unscored_take_over(graph: Graph, state: Mapping[str, Any], target: Node,
             f"the Task scores only {', '.join(graded)}")
 
 
-
-
 def _renamed_slots(text: str, names: Mapping[tuple[str, str], str]) -> str:
     """``text`` with each renamed fact's ``{{slot}}`` and ``{% if %}`` test renamed."""
     for (kind, old), new in names.items():
@@ -464,8 +419,6 @@ def _renamed_slots(text: str, names: Mapping[tuple[str, str], str]) -> str:
         text = re.sub(r"(\{%\s*(?:el)?if\s+)" + re.escape(old) + r"(\s*%\})",
                       lambda m: m.group(1) + new + m.group(2), text)
     return text
-
-
 
 
 def _renamed_refs(node_state: dict[str, Any], names: Mapping[tuple[str, str], str]
@@ -481,8 +434,6 @@ def _renamed_refs(node_state: dict[str, Any], names: Mapping[tuple[str, str], st
         if out.get(key):
             out[key] = _renamed_slots(str(out[key]), names)
     return out
-
-
 
 
 def _select_reads(graph: Graph, anchor: Node) -> list[str]:
@@ -507,8 +458,6 @@ def _select_reads(graph: Graph, anchor: Node) -> list[str]:
     return []
 
 
-
-
 def _expand_insert(edit: dict, state: dict) -> list[dict]:
     from refactory_dsh.nn.operators import SELECT_CALL
 
@@ -529,7 +478,7 @@ def _expand_insert(edit: dict, state: dict) -> list[dict]:
     takes = edit.get("takes_over")
     if takes is not None:
         target_id_parsed, only = _parse_takes_over(takes)
-        plan = _co._take_over_plan(graph, state, target_id_parsed, side, anchor, only=only)
+        plan = _take_over_plan(graph, state, target_id_parsed, side, anchor, only=only)
     else:
         only = None
         plan = None
@@ -542,7 +491,7 @@ def _expand_insert(edit: dict, state: dict) -> list[dict]:
         if edit.get("writes") is not None:
             step_kw["writes"] = list(edit["writes"])
     nodes = _step_nodes(graph, state, spec, node_id,
-                        _co._seen(graph, state, there, view, spec.get("sees")),
+                        _seen(graph, state, there, view, spec.get("sees")),
                         settings_from=anchor if anchor.kind == "agent" else None,
                         **step_kw)
     if plan is not None and only is not None:
@@ -555,7 +504,7 @@ def _expand_insert(edit: dict, state: dict) -> list[dict]:
         target, names, readers, texts, renames, group = plan
         # The step taken over writes under new names (selective: only the taken ones;
         # the rest keep their original names).
-        build.add(_co._respec(build.state, target.id, {
+        build.add(_respec(build.state, target.id, {
             **target.to_state(),
             "writes": [names.get(("file", n), n) for n in target.writes],
             "produces": [names.get(("fact", n), n) for n in target.produces],
@@ -584,7 +533,7 @@ def _expand_insert(edit: dict, state: dict) -> list[dict]:
                 if after["renames"] is None:
                     after.pop("renames")
             if after != before:
-                build.add(_co._respec(build.state, reader, after))
+                build.add(_respec(build.state, reader, after))
         for knob, text in sorted(texts.items()):
             build.add([{"op": "set_knob", "name": knob, "value": text}])
         nodes = [_renamed_refs(n, names) for n in nodes]
@@ -604,7 +553,7 @@ def _expand_insert(edit: dict, state: dict) -> list[dict]:
                     n["renames"] = {**(n.get("renames") or {}), "reads": read_map}
     head, _end = _chain(nodes)
     if side == "before":
-        build.add(_co._renamed(build.state, anchor.id, [head], joins=False))
+        build.add(_renamed(build.state, anchor.id, [head], joins=False))
     if side == "after" and build.graph.falls_back(anchor.id):
         # After a step with a fallback is where its two ways rejoin, so the step keeps
         # its fallback, and the new step runs after whichever answered.

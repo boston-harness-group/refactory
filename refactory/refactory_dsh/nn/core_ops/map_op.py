@@ -6,24 +6,12 @@ from typing import Any, Mapping
 from refactory_dsh.nn.graph import Graph, Node
 
 from ._common import MAP_ELEMENT_PROMPT, MAP_ELEMENT_TOOLS_PROMPT, MAP_MAX, NEUTRAL_COMBINE, NEUTRAL_ELEMENT, _Refused, _default_wired, _edits
-from .state import _available, _consumed, _fresh, _outputs
-from .visibility import _heading, _readable, _with_sections
-from .build import _Steps, _add_chain, _add_detached, _simulate, _spec, _step_nodes
+from .state import _available, _consumed, _fresh, _outputs, _sole_out
+from .visibility import _heading, _readable, _seen, _strip_unseen, _with_sections
+from .build import _Steps, _add_chain, _add_detached, _drop_orphans, _respec, _simulate, _spec, _step_nodes
 from .placement import _new_facts, _place_all
-from .checks import _losses, _owned
+from .checks import _losses, _owned, _plain_step, _strip_steps
 from .insert import _neighbour_view
-
-import sys as _sys
-
-
-class _Proxy:
-    """Late-bound lookup on the core_ops package for monkeypatch compat."""
-    __slots__ = ()
-    def __getattr__(self, name):
-        return getattr(_sys.modules['refactory_dsh.nn.core_ops'], name)
-
-
-_co = _Proxy()
 
 
 def _map_list(graph: Graph, state: Mapping[str, Any], anchor: Node, over: Any
@@ -43,8 +31,6 @@ def _map_list(graph: Graph, state: Mapping[str, Any], anchor: Node, over: Any
                    f"whose output it is, not {over!r}; there: {', '.join(names) or 'none'}")
 
 
-
-
 def _map_max(edit: dict) -> int:
     default, lo, hi = MAP_MAX
     cap = edit.get("max", default)
@@ -54,18 +40,14 @@ def _map_max(edit: dict) -> int:
     return cap
 
 
-
-
 def _combine_spec(edit: dict) -> dict:
     return _spec(edit.get("combine"), default_text=NEUTRAL_COMBINE)
 
 
-
-
 def _pre_map(edit: dict, state: dict) -> str | None:
     graph = _edits()._graph(state)
-    anchor = _co._plain_step(graph, edit.get("after"), "map")
-    _co._sole_out(graph, anchor.id)
+    anchor = _plain_step(graph, edit.get("after"), "map")
+    _sole_out(graph, anchor.id)
     _map_list(graph, state, anchor, edit.get("over"))
     _map_max(edit)
     if edit.get("text") is not None and not isinstance(edit.get("text"), str):
@@ -84,8 +66,6 @@ def _pre_map(edit: dict, state: dict) -> str | None:
         if name is not None and name in graph.nodes:
             raise _Refused(f"node {name!r} already exists")
     return None
-
-
 
 
 def _expand_map(edit: dict, state: dict) -> list[dict]:
@@ -108,7 +88,7 @@ def _expand_map(edit: dict, state: dict) -> list[dict]:
     fork, join = _fresh(graph, f"{base}_fork", (base,)), _fresh(graph, f"{base}_join", (base,))
     taken = [base, fork, join]
     there = _available(graph).get(anchor.id, set()) | _outputs(anchor)
-    seen = [key for key in _co._seen(graph, state, there, _neighbour_view(graph, state, anchor),
+    seen = [key for key in _seen(graph, state, there, _neighbour_view(graph, state, anchor),
                                  edit.get("sees")) if key != (kind, over)]
     facts = [name for k, name in seen if k == "fact"]
     files = [name for k, name in seen if k == "file"]
@@ -119,7 +99,7 @@ def _expand_map(edit: dict, state: dict) -> list[dict]:
         nodes.append(collect_node(gather, files, gather,
                                   notes=f"Hands {base}'s elements the files they see."))
         facts.append(gather)
-    text = _with_sections(_co._strip_unseen(edit.get("text") or NEUTRAL_ELEMENT,
+    text = _with_sections(_strip_unseen(edit.get("text") or NEUTRAL_ELEMENT,
                                         set(facts) | set(state.get("knobs") or {})), facts)
     task = f"{base}__task"
     copies = [_fresh(graph, f"{base}_{index}", taken) for index in range(1, cap + 1)]
@@ -209,13 +189,9 @@ def _expand_map(edit: dict, state: dict) -> list[dict]:
     return build.steps
 
 
-
-
 #: The fields a core operator names an existing node in.
 NAMING_FIELDS = ("step", "after", "before", "fork", "back_to", "takes_over", "steps", "over",
                  "target")
-
-
 
 
 def _maps(graph: Graph, state: Mapping[str, Any]) -> dict[str, dict[str, Any]]:
@@ -257,15 +233,11 @@ def _maps(graph: Graph, state: Mapping[str, Any]) -> dict[str, dict[str, Any]]:
     return out
 
 
-
-
 #: What a core operator may do with a map's combine step: everything after it. Anything
 #: else (a step before it, a split, a merge, a copy beside it, new inputs) would come
 #: between its collect step and it.
 COMBINE_OPS = {"remove": "step", "loop": "step", "route": "after", "insert": "after",
                "map": "after", "fallback": "step"}
-
-
 
 
 def _map_part(edit: Mapping[str, Any], state: Mapping[str, Any]) -> str | None:
@@ -305,8 +277,6 @@ def _map_part(edit: Mapping[str, Any], state: Mapping[str, Any]) -> str | None:
             "before the map or its combine step, or remove the map by its elements step")
 
 
-
-
 def _map_removed(graph: Graph, state: Mapping[str, Any], step: str) -> dict[str, Any] | None:
     """The map ``remove`` of ``step`` takes out whole: ``step`` is its elements step or its
     combine; None otherwise."""
@@ -314,8 +284,6 @@ def _map_removed(graph: Graph, state: Mapping[str, Any], step: str) -> dict[str,
         if step in (op, found["combine"]):
             return {"op": op, **found}
     return None
-
-
 
 
 def _unplaced(state: Mapping[str, Any], found: dict[str, Any]) -> list[dict]:
@@ -352,8 +320,6 @@ def _unplaced(state: Mapping[str, Any], found: dict[str, Any]) -> list[dict]:
     return steps
 
 
-
-
 def _pre_remove_map(graph: Graph, state: Mapping[str, Any], found: dict[str, Any]) -> None:
     combine = found["combine"]
     if combine is None or len(graph.out_edges(combine)) > 1:
@@ -373,8 +339,6 @@ def _pre_remove_map(graph: Graph, state: Mapping[str, Any], found: dict[str, Any
                        f"makes: {'; '.join(hard)}; remove or rewire those first")
 
 
-
-
 def _remove_map(state: Mapping[str, Any], found: dict[str, Any]) -> list[dict]:
     """Primitive steps that take a map out whole and lead the step before it to the step
     after its combine, as before the map: its combine's output is taken out of the prompts
@@ -384,21 +348,21 @@ def _remove_map(state: Mapping[str, Any], found: dict[str, Any]) -> list[dict]:
     gone = set(found["nodes"])
     way_in = next(e for n in gone for e in graph.in_edges(n) if e.source not in gone)
     anchor = way_in.source
-    after = _co._sole_out(graph, found["combine"])
+    after = _sole_out(graph, found["combine"])
     build.add(_unplaced(state, found))
     _hard, strip, drop = _losses(build.graph, build.state, gone)
-    build.add(_co._strip_steps(build.state, strip))
+    build.add(_strip_steps(build.state, strip))
     for reader, names in sorted(drop.items()):
         changed = build.graph.nodes[reader].to_state()
         changed["reads"] = [r for r in changed.get("reads") or () if r not in names]
-        build.add(_co._respec(build.state, reader, changed))
+        build.add(_respec(build.state, reader, changed))
     for data in graph.nodes.values():
         if data.kind == "data" and data.subgraph_exit == found["combine"]:
-            build.add(_co._respec(build.state, data.id, {**data.to_state(), "subgraph_exit": anchor}))
+            build.add(_respec(build.state, data.id, {**data.to_state(), "subgraph_exit": anchor}))
     build.add([{"op": "remove_node", "id": node_id} for node_id in found["nodes"]])
     if after is not None:
         # The way in keeps its verdict (a gate before the map leads on as it led in).
         build.add([{"op": "add_edge", "source": anchor, "target": after,
                     "condition": way_in.condition}])
-    _co._drop_orphans(build)
+    _drop_orphans(build)
     return build.steps

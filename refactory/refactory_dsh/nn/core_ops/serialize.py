@@ -5,20 +5,8 @@ from typing import Any, Mapping
 from refactory_dsh.nn.graph import Graph, Node
 
 from ._common import _Refused, _edits
-from .state import _data_ends, _require_step
-from .build import _Steps
-
-import sys as _sys
-
-
-class _Proxy:
-    """Late-bound lookup on the core_ops package for monkeypatch compat."""
-    __slots__ = ()
-    def __getattr__(self, name):
-        return getattr(_sys.modules['refactory_dsh.nn.core_ops'], name)
-
-
-_co = _Proxy()
+from .state import _data_ends, _join_of, _require_step
+from .build import _Steps, _renamed
 
 
 def _pre_serialize(edit: dict, state: dict) -> str | None:
@@ -30,12 +18,10 @@ def _pre_serialize(edit: dict, state: dict) -> str | None:
     return None
 
 
-
-
 def _serialize_plan(graph: Graph, fork: Node) -> tuple[Node, list[list[tuple[str, Any]]]]:
     from refactory_dsh.nn.validate import fork_branches
 
-    join = _co._join_of(graph, fork)
+    join = _join_of(graph, fork)
     if fork.id == graph.start:
         raise _Refused(f"fork {fork.id!r} is the start step; insert a step before it first")
     if _data_ends(graph, fork.id) or _data_ends(graph, join.id):
@@ -43,8 +29,6 @@ def _serialize_plan(graph: Graph, fork: Node) -> tuple[Node, list[list[tuple[str
     ends = [[(e.source, e.condition) for e in graph.in_edges(join.id) if e.source in branch]
             for branch in fork_branches(graph, fork, join.id)]
     return join, ends
-
-
 
 
 def _serialize_steps(state: Mapping[str, Any], fork_id: str) -> list[dict]:
@@ -55,8 +39,8 @@ def _serialize_steps(state: Mapping[str, Any], fork_id: str) -> list[dict]:
     heads = list(fork.targets)
     onward = [(e.target, e.condition) for e in graph.out_edges(join.id)]
     last_ends = [source for source, _c in (ends[-1] if ends else [])]
-    build.add(_co._renamed(build.state, fork.id, heads[:1], joins=False))
-    build.add(_co._renamed(build.state, join.id, last_ends, forks=False))
+    build.add(_renamed(build.state, fork.id, heads[:1], joins=False))
+    build.add(_renamed(build.state, join.id, last_ends, forks=False))
     edges: list[dict] = []
     for edge in graph.in_edges(fork.id):
         targets = [(heads[0], None)] if heads else onward
@@ -76,7 +60,5 @@ def _serialize_steps(state: Mapping[str, Any], fork_id: str) -> list[dict]:
     return build.steps
 
 
-
-
 def _expand_serialize(edit: dict, state: dict) -> list[dict]:
-    return _co._serialize_steps(state, edit["fork"])
+    return _serialize_steps(state, edit["fork"])

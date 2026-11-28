@@ -5,23 +5,12 @@ from typing import Any, Mapping, Sequence
 from refactory_dsh.nn.graph import Graph, Node
 
 from ._common import MAX_BRANCHES, _Refused, _edits
-from .state import _available, _consumed, _forks_naming, _fresh, _outputs, _require_step, _uses_tools
-from .build import _Steps, _add_detached, _chain, _spec, _step_nodes
+from .state import _available, _consumed, _forks_naming, _fresh, _outputs, _require_step, _sole_out, _uses_tools
+from .build import _Steps, _add_detached, _chain, _renamed, _spec, _step_nodes
 from .placement import _new_facts, _place_all
-from .checks import _head
+from .checks import _head, _plain_step
 from .insert import _neighbour_view
-
-import sys as _sys
-
-
-class _Proxy:
-    """Late-bound lookup on the core_ops package for monkeypatch compat."""
-    __slots__ = ()
-    def __getattr__(self, name):
-        return getattr(_sys.modules['refactory_dsh.nn.core_ops'], name)
-
-
-_co = _Proxy()
+from .visibility import _seen
 
 
 def _chain_of(graph: Graph, ids: Sequence[str], state: Mapping[str, Any] | None = None
@@ -39,12 +28,8 @@ def _chain_of(graph: Graph, ids: Sequence[str], state: Mapping[str, Any] | None 
             raise _Refused(f"{second!r} is reached from more than one step")
 
 
-
-
 def _tools_beside(node: Node) -> bool:
     return _uses_tools(node) and node.workspace is None and not node.outputs_only
-
-
 
 
 def _pre_parallelize(edit: dict, state: dict) -> str | None:
@@ -56,7 +41,7 @@ def _pre_parallelize(edit: dict, state: dict) -> str | None:
         anchor = _require_step(graph, edit.get("after"))
         if anchor.kind in ("gate", "fork"):
             raise _Refused(f"{anchor.id!r} is a {anchor.kind}; put new steps after a step")
-        _co._sole_out(graph, anchor.id)
+        _sole_out(graph, anchor.id)
         new = edit["new"]
         if not isinstance(new, list) or not 2 <= len(new) <= MAX_BRANCHES:
             raise _Refused(f"'new' is a list of 2 to {MAX_BRANCHES} steps")
@@ -66,7 +51,7 @@ def _pre_parallelize(edit: dict, state: dict) -> str | None:
     ids = edit.get("steps")
     if not isinstance(ids, list) or not ids or not all(isinstance(i, str) for i in ids):
         raise _Refused("'steps' is a list of step ids")
-    nodes = [_co._plain_step(graph, i, "parallelize") for i in ids]
+    nodes = [_plain_step(graph, i, "parallelize") for i in ids]
     for node in nodes:
         if _forks_naming(graph, node.id) and node.id not in (ids[0], ids[-1]):
             raise _Refused(f"{node.id!r} is named by a fork or join")
@@ -112,17 +97,13 @@ def _pre_parallelize(edit: dict, state: dict) -> str | None:
                                "makes; they cannot run at once")
     if nodes[0].id == graph.start:
         raise _Refused(f"{nodes[0].id!r} is the start step; insert a step before it first")
-    _co._sole_out(graph, ids[-1])
+    _sole_out(graph, ids[-1])
     return None
-
-
 
 
 def _fork_join_ids(graph: Graph, base: str) -> tuple[str, str]:
     fork = _fresh(graph, f"{base}_fork")
     return fork, _fresh(graph, f"{base}_join", (fork,))
-
-
 
 
 def _clone_agent(node: Node, state: Mapping[str, Any], copy_id: str
@@ -167,8 +148,6 @@ def _clone_agent(node: Node, state: Mapping[str, Any], copy_id: str
     return steps, copy
 
 
-
-
 def _expand_parallelize(edit: dict, state: dict) -> list[dict]:
     build = _Steps(state)
     graph = build.graph
@@ -187,7 +166,7 @@ def _expand_parallelize(edit: dict, state: dict) -> list[dict]:
             node_id = spec.get("id") or _fresh(graph, f"{anchor.id}_branch{index + 1}", taken)
             taken.append(node_id)
             nodes = _step_nodes(graph, state, spec, node_id,
-                                _co._seen(graph, state, there, view, spec.get("sees")),
+                                _seen(graph, state, there, view, spec.get("sees")),
                                 settings_from=anchor if anchor.kind == "agent" else None)
             taken += [str(n["id"]) for n in nodes]
             branches.append(nodes)
@@ -225,8 +204,8 @@ def _expand_parallelize(edit: dict, state: dict) -> list[dict]:
     ends = [ids[-1], *(_chain(n)[1] for n in copies)] if copies else list(ids)
     # The new fork stands where the first step stood in an enclosing fork, and the new
     # join where the last step ended an enclosing branch.
-    build.add(_co._renamed(build.state, first.id, [fork], joins=False))
-    build.add(_co._renamed(build.state, last.id, [join], forks=False))
+    build.add(_renamed(build.state, first.id, [fork], joins=False))
+    build.add(_renamed(build.state, last.id, [join], forks=False))
     build.add([
         {"op": "add_node", "node": {"id": join, "kind": "join", "sources": ends},
          "position": {"after": last.id}},

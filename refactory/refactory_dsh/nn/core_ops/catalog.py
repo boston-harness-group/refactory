@@ -11,8 +11,8 @@ from refactory_dsh.seal import SEALED_TOOLS
 from ._common import CORE_OPS, LOOP_ITERATIONS, MAP_MAX, TASK, TOOLS_HINTS, _DEFAULT_WIRED, _Refused, _edits
 from .state import _available, _consumed, _data_ends, _downstream, _is_code, _knob_values, _outputs, _task_knob, _uses_tools
 from .visibility import _readable
-from .build import _Steps, _simulate
-from .placement import _filled_text_knobs, dead_text_knobs
+from .build import _Steps, _respec, _simulate
+from .placement import _filled_text_knobs, _readers_from, dead_text_knobs
 from .checks import _upstream
 from .insert import _expand_insert, _pre_insert
 from .remove import _expand_remove, _pre_remove
@@ -27,18 +27,6 @@ from .fallback import _expand_fallback, _pre_fallback
 from .split_op import _expand_split_line, _pre_split_line, is_one_line_split
 from .merge import _expand_merge, _pre_merge
 
-import sys as _sys
-
-
-class _Proxy:
-    """Late-bound lookup on the core_ops package for monkeypatch compat."""
-    __slots__ = ()
-    def __getattr__(self, name):
-        return getattr(_sys.modules['refactory_dsh.nn.core_ops'], name)
-
-
-_co = _Proxy()
-
 
 def _guarded(check):
     """A precondition that says its refusal (`_Refused`) as the reason."""
@@ -48,8 +36,6 @@ def _guarded(check):
         except _Refused as exc:
             return str(exc)
     return precondition
-
-
 
 
 def _guarded_expand(expand):
@@ -65,10 +51,6 @@ def _guarded_expand(expand):
         steps = steps + _settle_optional(state, steps)
         return steps + _with_item_files(state, steps, wired)
     return run
-
-
-
-
 
 
 def item_files_before(graph: Graph, state: Mapping[str, Any], node_id: str) -> list[str]:
@@ -87,8 +69,6 @@ def item_files_before(graph: Graph, state: Mapping[str, Any], node_id: str) -> l
         return []
     there = _readable(graph, state, set(_available(graph).get(node_id, set())))
     return sorted(path for path in files.values() if ("file", path) in there)
-
-
 
 
 def _with_item_files(start: Mapping[str, Any], steps: Sequence[dict],
@@ -114,13 +94,11 @@ def _with_item_files(start: Mapping[str, Any], steps: Sequence[dict],
                    if path not in node.reads]
         if not missing:
             continue
-        more = _co._respec(end, node_id, {**node.to_state(), "reads": [*node.reads, *missing]})
+        more = _respec(end, node_id, {**node.to_state(), "reads": [*node.reads, *missing]})
         out += more
         end = _simulate(end, more)
         new = _edits()._graph(end)
     return out
-
-
 
 
 def _settle_optional(start: Mapping[str, Any], steps: Sequence[dict]) -> list[dict]:
@@ -155,7 +133,7 @@ def _settle_optional(start: Mapping[str, Any], steps: Sequence[dict]) -> list[di
         again = build.graph.nodes[head].to_state()
         again["knobs"] = [*(again.get("knobs") or []), knob]
         again["field_bindings"] = [*(again.get("field_bindings") or []), ["optional", knob]]
-        build.add(_co._respec(build.state, head, again))
+        build.add(_respec(build.state, head, again))
         build.add([{"op": "set_knob", "name": knob, "value": value}])
     for fork, head, knob, value in stranded:
         graph = build.graph
@@ -171,7 +149,7 @@ def _settle_optional(start: Mapping[str, Any], steps: Sequence[dict]) -> list[di
             moved["field_bindings"] = [*(moved.get("field_bindings") or []),
                                        ["optional", new_knob]]
             build.add([{"op": "add_knob", "name": new_knob, "spec": spec}])
-            build.add(_co._respec(build.state, fresh[0], moved))
+            build.add(_respec(build.state, fresh[0], moved))
             build.add([{"op": "set_knob", "name": new_knob, "value": value}])
         if head in build.graph.nodes:
             if knob in (build.state.get("knobs") or {}) and value != spec.get("default"):
@@ -181,12 +159,10 @@ def _settle_optional(start: Mapping[str, Any], steps: Sequence[dict]) -> list[di
             kept["knobs"] = [k for k in kept.get("knobs") or [] if k != knob]
             kept["field_bindings"] = [pair for pair in kept.get("field_bindings") or []
                                       if pair[0] != "optional"]
-            build.add(_co._respec(build.state, head, kept))
+            build.add(_respec(build.state, head, kept))
         if knob in (build.state.get("knobs") or {}) and knob not in build.graph.knob_consumers():
             build.add([{"op": "remove_knob", "name": knob}])
     return build.steps[len(steps):]
-
-
 
 
 #: Where a new step's output goes (`_place`): one phrase for every operator that says it.
@@ -196,11 +172,8 @@ REACHES = ("its output goes into the nearest prompt {where} that can take it -- 
            "with neither, refused unless a step reads it")
 
 
-
 #: The field a new agent step names its own route in (`Node.route`).
 ROUTE_FIELD = "route"
-
-
 
 
 def route_field_line(offered: Mapping[str, Sequence[str]]) -> str:
@@ -214,8 +187,6 @@ def route_field_line(offered: Mapping[str, Sequence[str]]) -> str:
             "'into', 'new' or 'to'): its own model, effort or output cap, any of them, each "
             f"one of this run's -- {values}; left out, it runs on its neighbour's. E.g. "
             + json.dumps({ROUTE_FIELD: {key: vals[0] for key, vals in offered.items()}}))
-
-
 
 
 #: What the insert line says of 'tools', and the map line: dropped from the request, with
@@ -247,7 +218,6 @@ JUDGE_TOOLS = ("; with 'tools' (an agent judge, as insert's) it runs sealed inst
                "the files it sees in its workspace, and its reply starts with the verdict")
 
 
-
 #: What the insert line says of 'sealed' on a code step, and other operators that accept it.
 SEALED_CODE = ("; 'sealed' true on a code step: its code runs in the Task's tool "
                "environment (its Python interpreter, its extra commands) sealed -- the files "
@@ -269,15 +239,11 @@ STEP_SEALED = "; 'sealed' as insert's on a code step"
 FALLBACK_TOOLS = " or an agent with tools"
 
 
-
-
 def refusal_without_tools(reason: str) -> str:
     """A refusal as a run that offers no tool step says it: without `TOOLS_HINTS`."""
     for hint in TOOLS_HINTS:
         reason = reason.replace(hint, "")
     return reason
-
-
 
 
 def without_tools(description: str, fields: Sequence[str]) -> tuple[str, list[str]]:
@@ -287,8 +253,6 @@ def without_tools(description: str, fields: Sequence[str]) -> tuple[str, list[st
                    STEP_TOOLS, SEALED_CODE, SEALED_JUDGE_CODE, STEP_SEALED, FALLBACK_TOOLS):
         description = description.replace(clause, "")
     return description, [f for f in fields if f not in ("tools", "sealed")]
-
-
 
 
 #: Each operator: its catalogue fields, its one line for the request, and one example
@@ -446,8 +410,6 @@ OPERATORS: dict[str, dict[str, Any]] = {
 }
 
 
-
-
 def _resolved_texts(edit: dict, state: dict) -> dict:
     """``edit`` with each step text that is exactly a knob pointer (`nn.edits.KNOB_POINTER`,
     copied from the request's node reference) replaced by that knob's current text: the
@@ -473,8 +435,6 @@ def _resolved_texts(edit: dict, state: dict) -> dict:
     return out
 
 
-
-
 def _outputs_read(state: Mapping[str, Any], node_id: str) -> dict[str, set[tuple[str, str]]]:
     """Which of ``node_id``'s outputs each other step takes in (`validate.consumed`: a
     ``{{slot}}`` in a prompt or a bound or fills-facts knob, an input, a read)."""
@@ -493,8 +453,6 @@ def _outputs_read(state: Mapping[str, Any], node_id: str) -> dict[str, set[tuple
     return out
 
 
-
-
 def unread_new_steps(before: Mapping[str, Any], after: Mapping[str, Any]) -> list[str]:
     """The steps ``after`` adds to ``before`` whose outputs no step takes in. A step at the
     end of the run or of a pass writing names of its own is read by nothing, since a Task
@@ -511,8 +469,6 @@ def unread_new_steps(before: Mapping[str, Any], after: Mapping[str, Any]) -> lis
             and (nodes[node_id].get("produces") or nodes[node_id].get("writes"))
             and not _outputs(graph.nodes[node_id]) & made
             and not _outputs_read(after, node_id)]
-
-
 
 
 def unread_by_bundle(parent: Mapping[str, Any], states: Sequence[Mapping[str, Any]],
@@ -549,18 +505,12 @@ def unread_by_bundle(parent: Mapping[str, Any], states: Sequence[Mapping[str, An
     return None
 
 
-
-
 #: How many knobs a reader hint names.
 HINT_KNOBS = 4
 
 
-
-
 def _open_knob(state: Mapping[str, Any], name: str) -> bool:
     return not (((state.get("knobs") or {}).get(name) or {}).get("spec") or {}).get("frozen")
-
-
 
 
 def reader_knobs(state: Mapping[str, Any], node_id: str, *, steps: bool = False) -> list[str]:
@@ -572,7 +522,7 @@ def reader_knobs(state: Mapping[str, Any], node_id: str, *, steps: bool = False)
     names: list[str] = []
     if not graph.nodes[node_id].produces:
         return names  # 'to' places a fact; a step making none has nothing to place
-    for reader in _co._readers_from(graph, node_id, state):
+    for reader in _readers_from(graph, node_id, state):
         if reader == node_id:
             continue
         node = graph.nodes[reader]
@@ -586,8 +536,6 @@ def reader_knobs(state: Mapping[str, Any], node_id: str, *, steps: bool = False)
             found = _filled_text_knobs(node, state, graph)
         names += [k for k in found if k not in names and _open_knob(state, k)]
     return names
-
-
 
 
 def _graded_step(graph: Graph, node_id: str, edit: Mapping[str, Any],
@@ -611,8 +559,6 @@ def _graded_step(graph: Graph, node_id: str, edit: Mapping[str, Any],
     return None
 
 
-
-
 def _reader_hint(state: Mapping[str, Any], node_id: str, edit: Mapping[str, Any],
                  before: Mapping[str, Any]) -> str:
     """Where step ``node_id``'s output could go, for a refusal, in one clause: the prompt
@@ -625,7 +571,7 @@ def _reader_hint(state: Mapping[str, Any], node_id: str, edit: Mapping[str, Any]
     takes_to = op in ("insert", "branch", "map", "route") or (
         op == "parallelize" and bool(edit.get("new")))
     graph = _edits()._graph(state)
-    readers = [r for r in _co._readers_from(graph, node_id, state) if r != node_id]
+    readers = [r for r in _readers_from(graph, node_id, state) if r != node_id]
     names = ", ".join(reader_knobs(state, node_id)[:HINT_KNOBS])
     fact = (graph.nodes[node_id].produces or ("",))[0]
     parts = []
@@ -664,8 +610,6 @@ def _reader_hint(state: Mapping[str, Any], node_id: str, edit: Mapping[str, Any]
     return f"insert one seeing it with 'takes_over': {graded}"
 
 
-
-
 def _needed(node: Node, values: Mapping[str, Any]) -> set[tuple[str, str]]:
     """What a step cannot run without. An agent's prompt is read here: its reads and the
     ``{{slots}}`` it needs filled, a slot inside ``{% if name %}`` being optional, as the
@@ -681,8 +625,6 @@ def _needed(node: Node, values: Mapping[str, Any]) -> set[tuple[str, str]]:
     filled = knob_slot_facts(node, values, guarded=True)
     return ((consumed(node, values) - {("fact", name) for name in filled})
             | {("fact", name) for name in knob_slot_facts(node, values)})
-
-
 
 
 def lost_inputs(before: Mapping[str, Any], after: Mapping[str, Any]) -> str | None:
@@ -723,14 +665,10 @@ def lost_inputs(before: Mapping[str, Any], after: Mapping[str, Any]) -> str | No
     return None
 
 
-
-
 #: What a new step written inside an operator ('new', 'into', a route's 'to') may say;
 #: anything else it would ignore, so it is refused (`_unknown_fields`).
 STEP_FIELDS = ("kind", "text", "system", "sees", "id", "to", "call", "reads", "tools", "route",
                "sealed", "produces", "writes")
-
-
 
 
 def _tools_refusal(tools: Any) -> str | None:
@@ -746,8 +684,6 @@ def _tools_refusal(tools: Any) -> str | None:
                 f"(or Claude Code's {', '.join(CLAUDE_CODE_TOOLS)}); {tools!r} is not such a "
                 "list")
     return None
-
-
 
 
 def _unknown_fields(edit: Mapping[str, Any]) -> str | None:
@@ -792,8 +728,6 @@ def _unknown_fields(edit: Mapping[str, Any]) -> str | None:
     return None
 
 
-
-
 def _pointed(pre, expand):
     """A precondition and an expansion that read the edit with its pointer texts resolved
     (`_resolved_texts`): a pointer is never stored as a step's prompt. A field the
@@ -811,8 +745,6 @@ def _pointed(pre, expand):
     def run(edit: dict, state: dict) -> list[dict]:
         return expand(_resolved_texts(edit, state), state)
     return precondition, run
-
-
 
 
 def register(macro, macros: Mapping[str, Any]) -> None:
@@ -875,10 +807,6 @@ def register(macro, macros: Mapping[str, Any]) -> None:
           *_pointed(pre_loop, expand_loop), reads_as=OPERATORS["loop"]["reads_as"])
     macro("split", OPERATORS["split"]["line"] + ".", OPERATORS["split"]["fields"],
           *_pointed(pre_split, expand_split), reads_as=OPERATORS["split"]["reads_as"])
-
-
-
-
 
 
 def wiring_notes(edit: Mapping[str, Any], before: Mapping[str, Any],
@@ -959,8 +887,6 @@ def wiring_notes(edit: Mapping[str, Any], before: Mapping[str, Any],
     return [f"{edit.get('op')}: " + "; ".join(parts)] if parts else []
 
 
-
-
 def item_input_notes(parent: Mapping[str, Any], final: Mapping[str, Any]) -> list[str]:
     """What the candidate says of each sealed tool step (`workspace.is_sealed`) it adds or
     changes inside a per-item pass whose Task lays item files: whether its sealed workspace
@@ -990,13 +916,9 @@ def item_input_notes(parent: Mapping[str, Any], final: Mapping[str, Any]) -> lis
     return notes
 
 
-
-
 #: Where a written-out edit carries whole node objects (`nn.edits`): the field, and whether
 #: it holds a list of them.
 _NODE_FIELDS = (("node", False), ("into", True), ("branches", True))
-
-
 
 
 def default_item_inputs(edit: Mapping[str, Any], before: Mapping[str, Any],
@@ -1033,8 +955,6 @@ def default_item_inputs(edit: Mapping[str, Any], before: Mapping[str, Any],
     return out if changed else None
 
 
-
-
 def _taken_away(before: Mapping[str, Any], after: Mapping[str, Any], added: Sequence[str],
                 removed: Sequence[str]) -> tuple[list[tuple[str, list[str]]], list[str]]:
     """What an edit took from the steps it kept: for each, the files and facts it read or
@@ -1064,14 +984,10 @@ def _taken_away(before: Mapping[str, Any], after: Mapping[str, Any], added: Sequ
     return taken, toolless
 
 
-
-
 def parallel_join_id(graph: Graph, step: str) -> str:
     """The id ``parallelize`` gives the join after ``step`` (or after the steps starting at
     it), so a composition can name it in its next edit."""
     return _fork_join_ids(graph, step)[1]
-
-
 
 
 def select_call() -> str:
@@ -1079,8 +995,6 @@ def select_call() -> str:
     from refactory_dsh.nn.operators import SELECT_CALL
 
     return SELECT_CALL
-
-
 
 
 def example(name: str, ids: Mapping[str, str] | None = None) -> dict[str, Any]:
@@ -1092,8 +1006,6 @@ def example(name: str, ids: Mapping[str, str] | None = None) -> dict[str, Any]:
     return json.loads(text)
 
 
-
-
 def _without_text(value: Any) -> Any:
     """``value`` with every ``text`` field taken out, so each step takes its operator's
     default text (a neutral line, or the neighbour's)."""
@@ -1102,8 +1014,6 @@ def _without_text(value: Any) -> Any:
     if isinstance(value, list):
         return [_without_text(item) for item in value]
     return value
-
-
 
 
 def sample(name: str, state: Mapping[str, Any], rng: Any) -> dict[str, Any]:
