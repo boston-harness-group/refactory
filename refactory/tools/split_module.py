@@ -596,6 +596,14 @@ def _write_source(
 # Main
 # ---------------------------------------------------------------------------
 
+
+def _ruff_command() -> list[str]:
+    """ruff on PATH, else the current interpreter's ruff module (CI runs the tests
+    under the project's environment, where ruff is a module, not a PATH binary)."""
+    import shutil
+    found = shutil.which("ruff")
+    return [found] if found else [sys.executable, "-m", "ruff"]
+
 def main() -> None:
     if len(sys.argv) != 3:
         print(f"Usage: {sys.argv[0]} <source.py> <mapping.json>", file=sys.stderr)
@@ -613,7 +621,6 @@ def main() -> None:
     ie = _import_end(tree)
     de = _docstring_end(tree)
     docstring_text = "".join(source_lines[:de])
-    import_lines = "".join(source_lines[de:ie])
 
     # -- import statements --
     import_stmts = _import_statements(tree, source_lines)
@@ -711,7 +718,7 @@ def main() -> None:
     all_files = [str(Path(p).resolve()) for p in modules.values()]
     all_files.extend(str(init) for init in seen_inits)
     result = subprocess.run(
-        ["ruff", "check", "--fix", "--select", "F401", *all_files],
+        [*_ruff_command(), "check", "--fix", "--select", "F401", *all_files],
         capture_output=True, text=True,
     )
     if result.stdout.strip():

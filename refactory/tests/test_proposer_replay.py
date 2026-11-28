@@ -205,21 +205,19 @@ def _replay_one(fixture: dict, entry: dict) -> dict[str, Any]:
     )
 
 
-def test_sabotage_refusal_message(fixtures: dict) -> None:
+def test_sabotage_refusal_message(fixtures: dict, monkeypatch: pytest.MonkeyPatch) -> None:
     """Monkeypatching a refusal message in product code makes the replay detect it."""
     import refactory_dsh.optim.base as base_mod
+    from conftest import patch_in_package
 
     hit = _find_refused_by_code("E-too-many-edits", fixtures)
     if hit is None:
         pytest.skip("no E-too-many-edits refusal in fixtures")
     fixture, entry, name = hit
 
-    original_rule = base_mod.COUNTING_RULE
-    try:
-        base_mod.COUNTING_RULE = original_rule.replace("changes", "SABOTAGED")
-        actual = _replay_one(fixture, entry)
-    finally:
-        base_mod.COUNTING_RULE = original_rule
+    patch_in_package(monkeypatch, "refactory_dsh.optim", "COUNTING_RULE",
+                     base_mod.COUNTING_RULE.replace("changes", "SABOTAGED"))
+    actual = _replay_one(fixture, entry)
 
     assert actual != entry["expected"], (
         "replay must detect a changed refusal message in product code")
@@ -253,9 +251,9 @@ def test_sabotage_loosen_check(fixtures: dict) -> None:
         "replay must detect a loosened check that flips a refusal to acceptance")
 
 
-def test_sabotage_section_builder(fixtures: dict) -> None:
+def test_sabotage_section_builder(fixtures: dict, monkeypatch: pytest.MonkeyPatch) -> None:
     """Monkeypatching a section builder line in product code breaks the replay."""
-    import refactory_dsh.optim.base as base_mod
+    from conftest import patch_in_package
 
     fixture = None
     sec_entry = None
@@ -280,14 +278,10 @@ def test_sabotage_section_builder(fixtures: dict) -> None:
     except Exception:
         protected, graders = (), ()
 
-    original_lead = base_mod.PIPELINE_VIEW_LEAD
-    try:
-        base_mod.PIPELINE_VIEW_LEAD = "SABOTAGED LEAD LINE"
-        actual = render_sections(state, mode_cls,
-                                 fixture.get("edit_preset", "broad"),
-                                 protected, graders)
-    finally:
-        base_mod.PIPELINE_VIEW_LEAD = original_lead
+    patch_in_package(monkeypatch, "refactory_dsh.optim", "PIPELINE_VIEW_LEAD",
+                     "SABOTAGED LEAD LINE")
+    actual = render_sections(state, mode_cls, fixture.get("edit_preset", "broad"),
+                             protected, graders)
 
     expected_pv = sec_entry["sections"]["pipeline_view"]
     assert actual["pipeline_view"] != expected_pv, (
