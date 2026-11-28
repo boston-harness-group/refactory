@@ -12,6 +12,16 @@
   every accepted combined state keeps every invariant, and each bundle keeps the
   ``compound`` invariant (applied in order, all edits recorded, a refusal naming the
   edit that failed). ``STRUCTURE_FUZZ_COMPOUND`` sets the long tier's share.
+- **Refusal invariants** (quick tier every run, and in the long tier): every refused
+  edit is checked against three invariants — ``refusal_raises`` (no crash),
+  ``refusal_names`` (every name a refusal asserts exists does exist and every fact
+  about it is true in the parent state), and ``refusal_suggestion`` (a suggested
+  placement works). The generator draws ``sees``-probe edits from a separate stream
+  so the refusal invariants are reached often enough without disturbing the existing
+  random walks.
+- **Fixed-seed decision record** (every run): one fixed seed's edits regenerated and
+  diffed against ``fixtures/structure_fuzz_record.json``. Set
+  ``STRUCTURE_FUZZ_REGEN_RECORD=1`` to regenerate the fixture.
 - **Regression corpus** (every run): each minimal case the harness ever found
   (``fixtures/structure_fuzz``) replays clean: refused, or accepted and sound.
 - **Mutation checks**: each invariant's protection is switched off in turn, and the
@@ -946,3 +956,448 @@ def test_v19_does_not_count_a_code_op_as_a_certain_overwrite():
     code = sf.nn.Node("again", "op", call="refactory_dsh.snippet:run", writes=("x.txt",),
                       code="def main(inp):\n    return {'files': {}}\n")
     assert _v19([sf.fg.agent("first", "One", writes="x.txt"), code], [("first", "again")]) == []
+
+
+# ── refusal invariants ───────────────────────────────────────────────────
+
+
+def test_quick_tier_refusal_invariants_are_checked():
+    """Every refused edit's refusal message is checked for name claims and placement
+    suggestions; the new invariants are reached often enough to matter."""
+    stats = sf.Fuzzer(QUICK_SEED, walker=False).run(QUICK_EDITS)
+    hits = stats.refusal_hits
+    assert hits["refusal_names_checked"] > 100, dict(hits)
+    assert hits["refusal_suggestion_checked"] >= 5, dict(hits)
+    assert not stats.findings, _report(stats)
+
+
+def test_mutation_refusal_raises_catches_a_crash_in_the_attempt_path(monkeypatch):
+    """With an operator raising a plain exception, the harness finds a ``refusal_raises``
+    violation instead of letting it pass as an ordinary refusal."""
+    from refactory_dsh.nn import edits as edits_m
+
+    original = edits_m.precheck
+
+    def crash_on_insert(edit, state):
+        if isinstance(edit, dict) and edit.get("op") == "insert":
+            raise KeyError("sabotaged")
+        return original(edit, state)
+
+    monkeypatch.setattr(edits_m, "precheck", crash_on_insert)
+    _finds("refusal_raises", seeds=("fuzz_dataflow", "fuzz_skip_path"))
+
+
+def test_mutation_refusal_names_catches_a_false_producer(monkeypatch):
+    """When a refusal message names a non-existent node as a producer, the
+    ``refusal_names`` invariant catches it."""
+    from refactory_dsh.nn import core_ops
+
+    original = core_ops._producers_of
+
+    def wrong_producers(graph, name):
+        real = original(graph, name)
+        return [*real, "ghost_node_that_does_not_exist"] if real else real
+
+    monkeypatch.setattr(core_ops, "_producers_of", wrong_producers)
+    _finds("refusal_names", seeds=("fuzz_skip_path", "fuzz_gates", "fuzz_fork_join"))
+
+
+def test_mutation_refusal_suggestion_catches_a_bad_anchor(monkeypatch):
+    """When a placement suggestion lists an anchor that does not fix the refusal,
+    the ``refusal_suggestion`` invariant catches it."""
+    from refactory_dsh.nn import core_ops
+
+    original = core_ops._placement_anchors
+
+    def wrong_anchors(graph, name, kind=None, *, keys=None):
+        real = original(graph, name, kind, keys=keys)
+        if real:
+            return [graph.start]
+        return real
+
+    monkeypatch.setattr(core_ops, "_placement_anchors", wrong_anchors)
+    _finds("refusal_suggestion", seeds=("fuzz_skip_path", "fuzz_gates"))
+
+
+# ── fixed-seed decision record ───────────────────────────────────────────
+
+
+def test_the_decision_record_matches_the_fixture():
+    """Regenerate the decision record with the fixed seed and compare it against the
+    committed fixture.  Any change in an edit's decision, reason code, or refusal
+    message is a readable per-edit diff.
+
+    To regenerate on purpose: ``STRUCTURE_FUZZ_REGEN_RECORD=1``.  The quick tier must
+    still pass after regeneration. The long tier (``--run-structure-fuzz-long``) also
+    runs the refusal invariants.
+    """
+    if os.environ.get("STRUCTURE_FUZZ_REGEN_RECORD"):
+        decisions = sf.generate_record()
+        sf.save_record(decisions)
+        pytest.skip("record regenerated")
+    assert sf.RECORD_PATH.exists(), (f"fixture not found at {sf.RECORD_PATH}; "
+                                     "run with STRUCTURE_FUZZ_REGEN_RECORD=1 to generate it")
+    old = sf.load_record()
+    new = sf.generate_record()
+    diffs = sf.diff_records(old, new)
+    assert not diffs, f"{len(diffs)} decision(s) changed:\n" + "\n\n".join(diffs[:10])
+
+
+def test_the_decision_record_is_deterministic_across_processes():
+    """The same seed produces the same record in a separate process."""
+    import subprocess
+    import sys
+
+    script = ("import structure_fuzz as sf, json, hashlib; "
+              "d = sf.generate_record(); "
+              "print(hashlib.sha256(json.dumps(d, sort_keys=True, default=str).encode()).hexdigest())")
+    env = {**os.environ, "PYTHONPATH": str(sf.HERE.parent) + ":" + str(sf.HERE),
+           "REFACTORY_WORKSPACE_SANDBOX": os.environ.get("REFACTORY_WORKSPACE_SANDBOX", "")}
+    runs = []
+    for _ in range(2):
+        result = subprocess.run(
+            [sys.executable, "-c", script],
+            capture_output=True, text=True, cwd=str(sf.HERE), env=env, timeout=120)
+        assert result.returncode == 0, result.stderr
+        runs.append(result.stdout.strip())
+    assert runs[0] == runs[1], f"not deterministic: {runs}"
+
+
+def test_the_decision_record_fails_on_a_changed_message(monkeypatch):
+    """When one refusal message changes by one word, the decision record test catches it."""
+    from refactory_dsh.nn import core_ops
+
+    original_hint = core_ops._not_on_every_path_hint
+
+    def tweaked_hint(graph, name, kind=None, *, keys=None):
+        hint = original_hint(graph, name, kind, keys=keys)
+        return hint.replace("missing on the", "absent on the") if hint else hint
+
+    monkeypatch.setattr(core_ops, "_not_on_every_path_hint", tweaked_hint)
+    old = sf.load_record()
+    new = sf.generate_record()
+    diffs = sf.diff_records(old, new)
+    assert diffs, "the record should have detected the message change"
+
+
+def test_mutation_takeover_historical_bug_is_caught(monkeypatch):
+    """The historical bug combined the kind check and the no-outputs check into
+    one ``if``: ``kind not in ('agent', 'op') or not (writes or produces)``
+    with message ``'X' is a {kind} with no outputs to take over``.  For a
+    non-agent/op node that HAS outputs (a data node), the 'no outputs' claim
+    is false.  The checker must flag a ``refusal_names`` violation in the quick
+    tier, and the decision record must differ from the fixture."""
+    from refactory_dsh.nn import core_ops
+
+    original_plan = core_ops._take_over_plan
+    original_route = core_ops._route_take_over
+
+    def buggy_plan(graph, state, target_id, side, anchor, *, only=None):
+        if isinstance(target_id, str) and target_id in graph.nodes:
+            target = graph.nodes[target_id]
+            if target.kind not in ("agent", "op") or not (target.writes or target.produces):
+                raise core_ops._Refused(
+                    f"'{target_id}' is a {target.kind} with no outputs to take over")
+        return original_plan(graph, state, target_id, side, anchor, only=only)
+
+    def buggy_route(graph, state, anchor, spec):
+        target_id = spec.get("takes_over")
+        if isinstance(target_id, str) and target_id in graph.nodes:
+            target = graph.nodes[target_id]
+            if target.kind not in ("agent", "op") or not (target.writes or target.produces):
+                raise core_ops._Refused(
+                    f"'{target_id}' is a {target.kind} with no outputs to take over")
+        return original_route(graph, state, anchor, spec)
+
+    monkeypatch.setattr(core_ops, "_take_over_plan", buggy_plan)
+    monkeypatch.setattr(core_ops, "_route_take_over", buggy_route)
+    _finds("refusal_names", seeds=("fuzz_data_pass", "fuzz_gates", "fuzz_skip_path"))
+    old = sf.load_record()
+    new = sf.generate_record()
+    diffs = sf.diff_records(old, new)
+    assert diffs, "decision record should differ with the historical bug"
+
+
+def test_mutation_compound_refusal_names_are_checked(monkeypatch):
+    """Compound refusal messages with the ``[edit N of M: op]`` tag are stripped and
+    checked against the intermediate state: a false kind claim is caught."""
+    from refactory_dsh.nn import core_ops
+
+    def sabotaged(graph, node_id, what):
+        node = core_ops._require_step(graph, node_id)
+        if node.kind not in ("agent", "op"):
+            raise core_ops._Refused(
+                f"{node.id!r} is a agent; {what} works on a step (agent, op or code)")
+        return node
+
+    monkeypatch.setattr(core_ops, "_plain_step", sabotaged)
+    fuzzer = sf.Fuzzer(42, walker=False, compound=0.5,
+                       seed_names=("fuzz_gates", "fuzz_draft_review"))
+    fuzzer.run(300)
+    assert fuzzer.stats.refusal_hits["refusal_names"] > 0, (
+        "compound refusals should be checked and find the false kind claim")
+
+
+# ── unit tests: each refusal checker passes TRUE and flags FALSE ─────────
+
+
+def _gates_state():
+    return sf.seeds()["fuzz_gates"].state()
+
+
+class TestRefusalNameCheckers:
+    """Each regex checker in ``check_refusal_names`` passes a true claim and flags a
+    false one.  Gutting or inverting any checker fails one of these tests."""
+
+    def test_re_produced_by(self):
+        state = _gates_state()
+        assert not sf.check_refusal_names(state, ["produced by draft"])
+        assert sf.check_refusal_names(state, ["produced by ghost_node"])
+
+    def test_re_missing_edge_cond(self):
+        state = _gates_state()
+        assert not sf.check_refusal_names(
+            state, ["missing on the check --proceed--> polish path"])
+        assert sf.check_refusal_names(
+            state, ["missing on the check --proceed--> ghost path"])
+
+    def test_re_missing_edge_plain(self):
+        state = _gates_state()
+        assert not sf.check_refusal_names(
+            state, ["missing on the draft --> check path"])
+        assert sf.check_refusal_names(
+            state, ["missing on the ghost --> check path"])
+
+    def test_re_after_anchors(self):
+        state = _gates_state()
+        assert not sf.check_refusal_names(
+            state, ['"after" one of [draft, polish] would reach it'])
+        assert sf.check_refusal_names(
+            state, ['"after" one of [ghost_node] would reach it'])
+
+    def test_re_there_list(self):
+        state = _gates_state()
+        assert not sf.check_refusal_names(state, ["there: draft, polished.txt"])
+        assert sf.check_refusal_names(state, ["there: ghost_fact"])
+
+    def test_re_is_a_kind(self):
+        state = _gates_state()
+        assert not sf.check_refusal_names(state, ["'draft' is a op; x"])
+        assert sf.check_refusal_names(state, ["'draft' is a agent; x"])
+
+    def test_re_existing_nodes(self):
+        state = _gates_state()
+        assert not sf.check_refusal_names(state, ["existing steps: draft, polish"])
+        assert sf.check_refusal_names(state, ["existing steps: ghost"])
+
+    def test_re_gate_verdicts(self):
+        state = _gates_state()
+        assert not sf.check_refusal_names(
+            state, ["gate 'check' has no verdict; its verdicts: proceed, reject"])
+        assert sf.check_refusal_names(
+            state, ["gate 'check' has no verdict; its verdicts: proceed, wrong"])
+
+    def test_re_no_outputs(self):
+        state = _gates_state()
+        assert not sf.check_refusal_names(
+            state, ["'approve' has no outputs to take over"])
+        assert sf.check_refusal_names(
+            state, ["'draft' has no outputs to take over"])
+
+    def test_re_does_not_run_before(self):
+        state = _gates_state()
+        assert not sf.check_refusal_names(
+            state, ["'draft' does not run before the new step on every path"])
+        assert sf.check_refusal_names(
+            state, ["'ghost' does not run before the new step on every path"])
+
+    def test_re_fork_no_join(self):
+        state = sf.seeds()["fuzz_fork_join"].state()
+        assert not sf.check_refusal_names(
+            state, ["fork 'split' has no join after it"])
+        assert sf.check_refusal_names(
+            state, ["fork 'decide' has no join after it"])
+
+    def test_re_has_n_out_edges(self):
+        state = _gates_state()
+        assert not sf.check_refusal_names(
+            state, ["'draft' has 1 out-edge(s) carrying verdicts"])
+        assert sf.check_refusal_names(
+            state, ["'draft' has 5 out-edge(s) carrying verdicts"])
+
+    def test_re_no_step(self):
+        state = _gates_state()
+        assert not sf.check_refusal_names(
+            state, ["no step ghost; existing steps: draft, polish"])
+        assert sf.check_refusal_names(
+            state, ["no step ghost; existing steps: draft, nonexistent"])
+
+    def test_re_reads_which_only(self):
+        state = _gates_state()
+        assert not sf.check_refusal_names(
+            state, ["'polish' reads [draft.txt], which only 'draft' produces"])
+        assert sf.check_refusal_names(
+            state, ["'ghost' reads [draft.txt], which only 'draft' produces"])
+
+    def test_re_writes_n_files(self):
+        state = _gates_state()
+        assert not sf.check_refusal_names(
+            state, ["'draft' writes 1 files"])
+        assert sf.check_refusal_names(
+            state, ["'draft' writes 5 files"])
+
+
+class TestRefusalSuggestionCheckers:
+    """Each sub-checker of ``check_refusal_suggestion`` passes when the suggestion
+    works and flags when it does not."""
+
+    def test_check_insert_suggestion_true_and_false(self):
+        seed = sf.seeds()["fuzz_gates"]
+        applier = sf.Applier(seed)
+        parent = Candidate.from_state(seed.state())
+        edit = {"op": "insert", "after": "draft", "kind": "agent",
+                "sees": ["draft"]}
+        outcome = ["step 'draft's outputs are not there on every path; "
+                    '"after" one of [polish] would reach it']
+
+        # TRUE: suggested anchor fixes it (attempt accepts)
+        with mock.patch.object(applier, "attempt", return_value=parent):
+            vio, did = sf.check_refusal_suggestion(
+                applier, parent, edit, outcome, set())
+            assert did and not vio
+
+        # FALSE: suggested anchor still refuses for the same name
+        still = ["step 'draft's outputs are not there on every path"]
+        with mock.patch.object(applier, "attempt", return_value=still):
+            vio, did = sf.check_refusal_suggestion(
+                applier, parent, edit, outcome, set())
+            assert did and vio
+
+    def test_check_takeover_suggestion_true_and_false(self):
+        seed = sf.seeds()["fuzz_gates"]
+        applier = sf.Applier(seed)
+        parent = Candidate.from_state(seed.state())
+        edit = {"op": "insert", "after": "ship", "kind": "agent",
+                "takes_over": "draft"}
+        outcome = ["'draft' does not run before the new step on every path "
+                    '("after" one of [polish] would reach it)']
+
+        # TRUE: suggested anchor fixes it
+        with mock.patch.object(applier, "attempt", return_value=parent):
+            vio = sf._check_takeover_suggestion(
+                applier, parent, edit, outcome, set())
+            assert not vio
+
+        # FALSE: suggested anchor still refuses for path
+        still = ["'draft' does not run before the route on every path"]
+        with mock.patch.object(applier, "attempt", return_value=still):
+            vio = sf._check_takeover_suggestion(
+                applier, parent, edit, outcome, set())
+            assert vio
+
+    def test_check_route_suggestion_true_and_false(self):
+        seed = sf.seeds()["fuzz_gates"]
+        applier = sf.Applier(seed)
+        parent = Candidate.from_state(seed.state())
+        edit = {"op": "route", "after": "ship",
+                "to": {"proceed": "archive", "other": {"kind": "agent",
+                       "takes_over": "draft"}}}
+        outcome = ["'draft' does not run before the route on every path "
+                    '("after" one of [polish] would reach it)']
+
+        # TRUE: suggested anchor fixes it
+        with mock.patch.object(applier, "attempt", return_value=parent):
+            vio = sf._check_route_suggestion(
+                applier, parent, edit, outcome, set())
+            assert not vio
+
+        # FALSE: suggested anchor still refuses for same complaint
+        still = ["'draft' does not run before the route on every path"]
+        with mock.patch.object(applier, "attempt", return_value=still):
+            vio = sf._check_route_suggestion(
+                applier, parent, edit, outcome, set())
+            assert vio
+
+
+# ── mutation tests: each previously-unreachable checker catches sabotage ──
+
+
+def test_mutation_fork_no_join_checker_catches_wrong_kind(monkeypatch):
+    """When ``_join_of`` claims a non-fork node has no join, the checker catches
+    the false kind claim."""
+    from refactory_dsh.nn import core_ops
+
+    def buggy(graph, fork):
+        ops = [n for n, nd in graph.nodes.items() if nd.kind == "op"]
+        if ops:
+            raise core_ops._Refused(f"fork {ops[0]!r} has no join after it")
+        raise core_ops._Refused(f"fork {fork.id!r} has no join after it")
+
+    monkeypatch.setattr(core_ops, "_join_of", buggy)
+    _finds("refusal_names", seeds=("fuzz_fork_join", "fuzz_nested_fork"))
+
+
+def test_mutation_out_edge_count_checker_catches_wrong_count(monkeypatch):
+    """When ``_sole_out`` claims a wrong edge count, the checker catches it."""
+    from refactory_dsh.nn import core_ops
+
+    original = core_ops._sole_out
+
+    def buggy(graph, node_id):
+        out = graph.out_edges(node_id)
+        if out:
+            raise core_ops._Refused(
+                f"{node_id!r} has 999 out-edge(s) carrying verdicts, so the "
+                "operator cannot tell which one to follow")
+        return None
+
+    monkeypatch.setattr(core_ops, "_sole_out", buggy)
+    _finds("refusal_names", seeds=("fuzz_gates", "fuzz_dataflow"))
+
+
+def test_mutation_no_outputs_checker_catches_false_claim(monkeypatch):
+    """When the product code says a node has no outputs but it does, the
+    checker catches the false claim."""
+    from refactory_dsh.nn import core_ops
+
+    original_plan = core_ops._take_over_plan
+    original_route = core_ops._route_take_over
+
+    def buggy_plan(graph, state, target_id, side, anchor, *, only=None):
+        if isinstance(target_id, str) and target_id in graph.nodes:
+            target = graph.nodes[target_id]
+            if target.kind in ("agent", "op") and (target.writes or target.produces):
+                raise core_ops._Refused(
+                    f"'{target_id}' has no outputs to take over")
+        return original_plan(graph, state, target_id, side, anchor, only=only)
+
+    def buggy_route(graph, state, anchor, spec):
+        target_id = spec.get("takes_over")
+        if isinstance(target_id, str) and target_id in graph.nodes:
+            target = graph.nodes[target_id]
+            if target.kind in ("agent", "op") and (target.writes or target.produces):
+                raise core_ops._Refused(
+                    f"'{target_id}' has no outputs to take over")
+        return original_route(graph, state, anchor, spec)
+
+    monkeypatch.setattr(core_ops, "_take_over_plan", buggy_plan)
+    monkeypatch.setattr(core_ops, "_route_take_over", buggy_route)
+    _finds("refusal_names", seeds=("fuzz_data_pass", "fuzz_gates"))
+
+
+def test_mutation_takeover_suggestion_checker_catches_bad_anchor(monkeypatch):
+    """When ``_placement_anchors`` returns an anchor that does not fix the path
+    issue, the takeover suggestion checker catches it."""
+    from refactory_dsh.nn import core_ops
+
+    original_anchors = core_ops._placement_anchors
+
+    def bad_anchors(graph, name, kind=None, *, keys=None):
+        good = original_anchors(graph, name, kind, keys=keys)
+        targets = [e.target for e in graph.out_edges(name)] if name in graph.nodes else []
+        bad = [t for t in targets if t not in (good or [])]
+        return bad[:3] if bad else good
+
+    monkeypatch.setattr(core_ops, "_placement_anchors", bad_anchors)
+    _finds("refusal_suggestion", seeds=("fuzz_data_pass", "fuzz_gates",
+                                        "fuzz_skip_path"), edits=4000)
