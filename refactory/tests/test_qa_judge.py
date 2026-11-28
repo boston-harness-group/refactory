@@ -743,6 +743,9 @@ def test_the_judge_prompts_state_the_bar_and_ask_for_each_items_kind():
         assert '"kind": "ask" | "check" | "defect" | "test" | "docs" | "style"' in prompt
         assert "weakened existing test" in prompt
         assert "merely missing test" in prompt
+        assert "An ask whose only evidence is a test that cannot fail is not shown built" \
+            in prompt
+        assert "report it with `kind` `ask`, not `test`" in prompt
 
 
 def test_the_overwatch_is_told_a_judged_brief_conflict_is_the_persons_to_settle():
@@ -1168,3 +1171,18 @@ def test_a_judge_that_answers_in_its_message_is_captured_into_its_verdict_file(
     assert receipt["status"] == "delivered", receipt
     assert receipt["captured_final"] == answer_file
     assert (run / answer_file).read_text() == verdict
+
+
+def test_reviews_and_judges_hold_the_brief_over_an_approved_design():
+    """An approved design cannot narrow what the brief pins, and its "already works" or
+    "no change needed" is a claim to check, not a waiver: the reviews and both judges read
+    the same baseline (D6, measure10: three pinned asks were set aside by the design and
+    every review deferred to it)."""
+    from refactory_dsh import design
+    for baseline in (design._ACCEPTANCE_BASELINE, design._JUDGE_BASELINE):
+        text = " ".join(baseline.split())
+        assert "the original brief and explicit user steering, then any approved design" in text
+        assert "approving a design is not agreement to a narrowing inside it" in text
+        assert "on every runtime the brief names, not a waiver" in text
+    for prompt in (design.QA_JUDGE_PROMPT, design.OVERWATCH_PROMPT):
+        assert design._JUDGE_BASELINE in prompt
