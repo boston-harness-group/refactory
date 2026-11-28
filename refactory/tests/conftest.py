@@ -833,3 +833,23 @@ def pytest_runtest_makereport(item: pytest.Item, call: pytest.CallInfo[None]) ->
             f"Test took {report.duration:.1f}s, exceeding the {budget:g}s budget. "
             "Mark it @pytest.mark.slow or speed it up."
         )
+
+
+# ── core_ops monkeypatch helper ──────────────────────────────────────────────
+
+
+def patch_core_op(monkeypatch: pytest.MonkeyPatch, name: str, value: Any) -> None:
+    """Patch ``name`` on ``core_ops`` and on every submodule that imported it.
+
+    Tests monkeypatch ``core_ops.X`` to sabotage a helper and check that the
+    operator's precondition or the validator catches it.  After the split into a
+    package, callers inside the package import ``X`` directly from its submodule,
+    so a patch on the package alone is not seen.  This helper patches both.
+    """
+    from refactory_dsh.nn import core_ops
+
+    monkeypatch.setattr(core_ops, name, value)
+    for attr in dir(core_ops):
+        mod = getattr(core_ops, attr, None)
+        if isinstance(mod, type(core_ops)) and hasattr(mod, name):
+            monkeypatch.setattr(mod, name, value)
