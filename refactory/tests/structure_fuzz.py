@@ -1823,6 +1823,46 @@ class EditGenerator:
         target = rng.choice(pool)
         return {"op": "insert", "after": anchor, "kind": "agent", "takes_over": target}
 
+    def fork_probe(self, state: dict[str, Any]) -> dict[str, Any]:
+        """Serialize or branch targeting a fork without a join, or insert one to set up
+        a future trigger."""
+        rng = self.sees_rng
+        graph = _graph_of(state)
+        orphans = [n for n, nd in graph.nodes.items()
+                   if nd.kind == "fork"
+                   and (graph.fork_join(n) is None
+                        or graph.fork_join(n) not in graph.nodes
+                        or graph.nodes[graph.fork_join(n)].kind != "join")]
+        if orphans:
+            return {"op": rng.choice(("serialize", "branch")), "fork": rng.choice(orphans)}
+        ids = sorted(graph.nodes)
+        if not ids:
+            return {"op": "serialize", "fork": "ghost"}
+        new_id = self.fresh_id(graph, "pfork")
+        targets = rng.sample(ids, k=min(len(ids), 2))
+        return {"op": "add_node",
+                "node": {"id": new_id, "kind": "fork", "targets": targets},
+                "position": {"after": rng.choice(ids)}}
+
+    def edge_probe(self, state: dict[str, Any]) -> dict[str, Any]:
+        """Insert after a node with multiple/conditional out-edges (triggering ``_sole_out``),
+        or add a conditional edge to set up a future trigger."""
+        rng = self.sees_rng
+        graph = _graph_of(state)
+        multi = [n for n, nd in graph.nodes.items()
+                 if nd.kind not in ("fork", "gate")
+                 and (len(graph.out_edges(n)) > 1
+                      or any(e.condition is not None for e in graph.out_edges(n)))]
+        if multi:
+            return {"op": "insert", "after": rng.choice(multi), "kind": "agent"}
+        plain = [n for n, nd in graph.nodes.items()
+                 if nd.kind in ("agent", "op") and graph.out_edges(n)]
+        if not plain:
+            return {"op": "insert", "after": "ghost", "kind": "agent"}
+        return {"op": "add_edge", "source": rng.choice(plain),
+                "target": rng.choice(sorted(graph.nodes)),
+                "condition": rng.choice(("proceed", "revise"))}
+
     def edit(self, state: dict[str, Any]) -> Any:
         rng, graph = self.rng, _graph_of(state)
         if rng.random() < 0.08:
@@ -2190,6 +2230,10 @@ class Fuzzer:
                     edit = generator.sees_probe(current.state)
                 elif probe_roll < 0.14 and ids:
                     edit = generator.takeover_probe(current.state)
+                elif probe_roll < 0.17 and ids:
+                    edit = generator.fork_probe(current.state)
+                elif probe_roll < 0.20 and ids:
+                    edit = generator.edge_probe(current.state)
             self.stats.tried += 1
             self.stats.compound_tried += int(bundle)
             try:
@@ -2525,6 +2569,10 @@ def generate_record(seed: int = RECORD_SEED,
                 edit = generator.sees_probe(current.state)
             elif probe_roll < 0.30 and ids:
                 edit = generator.takeover_probe(current.state)
+            elif probe_roll < 0.35 and ids:
+                edit = generator.fork_probe(current.state)
+            elif probe_roll < 0.40 and ids:
+                edit = generator.edge_probe(current.state)
             try:
                 outcome = applier.attempt(current, edit, seen)
             except Exception as exc:  # noqa: BLE001

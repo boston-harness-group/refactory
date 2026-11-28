@@ -1136,3 +1136,268 @@ def test_mutation_compound_refusal_names_are_checked(monkeypatch):
     fuzzer.run(300)
     assert fuzzer.stats.refusal_hits["refusal_names"] > 0, (
         "compound refusals should be checked and find the false kind claim")
+
+
+# ── unit tests: each refusal checker passes TRUE and flags FALSE ─────────
+
+
+def _gates_state():
+    return sf.seeds()["fuzz_gates"].state()
+
+
+class TestRefusalNameCheckers:
+    """Each regex checker in ``check_refusal_names`` passes a true claim and flags a
+    false one.  Gutting or inverting any checker fails one of these tests."""
+
+    def test_re_produced_by(self):
+        state = _gates_state()
+        assert not sf.check_refusal_names(state, ["produced by draft"])
+        assert sf.check_refusal_names(state, ["produced by ghost_node"])
+
+    def test_re_missing_edge_cond(self):
+        state = _gates_state()
+        assert not sf.check_refusal_names(
+            state, ["missing on the check --proceed--> polish path"])
+        assert sf.check_refusal_names(
+            state, ["missing on the check --proceed--> ghost path"])
+
+    def test_re_missing_edge_plain(self):
+        state = _gates_state()
+        assert not sf.check_refusal_names(
+            state, ["missing on the draft --> check path"])
+        assert sf.check_refusal_names(
+            state, ["missing on the ghost --> check path"])
+
+    def test_re_after_anchors(self):
+        state = _gates_state()
+        assert not sf.check_refusal_names(
+            state, ['"after" one of [draft, polish] would reach it'])
+        assert sf.check_refusal_names(
+            state, ['"after" one of [ghost_node] would reach it'])
+
+    def test_re_there_list(self):
+        state = _gates_state()
+        assert not sf.check_refusal_names(state, ["there: draft, polished.txt"])
+        assert sf.check_refusal_names(state, ["there: ghost_fact"])
+
+    def test_re_is_a_kind(self):
+        state = _gates_state()
+        assert not sf.check_refusal_names(state, ["'draft' is a op; x"])
+        assert sf.check_refusal_names(state, ["'draft' is a agent; x"])
+
+    def test_re_existing_nodes(self):
+        state = _gates_state()
+        assert not sf.check_refusal_names(state, ["existing steps: draft, polish"])
+        assert sf.check_refusal_names(state, ["existing steps: ghost"])
+
+    def test_re_gate_verdicts(self):
+        state = _gates_state()
+        assert not sf.check_refusal_names(
+            state, ["gate 'check' has no verdict; its verdicts: proceed, reject"])
+        assert sf.check_refusal_names(
+            state, ["gate 'check' has no verdict; its verdicts: proceed, wrong"])
+
+    def test_re_no_outputs(self):
+        state = _gates_state()
+        assert not sf.check_refusal_names(
+            state, ["'approve' has no outputs to take over"])
+        assert sf.check_refusal_names(
+            state, ["'draft' has no outputs to take over"])
+
+    def test_re_does_not_run_before(self):
+        state = _gates_state()
+        assert not sf.check_refusal_names(
+            state, ["'draft' does not run before the new step on every path"])
+        assert sf.check_refusal_names(
+            state, ["'ghost' does not run before the new step on every path"])
+
+    def test_re_fork_no_join(self):
+        state = sf.seeds()["fuzz_fork_join"].state()
+        assert not sf.check_refusal_names(
+            state, ["fork 'split' has no join after it"])
+        assert sf.check_refusal_names(
+            state, ["fork 'decide' has no join after it"])
+
+    def test_re_has_n_out_edges(self):
+        state = _gates_state()
+        assert not sf.check_refusal_names(
+            state, ["'draft' has 1 out-edge(s) carrying verdicts"])
+        assert sf.check_refusal_names(
+            state, ["'draft' has 5 out-edge(s) carrying verdicts"])
+
+    def test_re_no_step(self):
+        state = _gates_state()
+        assert not sf.check_refusal_names(
+            state, ["no step ghost; existing steps: draft, polish"])
+        assert sf.check_refusal_names(
+            state, ["no step ghost; existing steps: draft, nonexistent"])
+
+    def test_re_reads_which_only(self):
+        state = _gates_state()
+        assert not sf.check_refusal_names(
+            state, ["'polish' reads [draft.txt], which only 'draft' produces"])
+        assert sf.check_refusal_names(
+            state, ["'ghost' reads [draft.txt], which only 'draft' produces"])
+
+    def test_re_writes_n_files(self):
+        state = _gates_state()
+        assert not sf.check_refusal_names(
+            state, ["'draft' writes 1 files"])
+        assert sf.check_refusal_names(
+            state, ["'draft' writes 5 files"])
+
+
+class TestRefusalSuggestionCheckers:
+    """Each sub-checker of ``check_refusal_suggestion`` passes when the suggestion
+    works and flags when it does not."""
+
+    def test_check_insert_suggestion_true_and_false(self):
+        seed = sf.seeds()["fuzz_gates"]
+        applier = sf.Applier(seed)
+        parent = Candidate.from_state(seed.state())
+        edit = {"op": "insert", "after": "draft", "kind": "agent",
+                "sees": ["draft"]}
+        outcome = ["step 'draft's outputs are not there on every path; "
+                    '"after" one of [polish] would reach it']
+
+        # TRUE: suggested anchor fixes it (attempt accepts)
+        with mock.patch.object(applier, "attempt", return_value=parent):
+            vio, did = sf.check_refusal_suggestion(
+                applier, parent, edit, outcome, set())
+            assert did and not vio
+
+        # FALSE: suggested anchor still refuses for the same name
+        still = ["step 'draft's outputs are not there on every path"]
+        with mock.patch.object(applier, "attempt", return_value=still):
+            vio, did = sf.check_refusal_suggestion(
+                applier, parent, edit, outcome, set())
+            assert did and vio
+
+    def test_check_takeover_suggestion_true_and_false(self):
+        seed = sf.seeds()["fuzz_gates"]
+        applier = sf.Applier(seed)
+        parent = Candidate.from_state(seed.state())
+        edit = {"op": "insert", "after": "ship", "kind": "agent",
+                "takes_over": "draft"}
+        outcome = ["'draft' does not run before the new step on every path "
+                    '("after" one of [polish] would reach it)']
+
+        # TRUE: suggested anchor fixes it
+        with mock.patch.object(applier, "attempt", return_value=parent):
+            vio = sf._check_takeover_suggestion(
+                applier, parent, edit, outcome, set())
+            assert not vio
+
+        # FALSE: suggested anchor still refuses for path
+        still = ["'draft' does not run before the route on every path"]
+        with mock.patch.object(applier, "attempt", return_value=still):
+            vio = sf._check_takeover_suggestion(
+                applier, parent, edit, outcome, set())
+            assert vio
+
+    def test_check_route_suggestion_true_and_false(self):
+        seed = sf.seeds()["fuzz_gates"]
+        applier = sf.Applier(seed)
+        parent = Candidate.from_state(seed.state())
+        edit = {"op": "route", "after": "ship",
+                "to": {"proceed": "archive", "other": {"kind": "agent",
+                       "takes_over": "draft"}}}
+        outcome = ["'draft' does not run before the route on every path "
+                    '("after" one of [polish] would reach it)']
+
+        # TRUE: suggested anchor fixes it
+        with mock.patch.object(applier, "attempt", return_value=parent):
+            vio = sf._check_route_suggestion(
+                applier, parent, edit, outcome, set())
+            assert not vio
+
+        # FALSE: suggested anchor still refuses for same complaint
+        still = ["'draft' does not run before the route on every path"]
+        with mock.patch.object(applier, "attempt", return_value=still):
+            vio = sf._check_route_suggestion(
+                applier, parent, edit, outcome, set())
+            assert vio
+
+
+# ── mutation tests: each previously-unreachable checker catches sabotage ──
+
+
+def test_mutation_fork_no_join_checker_catches_wrong_kind(monkeypatch):
+    """When ``_join_of`` claims a non-fork node has no join, the checker catches
+    the false kind claim."""
+    from refactory_dsh.nn import core_ops
+
+    def buggy(graph, fork):
+        ops = [n for n, nd in graph.nodes.items() if nd.kind == "op"]
+        if ops:
+            raise core_ops._Refused(f"fork {ops[0]!r} has no join after it")
+        raise core_ops._Refused(f"fork {fork.id!r} has no join after it")
+
+    monkeypatch.setattr(core_ops, "_join_of", buggy)
+    _finds("refusal_names", seeds=("fuzz_fork_join", "fuzz_nested_fork"))
+
+
+def test_mutation_out_edge_count_checker_catches_wrong_count(monkeypatch):
+    """When ``_sole_out`` claims a wrong edge count, the checker catches it."""
+    from refactory_dsh.nn import core_ops
+
+    original = core_ops._sole_out
+
+    def buggy(graph, node_id):
+        out = graph.out_edges(node_id)
+        if out:
+            raise core_ops._Refused(
+                f"{node_id!r} has 999 out-edge(s) carrying verdicts, so the "
+                "operator cannot tell which one to follow")
+        return None
+
+    monkeypatch.setattr(core_ops, "_sole_out", buggy)
+    _finds("refusal_names", seeds=("fuzz_gates", "fuzz_dataflow"))
+
+
+def test_mutation_no_outputs_checker_catches_false_claim(monkeypatch):
+    """When the product code says a node has no outputs but it does, the
+    checker catches the false claim."""
+    from refactory_dsh.nn import core_ops
+
+    original_plan = core_ops._take_over_plan
+    original_route = core_ops._route_take_over
+
+    def buggy_plan(graph, state, target_id, side, anchor, *, only=None):
+        if isinstance(target_id, str) and target_id in graph.nodes:
+            target = graph.nodes[target_id]
+            if target.kind in ("agent", "op") and (target.writes or target.produces):
+                raise core_ops._Refused(
+                    f"'{target_id}' has no outputs to take over")
+        return original_plan(graph, state, target_id, side, anchor, only=only)
+
+    def buggy_route(graph, state, anchor, spec):
+        target_id = spec.get("takes_over")
+        if isinstance(target_id, str) and target_id in graph.nodes:
+            target = graph.nodes[target_id]
+            if target.kind in ("agent", "op") and (target.writes or target.produces):
+                raise core_ops._Refused(
+                    f"'{target_id}' has no outputs to take over")
+        return original_route(graph, state, anchor, spec)
+
+    monkeypatch.setattr(core_ops, "_take_over_plan", buggy_plan)
+    monkeypatch.setattr(core_ops, "_route_take_over", buggy_route)
+    _finds("refusal_names", seeds=("fuzz_data_pass", "fuzz_gates"))
+
+
+def test_mutation_takeover_suggestion_checker_catches_bad_anchor(monkeypatch):
+    """When ``_placement_anchors`` returns an anchor that does not fix the path
+    issue, the takeover suggestion checker catches it."""
+    from refactory_dsh.nn import core_ops
+
+    original_anchors = core_ops._placement_anchors
+
+    def bad_anchors(graph, name, kind=None, *, keys=None):
+        good = original_anchors(graph, name, kind, keys=keys)
+        targets = [e.target for e in graph.out_edges(name)] if name in graph.nodes else []
+        bad = [t for t in targets if t not in (good or [])]
+        return bad[:3] if bad else good
+
+    monkeypatch.setattr(core_ops, "_placement_anchors", bad_anchors)
+    _finds("refusal_suggestion", seeds=("fuzz_data_pass", "fuzz_gates",
+                                        "fuzz_skip_path"), edits=4000)

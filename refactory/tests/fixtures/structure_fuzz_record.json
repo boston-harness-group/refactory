@@ -37,20 +37,30 @@
       "decision": "refused",
       "edit": {
         "node": {
-          "evaluator": "",
-          "gate_kind": "agent",
-          "id": "gate1",
-          "kind": "gate",
-          "max_iterations": 2
+          "id": "pfork2",
+          "kind": "fork",
+          "targets": [
+            "report",
+            "items"
+          ]
         },
-        "op": "wrap",
-        "target": "check"
+        "op": "add_node",
+        "position": {
+          "after": "read_item"
+        }
       },
       "reason_codes": [
-        "E-precondition"
+        "V10",
+        "V12",
+        "V13",
+        "V16"
       ],
       "reasons": [
-        "E-precondition: 'check' has no out-edge, so wrapping it would enclose nothing"
+        "V10: cycle through 'items' avoids every gate; route every cycle through a gate with a bounded retry transition",
+        "V12 [items]: the data node has an edge into its own pass, which would run it again outside the iteration",
+        "V13 [pfork2]: fork 'pfork2': data node 'items' inside a fork branch is not supported; move the data node outside the fork or place the fork inside the data body",
+        "V16 [pfork2]: a fork's one unconditional out-edge leads to its join, where its branches meet; this fork leads to 'solve', which is not a join",
+        "V16 [pfork2]: fork 'pfork2': branches declare the same produced facts"
       ],
       "seed_name": "fuzz_data_pass",
       "step": 2
@@ -73,17 +83,16 @@
     {
       "decision": "refused",
       "edit": {
-        "after": "check",
-        "max": 3,
-        "op": "map",
-        "over": "check",
-        "text": "Work on this element (2)."
+        "after": "solve",
+        "kind": "agent",
+        "op": "insert",
+        "takes_over": "items"
       },
       "reason_codes": [
-        "E-protected"
+        "E-precondition"
       ],
       "reasons": [
-        "E-protected: node 'check' is protected, and the edit rewires its out-edges"
+        "E-precondition: 'items' is a data; only agent or op steps can be taken over"
       ],
       "seed_name": "fuzz_data_pass",
       "step": 4
@@ -94,7 +103,7 @@
         "node": {
           "evaluator": "",
           "gate_kind": "user",
-          "id": "gate3",
+          "id": "gate4",
           "kind": "gate",
           "max_iterations": 2
         },
@@ -107,8 +116,8 @@
         "V5"
       ],
       "reasons": [
-        "V5 [gate3]: a gate must not have an unconditional out-edge; every edge out of a gate carries a verdict",
-        "V5 [gate3]: a gate needs at least two conditioned out-edges, has 0"
+        "V5 [gate4]: a gate must not have an unconditional out-edge; every edge out of a gate carries a verdict",
+        "V5 [gate4]: a gate needs at least two conditioned out-edges, has 0"
       ],
       "seed_name": "fuzz_data_pass",
       "step": 5
@@ -116,42 +125,16 @@
     {
       "decision": "refused",
       "edit": {
-        "node": {
-          "blocking": true,
-          "call": "structure_fuzz_graphs:step",
-          "evaluator": "",
-          "id": "read_item_c4",
-          "inline_items": [
-            {
-              "id": "x"
-            }
-          ],
-          "kind": "op",
-          "knobs": [],
-          "max_iterations": 1,
-          "notes": "",
-          "produces": [
-            "question"
-          ],
-          "prompt_template": "",
-          "reads": [
-            "current_item.json"
-          ],
-          "role": "ceo",
-          "score_effect": "affects",
-          "tools": [],
-          "writes": []
-        },
-        "op": "add_node",
-        "position": {
-          "terminal": true
-        }
+        "after": "items",
+        "kind": "agent",
+        "op": "insert",
+        "takes_over": "report"
       },
       "reason_codes": [
-        "E-items"
+        "E-precondition"
       ],
       "reasons": [
-        "E-items: node(s) read_item_c4 declare inline_items, which writes the items into the graph; a harness for a class of work reads its items at run time, so an edit may not bake them in"
+        "E-precondition: 'report' does not run before the new step on every path to it (missing on the solve --> check path); 'takes_over' names a step every run passes before the new one (not a step after it, on a sibling branch or on a branch a route can skip)"
       ],
       "seed_name": "fuzz_data_pass",
       "step": 6
@@ -159,16 +142,16 @@
     {
       "decision": "refused",
       "edit": {
-        "after": "solve",
+        "after": "check",
         "kind": "agent",
         "op": "insert",
-        "takes_over": "items"
+        "takes_over": "read_item"
       },
       "reason_codes": [
-        "E-precondition"
+        "E-protected"
       ],
       "reasons": [
-        "E-precondition: 'items' is a data; only agent or op steps can be taken over"
+        "E-protected: node 'check' is protected, and the edit rewires its out-edges"
       ],
       "seed_name": "fuzz_data_pass",
       "step": 7
@@ -428,41 +411,48 @@
     {
       "decision": "refused",
       "edit": {
-        "condition": null,
-        "op": "remove_edge",
-        "source": "review_new",
-        "target": "finalize"
+        "node": {
+          "id": "pfork4",
+          "kind": "fork",
+          "targets": [
+            "ship_c3",
+            "ship"
+          ]
+        },
+        "op": "add_node",
+        "position": {
+          "after": "ship_c3"
+        }
       },
       "reason_codes": [
-        "V2",
-        "V6"
+        "V10",
+        "V16"
       ],
       "reasons": [
-        "V2 [finalize]: node is not reachable from the start node",
-        "V2 [ship]: node is not reachable from the start node",
-        "V2 [ship_c3]: node is not reachable from the start node",
-        "V6 [ship]: reads 'final.txt', which no node on a path from 'intake' to a terminal produces",
-        "V6 [ship_c3]: reads 'final.txt', which no node on a path from 'intake' to a terminal produces"
+        "V10: cycle through 'ship_c3' avoids every gate; route every cycle through a gate with a bounded retry transition",
+        "V16 [pfork4]: a fork's one unconditional out-edge leads to its join, where its branches meet; this fork leads to 'ship', which is not a join"
       ],
       "seed_name": "fuzz_draft_review",
       "step": 6
     },
     {
-      "decision": "accepted",
+      "decision": "refused",
       "edit": {
-        "into": [
-          {
-            "kind": "code"
-          },
-          {
-            "kind": "agent"
-          }
-        ],
-        "op": "split",
-        "step": "finalize"
+        "after": "ship_c3",
+        "kind": "agent",
+        "op": "insert",
+        "sees": [
+          "draft.txt",
+          "intake"
+        ]
       },
+      "reason_codes": [
+        "E-unread"
+      ],
+      "reasons": [
+        "E-unread: nothing reads the output of new step 'ship_c3_next', so it changes no result (give it 'takes_over': finalize)"
+      ],
       "seed_name": "fuzz_draft_review",
-      "state_id": "05ca1d66c199",
       "step": 7
     },
     {
@@ -569,78 +559,66 @@
     {
       "decision": "refused",
       "edit": {
-        "first": "plot",
-        "op": "reorder",
-        "second": "describe"
+        "condition": "proceed",
+        "op": "add_edge",
+        "source": "intake",
+        "target": "describe_check"
       },
       "reason_codes": [
-        "V15"
+        "V15",
+        "V4"
       ],
       "reasons": [
-        "V15 [describe_check_judge]: needs {{description}}, which some path to it does not produce first; an agent's inputs are required (a data pass's own files and facts stay inside its pass). A fact the runtime re-derives before each dispatch belongs in the node's feedback_keys, and an optional one goes inside {% if name %}...{% endif %}",
-        "V15 [ship]: declares ['description.txt'] as required_reads, which some path to it does not write first; both runtimes refuse to run it without them (a data pass's own files stay inside its pass)"
+        "V15 [describe_check]: declares ['describe_check_judge.txt'] as required_reads, which some path to it does not write first; both runtimes refuse to run it without them (a data pass's own files stay inside its pass)",
+        "V15 [ship]: declares ['description.txt'] as required_reads, which some path to it does not write first; both runtimes refuse to run it without them (a data pass's own files stay inside its pass)",
+        "V4 [intake]: a non-gate node needs at most one out-edge, has 2"
       ],
       "seed_name": "fuzz_file_output",
       "step": 4
     },
     {
-      "decision": "accepted",
+      "decision": "refused",
       "edit": {
-        "branches": [
-          {
-            "call": "structure_fuzz_graphs:step",
-            "id": "op4",
-            "kind": "op",
-            "produces": [
-              "op4_fact"
-            ],
-            "reads": [
-              "answer.txt"
-            ],
-            "required_reads": [
-              "answer.txt"
-            ],
-            "writes": [
-              "op4.txt"
-            ]
-          },
-          {
-            "call": "refactory_dsh.snippet:run",
-            "code": "import json\ndef main(inp):\n    text = json.dumps(inp, sort_keys=True, default=str)\n    return {'facts': {'code5_fact': len(text)},\n            'files': {'code5.txt': text[:200]}}\n",
-            "id": "code5",
-            "inputs": [
-              "description"
-            ],
-            "kind": "op",
-            "produces": [
-              "code5_fact"
-            ],
-            "reads": [],
-            "writes": [
-              "code5.txt"
-            ]
-          }
-        ],
-        "op": "parallel",
-        "target": "ship"
+        "node": {
+          "id": "pfork6",
+          "kind": "fork",
+          "targets": [
+            "plot",
+            "describe"
+          ]
+        },
+        "op": "add_node",
+        "position": {
+          "after": "describe"
+        }
       },
+      "reason_codes": [
+        "V10",
+        "V16"
+      ],
+      "reasons": [
+        "V10: cycle through 'describe' avoids every gate; route every cycle through a gate with a bounded retry transition",
+        "V16 [pfork6]: a fork's one unconditional out-edge leads to its join, where its branches meet; this fork leads to 'describe_check_judge', which is not a join",
+        "V16 [pfork6]: fork 'pfork6': branches declare the same produced facts"
+      ],
       "seed_name": "fuzz_file_output",
-      "state_id": "1492b639c0ea",
       "step": 5
     },
     {
       "decision": "refused",
       "edit": {
-        "after": "describe",
-        "kind": "agent",
-        "op": "insert",
-        "takes_over": "describe_check_judge"
+        "name": "k7",
+        "op": "add_knob",
+        "spec": {
+          "default": "x",
+          "kind": "str"
+        }
       },
       "reason_codes": [
-        "E-precondition"
+        "V7"
       ],
       "reasons": [
-        "E-precondition: 'describe_check_judge' does not run before the new step on every path to it (missing on the describe_check --reloop--> describe path); 'takes_over' names a step every run passes before the new one (not a step after it, on a sibling branch or on a branch a route can skip)"
+        "V7 [k7]: knob is declared but no node consumes it, so moving it cannot change the run"
       ],
       "seed_name": "fuzz_file_output",
       "step": 6
@@ -648,14 +626,15 @@
     {
       "decision": "refused",
       "edit": {
-        "op": "duplicate",
-        "target": "ghost"
+        "op": "remove_edge",
+        "source": "describe_check_judge",
+        "target": "intake"
       },
       "reason_codes": [
-        "E-precondition"
+        "E-edge"
       ],
       "reasons": [
-        "E-precondition: no node 'ghost' to duplicate"
+        "E-edge: no edge 'describe_check_judge' -> 'intake' to remove"
       ],
       "seed_name": "fuzz_file_output",
       "step": 7
@@ -850,36 +829,16 @@
     {
       "decision": "refused",
       "edit": {
-        "node": {
-          "blocking": true,
-          "call": "",
-          "colour": "red",
-          "evaluator": "structure_fuzz_graphs:proceed",
-          "id": "review_c2",
-          "kind": "gate",
-          "knobs": [],
-          "max_iterations": 3,
-          "notes": "does review pass?",
-          "produces": [],
-          "prompt_template": "",
-          "reads": [
-            "work.txt"
-          ],
-          "role": "ceo",
-          "score_effect": "affects",
-          "tools": [],
-          "writes": []
-        },
-        "op": "add_node",
-        "position": {
-          "after": "prepare"
-        }
+        "condition": "revise",
+        "op": "add_edge",
+        "source": "prepare",
+        "target": "work"
       },
       "reason_codes": [
-        "E-shape"
+        "V4"
       ],
       "reasons": [
-        "E-shape: unknown node field(s): ['colour']"
+        "V4 [prepare]: a non-gate node needs at most one out-edge, has 2"
       ],
       "seed_name": "fuzz_gate_loop",
       "step": 3
@@ -911,7 +870,7 @@
         "after": "review",
         "kind": "agent",
         "op": "insert",
-        "takes_over": "work"
+        "takes_over": "prepare"
       },
       "reason_codes": [
         "E-precondition"
@@ -925,16 +884,14 @@
     {
       "decision": "refused",
       "edit": {
-        "after": "review",
-        "kind": "agent",
-        "op": "insert",
-        "takes_over": "prepare"
+        "fork": "work",
+        "op": "serialize"
       },
       "reason_codes": [
         "E-precondition"
       ],
       "reasons": [
-        "E-precondition: 'review' is a gate whose out-edges carry verdicts; insert before the step a verdict leads to"
+        "E-precondition: 'work' is a agent, not a fork"
       ],
       "seed_name": "fuzz_gate_loop",
       "step": 6
@@ -942,33 +899,16 @@
     {
       "decision": "refused",
       "edit": {
-        "node": {
-          "blocking": true,
-          "call": "",
-          "evaluator": "structure_fuzz_graphs:proceed",
-          "id": "raw4",
-          "kind": "gate",
-          "knobs": [],
-          "max_iterations": 3,
-          "notes": "does review pass?",
-          "produces": [],
-          "prompt_template": "",
-          "reads": [
-            "work.txt"
-          ],
-          "role": "ceo",
-          "score_effect": "affects",
-          "tools": [],
-          "writes": []
-        },
-        "op": "insert_after",
-        "target": "review"
+        "after": "prepare",
+        "kind": "agent",
+        "op": "insert",
+        "takes_over": "work"
       },
       "reason_codes": [
         "E-precondition"
       ],
       "reasons": [
-        "E-precondition: 'review' is a gate whose out-edges carry verdicts; 'after' does not say which verdict to splice onto"
+        "E-precondition: 'work' does not run before the new step on every path to it (missing on the review --proceed--> finish path); 'takes_over' names a step every run passes before the new one (not a step after it, on a sibling branch or on a branch a route can skip)"
       ],
       "seed_name": "fuzz_gate_loop",
       "step": 7
@@ -1008,18 +948,24 @@
     {
       "decision": "refused",
       "edit": {
-        "name": "k1",
-        "op": "add_knob",
-        "spec": {
-          "default": "x",
-          "kind": "str"
+        "node": {
+          "id": "pfork2",
+          "kind": "fork",
+          "targets": [
+            "approve",
+            "polish"
+          ]
+        },
+        "op": "add_node",
+        "position": {
+          "after": "rough"
         }
       },
       "reason_codes": [
-        "V7"
+        "V16"
       ],
       "reasons": [
-        "V7 [k1]: knob is declared but no node consumes it, so moving it cannot change the run"
+        "V16 [pfork2]: a fork's one unconditional out-edge leads to its join, where its branches meet; this fork leads to 'approve', which is not a join"
       ],
       "seed_name": "fuzz_gates",
       "step": 2
@@ -1027,15 +973,19 @@
     {
       "decision": "refused",
       "edit": {
-        "kind": "code",
-        "op": "fallback",
-        "step": "polish"
+        "after": "triage",
+        "kind": "agent",
+        "op": "insert",
+        "sees": [
+          "draft.txt",
+          "check"
+        ]
       },
       "reason_codes": [
         "E-precondition"
       ],
       "reasons": [
-        "E-precondition: 'polish' runs outside any per-item pass; a fallback answers for a step that runs once per item"
+        "E-precondition: 'triage' is a gate whose out-edges carry verdicts; insert before the step a verdict leads to"
       ],
       "seed_name": "fuzz_gates",
       "step": 3
@@ -1056,23 +1006,13 @@
       "step": 4
     },
     {
-      "decision": "refused",
+      "decision": "accepted",
       "edit": {
-        "after": "triage",
-        "kind": "agent",
-        "op": "insert",
-        "sees": [
-          "draft.txt",
-          "check"
-        ]
+        "op": "remove",
+        "step": "redo"
       },
-      "reason_codes": [
-        "E-precondition"
-      ],
-      "reasons": [
-        "E-precondition: 'triage' is a gate whose out-edges carry verdicts; insert before the step a verdict leads to"
-      ],
       "seed_name": "fuzz_gates",
+      "state_id": "4eb5457757d7",
       "step": 5
     },
     {
@@ -1090,38 +1030,39 @@
       "step": 6
     },
     {
-      "decision": "accepted",
+      "decision": "refused",
       "edit": {
         "node": {
           "blocking": true,
-          "call": "structure_fuzz_graphs:step",
+          "call": "",
           "evaluator": "",
-          "id": "ship_c3",
-          "kind": "op",
+          "gate_kind": "agent",
+          "id": "triage_c4",
+          "kind": "gate",
           "knobs": [],
           "max_iterations": 1,
-          "notes": "",
-          "produces": [
-            "shipped"
-          ],
+          "notes": "does triage pass?",
+          "produces": [],
           "prompt_template": "",
-          "reads": [
-            "polished.txt"
-          ],
+          "reads": [],
           "role": "ceo",
           "score_effect": "affects",
           "tools": [],
-          "writes": [
-            "answer.txt"
-          ]
+          "writes": []
         },
         "op": "add_node",
         "position": {
           "before": "polish"
         }
       },
+      "reason_codes": [
+        "V5"
+      ],
+      "reasons": [
+        "V5 [triage_c4]: a gate must not have an unconditional out-edge; every edge out of a gate carries a verdict",
+        "V5 [triage_c4]: a gate needs at least two conditioned out-edges, has 0"
+      ],
       "seed_name": "fuzz_gates",
-      "state_id": "0d3a619133a1",
       "step": 7
     },
     {
@@ -1257,36 +1198,20 @@
       "step": 6
     },
     {
-      "decision": "accepted",
+      "decision": "refused",
       "edit": {
-        "node": {
-          "blocking": true,
-          "call": "structure_fuzz_graphs:step",
-          "evaluator": "",
-          "id": "accept_d2_c3_c4",
-          "kind": "op",
-          "knobs": [],
-          "max_iterations": 1,
-          "notes": "",
-          "produces": [
-            "accept_d2_c3_c4_fact"
-          ],
-          "prompt_template": "",
-          "reads": [
-            "label.txt"
-          ],
-          "role": "ceo",
-          "score_effect": "affects",
-          "tools": [],
-          "writes": [
-            "accept_d2_c3_c4.txt"
-          ]
-        },
-        "op": "insert_before",
-        "target": "classify"
+        "condition": "revise",
+        "op": "add_edge",
+        "source": "op1",
+        "target": "accept_d2"
       },
+      "reason_codes": [
+        "V4"
+      ],
+      "reasons": [
+        "V4 [op1]: a non-gate node needs at most one out-edge, has 2"
+      ],
       "seed_name": "fuzz_multi_terminal",
-      "state_id": "8fbadc837bf2",
       "step": 7
     },
     {
@@ -1491,37 +1416,18 @@
     {
       "decision": "refused",
       "edit": {
-        "node": {
-          "blocking": true,
-          "call": "",
-          "evaluator": "",
-          "id": "finalize_next_c4",
-          "kind": "agent",
-          "knobs": [],
-          "max_iterations": 1,
-          "notes": "",
-          "produces": [
-            "finished"
-          ],
-          "prompt_template": "New ask for finalize_next_c4: {{finished}}",
-          "reads": [],
-          "role": "ceo",
-          "score_effect": "affects",
-          "system_prompt_template": "You are copy finalize_next_c4.",
-          "tool_policy": "none",
-          "tools": [],
-          "writes": [
-            "finalize_next_c4.txt"
-          ]
-        },
-        "op": "wrap",
-        "target": "process_c3"
+        "condition": "revise",
+        "op": "add_edge",
+        "source": "finalize",
+        "target": "finalize"
       },
       "reason_codes": [
-        "V15"
+        "V10",
+        "V4"
       ],
       "reasons": [
-        "V15 [finalize_next_c4]: needs {{finished}}, which some path to it does not produce first; an agent's inputs are required (a data pass's own files and facts stay inside its pass). A fact the runtime re-derives before each dispatch belongs in the node's feedback_keys, and an optional one goes inside {% if name %}...{% endif %}"
+        "V10: cycle through 'finalize' avoids every gate; route every cycle through a gate with a bounded retry transition",
+        "V4 [finalize]: a non-gate node needs at most one out-edge, has 2"
       ],
       "seed_name": "fuzz_skip_path",
       "step": 3
@@ -1529,17 +1435,16 @@
     {
       "decision": "refused",
       "edit": {
+        "after": "finalize_next",
         "kind": "agent",
-        "op": "fallback",
-        "role": "judge",
-        "step": "finalize",
-        "text": "Check the work so far (5)."
+        "op": "insert",
+        "takes_over": "has_case"
       },
       "reason_codes": [
         "E-precondition"
       ],
       "reasons": [
-        "E-precondition: 'fallback' does not take 'role'; it would be ignored. Its fields: step, kind, text, system, sees, id, call, reads, tools, route, sealed"
+        "E-precondition: 'has_case' is a gate; only agent or op steps can be taken over"
       ],
       "seed_name": "fuzz_skip_path",
       "step": 4
@@ -1547,33 +1452,48 @@
     {
       "decision": "refused",
       "edit": {
-        "after": "finalize_next",
-        "kind": "agent",
-        "op": "insert",
-        "sees": [
-          "brief.txt"
-        ],
-        "takes_over": "process",
-        "text": "Check the work so far (6)."
+        "node": {
+          "id": "pfork7",
+          "kind": "fork",
+          "targets": [
+            "process",
+            "has_case"
+          ]
+        },
+        "op": "add_node",
+        "position": {
+          "after": "process"
+        }
       },
       "reason_codes": [
-        "E-precondition"
+        "V10",
+        "V16"
       ],
       "reasons": [
-        "E-precondition: 'process' does not run before the new step on every path to it (missing on the has_case --skip--> finalize path); 'takes_over' names a step every run passes before the new one (not a step after it, on a sibling branch or on a branch a route can skip)"
+        "V10: cycle through 'pfork7' avoids every gate; route every cycle through a gate with a bounded retry transition",
+        "V16 [pfork7]: a fork's one unconditional out-edge leads to its join, where its branches meet; this fork leads to 'finalize', which is not a join",
+        "V16 [pfork7]: fork 'pfork7': branches declare the same produced facts"
       ],
       "seed_name": "fuzz_skip_path",
       "step": 5
     },
     {
-      "decision": "accepted",
+      "decision": "refused",
       "edit": {
-        "name": "finalize_next__task",
-        "op": "set_knob",
-        "value": "Work on the task with what you are given, and write your result.\n\n## Finished\n{{finalize}}\n\n## Files from earlier steps (finalize_next_inputs)\n{{finalize_next_inputs}}\nAlso, edit 6."
+        "condition": "revise",
+        "op": "add_edge",
+        "source": "start",
+        "target": "start"
       },
+      "reason_codes": [
+        "V10",
+        "V4"
+      ],
+      "reasons": [
+        "V10: cycle through 'start' avoids every gate; route every cycle through a gate with a bounded retry transition",
+        "V4 [start]: a non-gate node needs at most one out-edge, has 2"
+      ],
       "seed_name": "fuzz_skip_path",
-      "state_id": "087c41e1f23b",
       "step": 6
     },
     {
@@ -1583,7 +1503,7 @@
           "blocking": true,
           "call": "structure_fuzz_graphs:step",
           "evaluator": "",
-          "id": "start_c7",
+          "id": "start_c8",
           "kind": "op",
           "knobs": [],
           "max_iterations": 1,
@@ -1604,7 +1524,7 @@
         "target": "process_c3"
       },
       "seed_name": "fuzz_skip_path",
-      "state_id": "e6a82aa91aae",
+      "state_id": "844935276cba",
       "step": 7
     },
     {
@@ -1754,17 +1674,36 @@
     {
       "decision": "refused",
       "edit": {
-        "op": "add_edge",
-        "source": "decide",
-        "target": "decide_prompt"
+        "node": {
+          "id": "pfork1",
+          "kind": "fork",
+          "targets": [
+            "decide",
+            "prepare"
+          ]
+        },
+        "op": "add_node",
+        "position": {
+          "after": "step_fork"
+        }
       },
       "reason_codes": [
         "V10",
-        "V4"
+        "V15",
+        "V16"
       ],
       "reasons": [
-        "V10: cycle through 'decide_prompt' avoids every gate; route every cycle through a gate with a bounded retry transition",
-        "V4 [decide]: a non-gate node needs at most one out-edge, has 2"
+        "V10: cycle through 'compare' avoids every gate; route every cycle through a gate with a bounded retry transition",
+        "V15 [decide]: needs {{decide_prompt}}, which some path to it does not produce first; an agent's inputs are required (a data pass's own files and facts stay inside its pass). A fact the runtime re-derives before each dispatch belongs in the node's feedback_keys, and an optional one goes inside {% if name %}...{% endif %}",
+        "V16 [pfork1]: branch 'decide' runs ['decide', 'extract_answer'], which come after the join 'step_join'",
+        "V16 [pfork1]: branch 'prepare' leads back to the fork",
+        "V16 [pfork1]: branch 'prepare' runs ['decide', 'extract_answer'], which come after the join 'step_join'",
+        "V16 [pfork1]: branch 'prepare' shares ['decide', 'extract_answer'] with another branch",
+        "V16 [pfork1]: fork 'pfork1': branches declare the same produced facts",
+        "V16 [pfork1]: join 'step_join' waits for 'hypotheses', which a run of branch 'prepare' can finish without",
+        "V16 [pfork1]: join 'step_join' waits for 'precision', which a run of branch 'prepare' can finish without",
+        "V16 [step_fork]: a fork's one unconditional out-edge leads to its join, where its branches meet; this fork leads to 'pfork1', which is not a join",
+        "V16 [step_fork]: fork 'step_fork': branches declare the same produced facts"
       ],
       "seed_name": "livemath_skill_graph",
       "step": 0
@@ -1772,72 +1711,7 @@
     {
       "decision": "refused",
       "edit": {
-        "op": "bypass",
-        "target": "notes_prompts"
-      },
-      "reason_codes": [
-        "V15",
-        "V7"
-      ],
-      "reasons": [
-        "V15 [hypotheses]: needs {{hypotheses_prompt}}, which some path to it does not produce first; an agent's inputs are required (a data pass's own files and facts stay inside its pass). A fact the runtime re-derives before each dispatch belongs in the node's feedback_keys, and an optional one goes inside {% if name %}...{% endif %}",
-        "V15 [precision]: needs {{precision_prompt}}, which some path to it does not produce first; an agent's inputs are required (a data pass's own files and facts stay inside its pass). A fact the runtime re-derives before each dispatch belongs in the node's feedback_keys, and an optional one goes inside {% if name %}...{% endif %}",
-        "V7 [hypotheses_task]: knob is declared but no node consumes it, so moving it cannot change the run",
-        "V7 [precision_task]: knob is declared but no node consumes it, so moving it cannot change the run"
-      ],
-      "seed_name": "livemath_skill_graph",
-      "step": 1
-    },
-    {
-      "decision": "accepted",
-      "edit": {
-        "node": {
-          "call": "refactory_dsh.snippet:run",
-          "code": "import json\ndef main(inp):\n    text = json.dumps(inp, sort_keys=True, default=str)\n    return {'facts': {'code1_fact': len(text)},\n            'files': {'code1.txt': text[:200]}}\n",
-          "id": "code1",
-          "inputs": [],
-          "kind": "op",
-          "produces": [
-            "code1_fact"
-          ],
-          "reads": [
-            "answer.txt"
-          ],
-          "writes": [
-            "code1.txt"
-          ]
-        },
-        "op": "insert_after",
-        "target": "prepare"
-      },
-      "seed_name": "livemath_skill_graph",
-      "state_id": "17f563fbbf0f",
-      "step": 2
-    },
-    {
-      "decision": "accepted",
-      "edit": {
-        "into": [
-          {
-            "kind": "agent",
-            "text": "Use {{answer_label}} here."
-          },
-          {
-            "kind": "agent",
-            "text": "Work on part 3 of the task."
-          }
-        ],
-        "op": "split",
-        "step": "code1"
-      },
-      "seed_name": "livemath_skill_graph",
-      "state_id": "9fc987d92344",
-      "step": 3
-    },
-    {
-      "decision": "refused",
-      "edit": {
-        "after": "step_join",
+        "after": "data",
         "kind": "agent",
         "op": "insert",
         "takes_over": "step_fork"
@@ -1849,23 +1723,83 @@
         "E-precondition: 'step_fork' is a fork; only agent or op steps can be taken over"
       ],
       "seed_name": "livemath_skill_graph",
+      "step": 1
+    },
+    {
+      "decision": "refused",
+      "edit": {
+        "condition": "revise",
+        "op": "add_edge",
+        "source": "prepare",
+        "target": "hypotheses"
+      },
+      "reason_codes": [
+        "V15",
+        "V4"
+      ],
+      "reasons": [
+        "V15 [hypotheses]: needs {{hypotheses_prompt}}, which some path to it does not produce first; an agent's inputs are required (a data pass's own files and facts stay inside its pass). A fact the runtime re-derives before each dispatch belongs in the node's feedback_keys, and an optional one goes inside {% if name %}...{% endif %}",
+        "V4 [prepare]: a non-gate node needs at most one out-edge, has 2"
+      ],
+      "seed_name": "livemath_skill_graph",
+      "step": 2
+    },
+    {
+      "decision": "refused",
+      "edit": {
+        "condition": "proceed",
+        "op": "add_edge",
+        "source": "hypotheses",
+        "target": "notes_prompts"
+      },
+      "reason_codes": [
+        "V10",
+        "V16",
+        "V4"
+      ],
+      "reasons": [
+        "V10: cycle through 'notes_prompts' avoids every gate; route every cycle through a gate with a bounded retry transition",
+        "V16 [step_fork]: branch 'hypotheses' leads back to the fork",
+        "V16 [step_fork]: branch 'hypotheses' shares ['precision'] with another branch",
+        "V16 [step_fork]: fork 'step_fork': a branch prompt depends on a sibling's facts",
+        "V4 [hypotheses]: a non-gate node needs at most one out-edge, has 2"
+      ],
+      "seed_name": "livemath_skill_graph",
+      "step": 3
+    },
+    {
+      "decision": "refused",
+      "edit": {
+        "copies": 2,
+        "op": "parallelize",
+        "steps": [
+          "compare"
+        ]
+      },
+      "reason_codes": [
+        "E-unread"
+      ],
+      "reasons": [
+        "E-unread: nothing reads the output of new step 'compare_copy1', so it changes no result (rewire a later step to see it, in the same edits)"
+      ],
+      "seed_name": "livemath_skill_graph",
       "step": 4
     },
     {
       "decision": "refused",
       "edit": {
-        "before": "finish",
-        "kind": "agent",
-        "op": "insert",
-        "sees": [
-          "precision"
-        ]
+        "name": "k5",
+        "op": "add_knob",
+        "spec": {
+          "default": "x",
+          "kind": "str"
+        }
       },
       "reason_codes": [
-        "E-precondition"
+        "V7"
       ],
       "reasons": [
-        "E-precondition: step 'precision''s outputs are not there on every path to the new step, so it cannot see them (missing on the prepare --> code1_a path; \"after\" one of [decide, decide_prompt, extract_answer, precision, step_join] would reach it); 'sees' requires every path to carry the name, even when the step tolerates its absence"
+        "V7 [k5]: knob is declared but no node consumes it, so moving it cannot change the run"
       ],
       "seed_name": "livemath_skill_graph",
       "step": 5
@@ -1878,44 +1812,19 @@
         "op": "branch"
       },
       "seed_name": "livemath_skill_graph",
-      "state_id": "6cf7b6903e5a",
+      "state_id": "352c65328fc0",
       "step": 6
     },
     {
-      "decision": "refused",
+      "decision": "accepted",
       "edit": {
-        "node": {
-          "call": "refactory_dsh.snippet:run",
-          "code": "def main(inp:\n    return {}\n",
-          "id": "code5",
-          "inputs": [],
-          "kind": "op",
-          "produces": [
-            "code5_fact"
-          ],
-          "reads": [
-            "compare_notes.txt"
-          ],
-          "writes": [
-            "code5.txt"
-          ]
-        },
-        "op": "wrap",
-        "target": "step_fork"
+        "after": "step_join",
+        "kind": "agent",
+        "op": "insert",
+        "takes_over": "compare"
       },
-      "reason_codes": [
-        "V15",
-        "V16",
-        "V18"
-      ],
-      "reasons": [
-        "V15 [decide_prompt]: fills {{step_fork_branch}} into the knobs it reads, which some path to it does not produce first; an optional one goes inside {% if name %}...{% endif %}",
-        "V16 [step_fork]: a fork's one unconditional out-edge leads to its join, where its branches meet; this fork leads to 'code5', which is not a join",
-        "V16 [step_fork]: fork 'step_fork': branches declare the same produced facts",
-        "V16 [step_join]: a join belongs to exactly one fork (the one whose out-edge leads to it); this one belongs to none",
-        "V18 [code5]: code node: code does not parse: line 1: '(' was never closed"
-      ],
       "seed_name": "livemath_skill_graph",
+      "state_id": "4301c11403c8",
       "step": 7
     }
   ],
