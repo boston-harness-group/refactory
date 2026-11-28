@@ -192,7 +192,7 @@ def test_section_lines_has_all_headings_when_data_present():
     text = "\n".join(lines)
     assert "## Computed summary" in text
     assert "### Noise" in text
-    assert "### Item stability" in text
+    assert "### Stability across items" in text
     assert "### By group" in text
     assert "### By step" in text
     assert "### History by kind of change" in text

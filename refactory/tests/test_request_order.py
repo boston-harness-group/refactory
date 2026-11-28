@@ -68,6 +68,12 @@ FINDINGS = [{"source": "failure", "finding": "F-ONE", "items": ["f3", "f1"], "im
             {"source": "success", "finding": "S-ONE", "items": ["p4"], "impact": "medium"}]
 
 
+def _as_reader(analyst_findings: list[dict]) -> list[dict]:
+    """Wrap analyst-format findings in reader-group format for ``reader_findings``."""
+    return [{"failure_patterns": [f for f in analyst_findings if f.get("source") != "success"],
+             "success_patterns": [f for f in analyst_findings if f.get("source") == "success"]}]
+
+
 def _outside_fences(text: str) -> list[tuple[int, str]]:
     """Each line outside a code fence, with its line number: what reads as the request's
     own text (a fenced knob text or step output does not)."""
@@ -98,19 +104,19 @@ def test_the_sections_come_in_order():
 
 
 def test_no_heading_from_an_item_reads_as_a_section():
-    text = _ctx(_many(), findings=FINDINGS).render()
+    # Analysts off: items shown in full; fencing still applies.
+    text = _ctx(_many(), reader_findings=_as_reader(FINDINGS)).render()
     headings = _sections(text)
     assert not any(h.startswith(("# Summary", "## Option A")) for h in headings), headings
     assert sum(1 for h in headings if h == "## Answer") == 1
-    # Each step output sits in a fence, its heading lines escaped: no level reads as one
-    # of the request's.
     item = text.split("### Item f3", 1)[1].split("### Item", 1)[0]
     assert "\n```\n\\## Option A\n" in item and "\n\\# Summary\n" in item
     assert "\n## Option A\n" not in text and "\n#### Option A\n" not in text
 
 
 def test_a_few_items_are_shown_in_full_failures_the_findings_cite_first_then_successes():
-    text = _ctx(_many(), findings=FINDINGS).render()
+    # Analysts off: items shown in full via reader findings.
+    text = _ctx(_many(), reader_findings=_as_reader(FINDINGS)).render()
     shown = re.findall(r"^### Item (\S+) — (\S+ ?\S*)", text, re.M)
     ids = [item for item, _ in shown]
     assert ids == ["f3", "f2", "p4"], ids  # one per finding of each kind, in rank order
@@ -120,15 +126,17 @@ def test_a_few_items_are_shown_in_full_failures_the_findings_cite_first_then_suc
 
 
 def test_successes_are_shown_whenever_there_are_any():
-    text = _ctx(_many(n_fail=10, n_pass=1), findings=FINDINGS[:2]).render()
+    # Analysts off: items shown in full via reader findings.
+    text = _ctx(_many(n_fail=10, n_pass=1), reader_findings=_as_reader(FINDINGS[:2])).render()
     assert "(A success, for contrast.)" in text and "### Item p0" in text
-    none = _ctx(_many(n_fail=10, n_pass=0), findings=FINDINGS[:2]).render()
+    none = _ctx(_many(n_fail=10, n_pass=0), reader_findings=_as_reader(FINDINGS[:2])).render()
     assert "(A success, for contrast.)" not in none
 
 
 def test_a_cut_is_marked_in_place_without_a_path_and_recorded():
+    # Analysts off: items shown in full; cutting applies to oversized items.
     huge = [_record("f0", False, size=200000), *_many(n_fail=5, n_pass=2, size=2000)]
-    ctx = _ctx(huge, findings=[{"source": "failure", "finding": "F", "items": ["f0"]}])
+    ctx = _ctx(huge, reader_findings=_as_reader([{"source": "failure", "finding": "F", "items": ["f0"]}]))
     text = ctx.render()
     marks = re.findall(r"\[… ([\d,]+) chars omitted\]", text)
     assert marks and len(marks) == len(ctx.omissions), (marks, ctx.omissions)
@@ -136,15 +144,14 @@ def test_a_cut_is_marked_in_place_without_a_path_and_recorded():
         o["chars"] for o in ctx.omissions)
     assert all(o["item"] == "f0" and o["step"] for o in ctx.omissions), ctx.omissions
     assert not re.search(r"(optimizer_trace|\.jsonl|/runs/|item_records)", text)
-    # Rendered again, the record says what this rendering cut, not the last one's too.
     ctx.render()
     assert len(ctx.omissions) == len(marks)
 
 
 def test_many_long_items_are_chosen_not_cut():
     """Size is no reason to cut: the items the findings choose are each shown whole, and
-    the rest are in the table."""
-    ctx = _ctx(_many(n_fail=20, n_pass=15, size=9000), findings=FINDINGS)
+    the rest are in the table. Analysts off: items shown in full via reader findings."""
+    ctx = _ctx(_many(n_fail=20, n_pass=15, size=9000), reader_findings=_as_reader(FINDINGS))
     text = ctx.render()
     items_part = text.split("## Trajectories of the candidate being edited", 1)[1].split(
         base.REFERENCE_HEADING, 1)[0]
@@ -163,7 +170,8 @@ def test_the_optimizer_traces_what_its_request_left_out(tmp_path):
     optimizer = AutoresearchOptimizer(Silent())
     optimizer.trace_path = tmp_path / "optimizer_trace.jsonl"
     huge = [_record("f0", False, size=200000), *_many(n_fail=5, n_pass=2, size=2000)]
-    ctx = _ctx(huge, findings=[{"source": "failure", "finding": "F", "items": ["f0"]}])
+    # Analysts off: items shown in full; cutting and omission recording apply.
+    ctx = _ctx(huge, reader_findings=_as_reader([{"source": "failure", "finding": "F", "items": ["f0"]}]))
     optimizer.propose(ctx, 1, [Candidate.from_state({"graph": {"nodes": {}, "edges": []},
                                                      "knobs": {}})])
     calls = [json.loads(line) for line in optimizer.trace_path.read_text().splitlines()]
@@ -175,10 +183,10 @@ def test_the_optimizer_traces_what_its_request_left_out(tmp_path):
 
 def test_one_contrasting_success_is_shown_per_success_finding():
     """Two success findings, each citing its own passing item: both are shown beside the
-    failures, one per finding in rank order."""
+    failures, one per finding in rank order. Analysts off: items shown in full."""
     findings = [*FINDINGS, {"source": "success", "finding": "S-TWO", "items": ["p6"],
                             "impact": "low"}]
-    text = _ctx(_many(), findings=findings).render()
+    text = _ctx(_many(), reader_findings=_as_reader(findings)).render()
     ids = re.findall(r"^### Item (\S+) — ", text, re.M)
     assert ids == ["f3", "f2", "p4", "p6"], ids
     assert text.count("(A success, for contrast.)") == 2

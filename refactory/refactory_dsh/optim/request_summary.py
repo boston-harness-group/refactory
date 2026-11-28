@@ -147,7 +147,7 @@ def section_lines(summary: Mapping[str, Any] | None) -> list[str]:
     lines = ["## Computed summary"]
     subsections = [
         ("### Noise (rescore spread)", _noise_lines(summary.get("noise"))),
-        ("### Item stability", _item_stability_lines(summary.get("item_stability"))),
+        ("### Stability across items", _item_stability_lines(summary.get("item_stability"))),
         ("### By group", _by_group_lines(summary.get("by_group"))),
         ("### By step", _by_step_lines(summary.get("by_step"))),
         ("### History by kind of change",

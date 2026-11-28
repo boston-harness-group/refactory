@@ -351,8 +351,8 @@ SIZE_CHOSEN = re.compile(r"(?i)as many (?:\w+ ){0,3}as (?:fit|fits|the budget|ro
 
 
 def _selected_requests() -> list[str]:
-    """Proposal requests whose items are not all shown: picked by analyst findings, by
-    reader findings, and with none."""
+    """Proposal requests whose items are not all shown: picked by analyst findings (no
+    inline traces), by reader findings (items in full), and with none."""
     from test_request_order import FINDINGS, _ctx, _many
 
     reader = [{"group": 1, "items": [], "failure_patterns": [
@@ -366,8 +366,12 @@ def _selected_requests() -> list[str]:
 def test_no_request_says_items_were_chosen_by_how_much_fits(kind, requests):
     texts = [text for text, _records in requests[kind]]
     if kind == "proposal":
-        texts += _selected_requests()
-        assert all("Some items in full" in t for t in texts[-3:]), "setup: items picked"
+        selected = _selected_requests()
+        texts += selected
+        # Analysts on: no inline traces, so "Some items in full" absent (by design).
+        # Reader findings / no findings: items picked and shown in full.
+        assert all("Some items in full" in t or "Every item" in t
+                   for t in selected), "setup: items picked or tabled"
     for text in texts:
         said = [m.group(0) for m in SIZE_CHOSEN.finditer(_system_written(text))]
         assert said == [], (kind, said[:3])
