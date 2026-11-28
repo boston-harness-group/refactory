@@ -1,4 +1,5 @@
 {
+  "base_commit": "15914e84a7",
   "source": "refactory/refactory_dsh/optim/base.py",
   "modules": {
     "types": "refactory/refactory_dsh/optim/types.py",
@@ -307,5 +308,99 @@
     "_table_filled": "request.objective",
     "_cell": "request.objective",
     "Optimizer": "base"
+  },
+  "cross_imports": {
+    "refusals": {
+      "top_imports": {
+        ".types": ["COUNTING_RULE", "MAX_RAW_EDITS_PER_PROPOSAL", "NODE_OBJECT_FIELDS", "Proposal", "Rejection", "candidate_id"]
+      },
+      "bottom_imports": {
+        ".request.edits": ["describe_edits"],
+        ".request.items": ["_clip"]
+      }
+    },
+    "request.context": {
+      "lazy_imports": {
+        "_edit_change": {
+          ".edits": ["_edit_change_lines", "knob_homes"],
+          ".items": ["TRAJECTORIES_HEADING", "trajectories_whole"]
+        },
+        "_leaderboard_lines": {
+          ".edits": ["_gate_column", "compact_edits"],
+          ".objective": ["_cost_cell", "_table", "fmt_score"]
+        },
+        "_tried_lines": {
+          "..refusals": ["refused_lines", "repair_loss_lines"],
+          ".edits": ["_attempt_lines", "_current_line", "_gate_column", "_gate_note", "_reasoning_lines", "knob_homes", "reasoning_shown"],
+          ".objective": ["UNSCORED_TRACE_KEYS", "_cost_note", "_table", "_trace_rows", "fmt_score"]
+        },
+        "_render_fitted": {
+          ".items": ["_ordered_items"]
+        },
+        "_render_request": {
+          ".composition": ["REFERENCE_HEADING", "REFERENCE_POINTER", "_blocks_section", "_fit_state", "_item_count", "composition_section", "operation_lines", "pipeline_view_lines"],
+          ".edits": ["_available_section"],
+          ".items": ["_item_evidence", "_trajectories"],
+          ".objective": ["_rules_text", "_table", "answer_instructions", "bundle_instructions", "fmt_score", "objective_lines", "time_lines"]
+        },
+        "_levers_line": {
+          ".composition": ["structural_ops"]
+        },
+        "_prior_proposals_lines": {
+          ".edits": ["compact_edits"]
+        },
+        "_settings_lines": {
+          ".items": ["_clip_middle"],
+          ".objective": ["_table"]
+        },
+        "_node_reference": {
+          ".edits": ["_node_specs"]
+        },
+        "_feedback_sections": {
+          ".edits": ["reasoning_shown"]
+        },
+        "_strategy_section": {
+          ".edits": ["_bounded"]
+        }
+      }
+    },
+    "request.composition": {
+      "bottom_imports": {
+        ".edits": ["_core_fields", "_edit_fields"],
+        ".items": ["HARNESS_TIMEOUT", "_completed"],
+        ".objective": ["_table"]
+      }
+    },
+    "request.items": {
+      "top_imports": {
+        ".context": ["READER_FINDINGS_SHARE", "READER_ITEM_IDS", "READER_PATTERN_CHARS", "READER_PATTERNS", "READER_QUOTES", "READER_QUOTE_CHARS", "TRAJECTORY_BUDGET"]
+      },
+      "bottom_imports": {
+        ".composition": ["_TAKES_TO", "_reader_edit"],
+        ".edits": ["_history_cell", "item_errors"],
+        ".objective": ["_table", "_table_filled", "fmt_score"]
+      }
+    },
+    "request.edits": {
+      "top_imports": {
+        ".context": ["NODE_SPEC_SECTION_CHARS", "NODE_SPEC_TEXT_CHARS", "NODE_SPEC_TEXT_FLOOR", "_fence"],
+        "..types": ["NODE_OBJECT_FIELDS"]
+      },
+      "bottom_imports": {
+        ".composition": ["_or_list"],
+        ".items": ["_clip", "_clip_middle", "_outcome", "harness_timeout", "pipeline_item_errors"],
+        ".objective": ["_table", "fmt_score"]
+      }
+    },
+    "request.objective": {
+      "top_imports": {
+        "..types": ["COUNTING_RULE"]
+      },
+      "bottom_imports": {
+        ".composition": ["structural_example"],
+        ".edits": ["SAID_ONCE_CHARS"]
+      },
+      "deferred_names": ["ANSWER_INSTRUCTIONS"]
+    }
   }
 }
