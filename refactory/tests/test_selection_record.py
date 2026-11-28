@@ -4,12 +4,18 @@ Reruns every scenario (synthetic + real) under every compatible combination of
 selection mode x picker x batch size and diffs against the committed record.  A
 refactor that changes any single decision is caught.
 
+The harness drives REAL Loop objects — the same ``Loop._gate_population``,
+``Loop.select_parents``, ``Loop._apply_round``, ``Loop.leaderboard``, and
+``Loop._early_stop_reason`` that production runs use.  The only stubs are the
+evaluator (scripted train scores via ``ScenarioProbe``) and
+``ValidationGate.val_score`` (scripted val scores by level).
+
 Regenerate the record on purpose::
 
     SELECTION_RECORD_REGEN=1 uv run python -m pytest tests/test_selection_record.py::test_selection_record -x -q
 
-Sabotage checks verify that specific mutations in the selection code cause the
-record test to fail.
+Sabotage checks verify that specific mutations in the REAL selection code
+cause the record test to fail.
 """
 
 from __future__ import annotations
@@ -25,7 +31,7 @@ from selection_record import (
     load_record,
     save_record,
 )
-from refactory_dsh.outerloop import ValidationGate
+from refactory_dsh.loop import Loop
 
 
 # ---------------------------------------------------------------------------
@@ -101,73 +107,74 @@ def _record_matches(record: dict[str, Any], expected: dict[str, Any]) -> bool:
     return True
 
 
-def test_sabotage_checkpoint_keeps_best_on_val():
-    """Mutation: make checkpoint keep the best-on-val instead of the latest.
-
-    Under checkpoint, `gate.current_id` is always set to the applied candidate
-    (the latest), not the best on val.  If we make `_apply_checkpoint_round`
-    keep the best on val as current, the record should change.
-    """
-    from selection_record import _apply_checkpoint_round as orig
-
+def test_sabotage_gate_population_noop():
+    """Monkeypatch ``Loop._gate_population`` to a no-op: no candidates are
+    gated, so every selection decision changes."""
     expected = load_record()
 
-    def sabotaged_apply(gate, run, candidates, accepted, rejected, rounds, epoch, val_scores):
-        orig(gate, run, candidates, accepted, rejected, rounds, epoch, val_scores)
-        # Sabotage: make current = best (normally current tracks the latest applied)
+    with patch.object(Loop, "_gate_population", lambda self, run: None):
+        actual = generate_record()
+
+    assert not _record_matches(actual, expected), (
+        "sabotage: a no-op _gate_population must change the record"
+    )
+
+
+def test_sabotage_select_parents_reversed():
+    """Monkeypatch ``Loop.select_parents`` to reverse its result: the
+    parents_chosen field changes for every scenario with more than one
+    candidate."""
+    expected = load_record()
+    original = Loop.select_parents
+
+    def reversed_parents(self, n, *, by="score"):  # type: ignore[no-untyped-def]
+        result = original(self, n, by=by)
+        return list(reversed(result))
+
+    with patch.object(Loop, "select_parents", reversed_parents):
+        actual = generate_record()
+
+    assert not _record_matches(actual, expected), (
+        "sabotage: reversed select_parents must change the record"
+    )
+
+
+def test_sabotage_checkpoint_apply_keeps_best():
+    """Monkeypatch ``Loop._apply_round`` so that checkpoint keeps the best on
+    val as current instead of the latest applied candidate."""
+    expected = load_record()
+    original = Loop._apply_round
+
+    def sabotaged_apply(self, run, pending):  # type: ignore[no-untyped-def]
+        original(self, run, pending)
+        gate = self._gate()
         if gate.best_id and gate.best_score > gate.current_score:
             gate.current_id = gate.best_id
             gate.current_score = gate.best_score
 
-    with patch("selection_record._apply_checkpoint_round", sabotaged_apply):
+    with patch.object(Loop, "_apply_round", sabotaged_apply):
         actual = generate_record()
 
-    differs = not _record_matches(actual, expected)
-    assert differs, "sabotage: checkpoint keeping best-on-val should change decisions"
+    assert not _record_matches(actual, expected), (
+        "sabotage: checkpoint keeping best-on-val must change the record"
+    )
 
 
-def test_sabotage_pool_admits_rejected():
-    """Mutation: make pool admit a candidate the gate rejected."""
+def test_sabotage_pool_ranking():
+    """Monkeypatch ``Loop._pool`` to reverse its ranking: the pool and
+    leaderboard fields change for every pool-mode scenario."""
     expected = load_record()
+    original = Loop._pool
 
-    def sabotaged_judge_round(self, run, candidates):
-        # Accept everything
-        for c in candidates:
-            score, cached = self.score(run, c)
-            if score > self.current_score:
-                self.current_id, self.current_score = c.id, score
-                self.offer_best(c.id, score)
-        return list(candidates), []
+    def reversed_pool(self):  # type: ignore[no-untyped-def]
+        return list(reversed(original(self)))
 
-    with patch.object(ValidationGate, "judge_round", sabotaged_judge_round):
+    with patch.object(Loop, "_pool", reversed_pool):
         actual = generate_record()
 
-    differs = not _record_matches(actual, expected)
-    assert differs, "sabotage: admitting rejected candidates should change decisions"
-
-
-def test_sabotage_picker_tiebreak():
-    """Mutation: change one picker's tie-break."""
-    from refactory_dsh.optim.policies import HillClimbSelector
-
-    expected = load_record()
-
-    def sabotaged_select(self, ctx, n, parents):
-        val = getattr(ctx, "val_scores", None) or {}
-        if val:
-            ranked = sorted(
-                (c for c in parents if c.id in val),
-                key=lambda c: (-val[c.id], (c.score or 0.0), c.id),
-            )
-            if ranked:
-                return ranked[:1]
-        return self._by_score(parents)[:1] if parents else []
-
-    with patch.object(HillClimbSelector, "select", sabotaged_select):
-        actual = generate_record()
-
-    differs = not _record_matches(actual, expected)
-    assert differs, "sabotage: changing hill_climb tie-break should change decisions"
+    assert not _record_matches(actual, expected), (
+        "sabotage: reversed pool ranking must change the record"
+    )
 
 
 def test_sabotage_extra_val_evaluation():
@@ -180,8 +187,9 @@ def test_sabotage_extra_val_evaluation():
             d["val_evaluations"] += 1
         actual[key]["total_val_evaluations"] += len(actual[key]["decisions"])
 
-    differs = not _record_matches(actual, expected)
-    assert differs, "sabotage: extra val evaluation should change decisions"
+    assert not _record_matches(actual, expected), (
+        "sabotage: extra val evaluation must change the record"
+    )
 
 
 def test_sabotage_pure_move_passes():

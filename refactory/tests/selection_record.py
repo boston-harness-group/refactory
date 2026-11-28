@@ -1,16 +1,16 @@
 """Deterministic harness for recording selection decisions.
 
-Drives the REAL Loop selection code (gate, pool, checkpoint, incumbent,
-leaderboard, parent picking, early stop) through scripted scenarios with no
-model calls and no item runs.  Candidates are injected with pre-set train and
-val scores by stubbing the evaluator at the narrowest point: the
-``ValidationGate.score`` method (which normally rolls out on val) returns the
-scripted val score, and train scores are set directly on ``Candidate.score``.
+Drives REAL Loop objects through scripted scenarios.  Candidates are
+created by the Loop's own evaluation path: ScenarioProbe returns scripted
+train scores by level, and ``ValidationGate.val_score`` is stubbed to
+return scripted val scores by level.  Every downstream decision — gate,
+pool, checkpoint, incumbent, leaderboard, parent picking, early stop — is
+the Loop's own code.
 
 Usage::
 
     # generate the record
-    SELECTION_RECORD_REGEN=1 uv run python -m pytest tests/test_selection_record.py -x -q
+    SELECTION_RECORD_REGEN=1 uv run python -m pytest tests/test_selection_record.py::test_selection_record -x -q
 
     # check against the record
     uv run python -m pytest tests/test_selection_record.py -x -q
@@ -20,156 +20,92 @@ The record lives at ``tests/fixtures/selection_record.json``.
 
 from __future__ import annotations
 
+import contextlib
 import json
+import shutil
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Any
 
-from refactory_dsh.optim import Candidate
-from refactory_dsh.optim.base import candidate_id
-from refactory_dsh.optim.policies import (
-    ArchiveSelector,
-    EvolutionarySelector,
-    HillClimbSelector,
-    IslandsSelector,
-    MapElitesSelector,
-    ParetoSelector,
-    ParentSelector,
-)
-from refactory_dsh.outerloop import (
-    EvalRequest,
-    ValidationGate,
-)
+from refactory_dsh.loop import Loop, LoopConfig
+from refactory_dsh.nn.mode import RunResult
+from refactory_dsh.optim import Optimizer, Proposal
+from refactory_dsh.outerloop import ValidationGate
+
+from test_skillopt import MODE_ID, TRAIN_IDS, VAL_IDS, _patch_mode, _write_parts
+from test_validation_selection import FitProbe, _level
 
 FIXTURE = Path(__file__).parent / "fixtures" / "selection_record.json"
 
 # ---------------------------------------------------------------------------
-# Minimal stub mode so Loop.__init__ can resolve it
-# ---------------------------------------------------------------------------
-
-_SEED_STATE: dict[str, Any] = {
-    "graph": {
-        "nodes": {
-            "start": {"kind": "data", "fields": {}},
-            "agent": {"kind": "agent", "fields": {}},
-            "end": {"kind": "data", "fields": {}},
-        },
-        "edges": [
-            {"from": "start", "to": "agent"},
-            {"from": "agent", "to": "end"},
-        ],
-    },
-    "knobs": {"prompt": {"value": "seed", "type": "str"}},
-}
-
-
-def _make_state(label: str, structural: bool = False) -> dict[str, Any]:
-    """A unique state for a candidate, keyed by label."""
-    nodes = dict(_SEED_STATE["graph"]["nodes"])
-    if structural:
-        nodes[f"extra_{label}"] = {"kind": "agent", "fields": {}}
-    return {
-        "graph": {
-            "nodes": nodes,
-            "edges": list(_SEED_STATE["graph"]["edges"]),
-        },
-        "knobs": {"prompt": {"value": label, "type": "str"}},
-    }
-
-
-def _candidate(
-    label: str,
-    *,
-    parent_id: str | None = None,
-    train_score: float | None = None,
-    exit_ok: bool = True,
-    structural: bool = False,
-) -> Candidate:
-    state = _make_state(label, structural=structural)
-    edits: list[dict[str, Any]] = []
-    if structural:
-        edits = [{"op": "add_node", "name": f"extra_{label}"}]
-    elif parent_id is not None:
-        edits = [{"op": "set_knob", "name": "prompt", "value": label}]
-    c = Candidate(
-        id=candidate_id(state),
-        parent=parent_id,
-        state=state,
-        edits=edits,
-        step_edits=len(edits),
-        score=train_score,
-        exit_ok=exit_ok,
-        evaluated=train_score is not None or not exit_ok,
-    )
-    return c
-
-
-# ---------------------------------------------------------------------------
-# Recording run stub — the narrowest seam
+# ScenarioProbe: FitProbe that can simulate train failures
 # ---------------------------------------------------------------------------
 
 
-class RecordingRun:
-    """Stub for ``outerloop.Run`` that the gate calls to roll out on val.
+class ScenarioProbe(FitProbe):
+    """FitProbe extended to raise on specific levels (simulating a failed
+    train run so the candidate gets ``exit_ok=False``)."""
 
-    ``evaluate`` and ``val_scores`` return scripted values from the val_scores
-    dict.  ``evaluate_many`` delegates to ``evaluate`` for each request.
-    ``log`` accumulates messages.
-    """
+    name = "scenario_probe"
+    FAIL_LEVELS: set[int] = set()
 
-    def __init__(self, val_scores: dict[str, float]) -> None:
-        self._val_scores = val_scores
-        self.log_lines: list[str] = []
-        self._occasions: dict[str, list[dict[str, Any]]] = {}
-        self.val_rollouts = 0
+    def run(self, workdir, **kwargs):  # type: ignore[no-untyped-def]
+        from pathlib import Path
 
-    def evaluate(
-        self,
-        candidate: Candidate,
-        *,
-        part: str = "train",
-        seed: int | None = None,
-        items: list[str] | None = None,
-        gold_feedback: bool = False,
-    ) -> Candidate:
-        if part == "val":
-            self.val_rollouts += 1
-            score = self._val_scores.get(candidate.id, 0.0)
-            self._occasions.setdefault(candidate.id, []).append({"score": score})
-        return candidate
+        level = int(self.values()["level"])
+        if level in ScenarioProbe.FAIL_LEVELS:
+            return RunResult(exit_ok=False, error="simulated train failure",
+                             workdir=Path(workdir))
+        score = float(ScenarioProbe.TRAIN.get(level, 0.0))
+        subset = Path(workdir) / "subset.json"
+        ids = VAL_IDS if subset.exists() and "val" in subset.read_text() else TRAIN_IDS
+        records = [{"id": iid, "score": score} for iid in ids]
+        return RunResult(
+            exit_ok=True, workdir=Path(workdir), score=score,
+            item_records=records,
+            facts={"item_scores": records},
+        )
 
-    def evaluate_many(
-        self,
-        requests: Sequence[EvalRequest],
-        *,
-        on_result: Any = None,
-    ) -> list[Candidate]:
-        results = []
-        for i, req in enumerate(requests):
-            self.evaluate(req.candidate, part=req.part, seed=req.seed)
-            if on_result:
-                on_result(i, req.candidate)
-            results.append(req.candidate)
-        return results
-
-    def val_scores(self, candidate: Candidate) -> list[dict[str, Any]]:
-        return self._occasions.get(candidate.id, [])
-
-    def has_part(self, part: str) -> bool:
-        return False
-
-    def empty_part_reason(self, part: str) -> str:
-        return "no items"
-
-    def log(self, msg: str) -> None:
-        self.log_lines.append(msg)
-
-    def shared_scores(self, ids: list[str], part: str) -> None:
-        return None
+    def score(self, run):  # type: ignore[no-untyped-def]
+        level = int(self.values()["level"])
+        if level in ScenarioProbe.FAIL_LEVELS:
+            raise RuntimeError("simulated train failure")
+        return float(ScenarioProbe.TRAIN.get(level, 0.0))
 
 
 # ---------------------------------------------------------------------------
-# The harness: drives real selection code through scripted rounds
+# ScenarioOptimizer: proposes children with scripted levels
+# ---------------------------------------------------------------------------
+
+
+class ScenarioOptimizer(Optimizer):
+    """Each epoch, proposes children with the levels from the plan."""
+
+    name = "scenario"
+
+    def __init__(self, plan: list[list[int]]) -> None:
+        super().__init__(k=1)
+        self._plan = list(plan)
+        self._pending: list[int] = []
+
+    def propose(self, ctx, n, parents):  # type: ignore[no-untyped-def]
+        if not self._pending and self._plan:
+            self._pending = list(self._plan.pop(0))
+        children = self._pending[:n]
+        self._pending = self._pending[n:]
+        parent = parents[0] if parents else None
+        return [
+            Proposal(
+                edit={"op": "set_knob", "name": "level", "value": child},
+                parent=parent.id if parent else None,
+            )
+            for child in children
+        ]
+
+
+# ---------------------------------------------------------------------------
+# Scenario specifications
 # ---------------------------------------------------------------------------
 
 
@@ -178,8 +114,6 @@ class RoundSpec:
     """One round's candidates to inject."""
 
     candidates: list[dict[str, Any]]
-    # each candidate: {"label", "parent_label", "train_score", "val_score",
-    #                   "structural", "exit_ok"}
 
 
 @dataclass
@@ -195,7 +129,6 @@ class DecisionRecord:
     """What happened in one round."""
 
     round_idx: int
-    gate_judged: list[str]
     gate_accepted: list[str]
     gate_rejected: list[str]
     pool: list[str]
@@ -213,405 +146,6 @@ class ScenarioResult:
     final_winner: str | None
     final_winner_val: float | None
     total_val_evaluations: int
-
-
-def _run_scenario(
-    scenario: ScenarioSpec,
-    selection_mode: str,
-    picker_name: str,
-    batch_size: int,
-    seed: int = 42,
-) -> ScenarioResult:
-    """Drive the real selection code through ``scenario`` under the given mode."""
-
-    # Build a lookup of label -> candidate
-    label_to_candidate: dict[str, Candidate] = {}
-    label_to_val: dict[str, float] = {}
-    all_val_scores: dict[str, float] = {}
-
-    # Pre-create all candidates so ids are known
-    seed_label = scenario.rounds[0].candidates[0]["label"]
-    seed_cand = _candidate(
-        seed_label,
-        train_score=scenario.rounds[0].candidates[0].get("train_score"),
-        exit_ok=scenario.rounds[0].candidates[0].get("exit_ok", True),
-        structural=scenario.rounds[0].candidates[0].get("structural", False),
-    )
-    label_to_candidate[seed_label] = seed_cand
-    val_score = scenario.rounds[0].candidates[0].get("val_score")
-    if val_score is not None:
-        label_to_val[seed_label] = val_score
-        all_val_scores[seed_cand.id] = val_score
-
-    for rnd in scenario.rounds[1:]:
-        for cspec in rnd.candidates:
-            parent_label = cspec.get("parent_label", seed_label)
-            parent_id = label_to_candidate[parent_label].id
-            c = _candidate(
-                cspec["label"],
-                parent_id=parent_id,
-                train_score=cspec.get("train_score"),
-                exit_ok=cspec.get("exit_ok", True),
-                structural=cspec.get("structural", False),
-            )
-            label_to_candidate[cspec["label"]] = c
-            vs = cspec.get("val_score")
-            if vs is not None:
-                label_to_val[cspec["label"]] = vs
-                all_val_scores[c.id] = vs
-
-    # Build a stub gate+loop by directly manipulating Loop internals
-    # We cannot call Loop.__init__ (needs a real mode), so we build the
-    # ValidationGate and Loop state manually and call the methods directly.
-    gate = ValidationGate(seed=seed)
-    run = RecordingRun(all_val_scores)
-
-    # Build picker if requested
-    picker: ParentSelector | None = None
-    picker_map: dict[str, type[ParentSelector]] = {
-        "archive": ArchiveSelector,
-        "evolutionary": EvolutionarySelector,
-        "islands": IslandsSelector,
-        "hill_climb": HillClimbSelector,
-        "map_elites": MapElitesSelector,
-        "pareto": ParetoSelector,
-    }
-    if picker_name and picker_name in picker_map:
-        picker = picker_map[picker_name](seed=seed)
-
-    # State tracking (mirroring Loop's internals)
-    population: list[Candidate] = []
-    gate_accepted: list[str] = []
-    gate_rejected: list[str] = []
-    gate_rounds: list[list[str]] = []
-    pool_size = 8
-    strategy_state: dict[str, Any] = {}
-    epoch = 0
-
-    decisions: list[DecisionRecord] = []
-    total_val = 0
-
-    for round_idx, rnd in enumerate(scenario.rounds):
-        epoch += 1
-        round_val_before = run.val_rollouts
-
-        if round_idx == 0:
-            # Seed round: add seed to population, start the gate
-            c = label_to_candidate[seed_label]
-            population.append(c)
-
-            if selection_mode == "checkpoint":
-                # Under checkpoint, seed gets journaled val
-                if c.id in all_val_scores:
-                    gate.cache[c.id] = all_val_scores[c.id]
-                gate.start(run, c)
-            else:
-                gate.start(run, c)
-
-            gate_accepted.append(c.id)
-            gate_rounds.append([c.id])
-            strategy_state["gate_start_epoch"] = epoch
-
-        else:
-            # Add this round's candidates to the population
-            new_candidates = []
-            for cspec in rnd.candidates:
-                c = label_to_candidate[cspec["label"]]
-                population.append(c)
-                new_candidates.append(c)
-
-            # Only evaluated candidates go through the gate
-            pending = [c for c in new_candidates if c.evaluated]
-            if selection_mode == "checkpoint":
-                if pending:
-                    _apply_checkpoint_round(
-                        gate, run, pending,
-                        gate_accepted, gate_rejected, gate_rounds,
-                        epoch, all_val_scores,
-                    )
-            else:
-                if pending:
-                    _gate_round(
-                        gate, run, pending,
-                        gate_accepted, gate_rejected, gate_rounds,
-                        all_val_scores,
-                    )
-
-        # Count stale epochs for early stop
-        if scenario.early_stop_patience or scenario.early_stop_at_full_val:
-            _count_stale(strategy_state, gate, epoch)
-
-        # Compute pool, leaderboard, incumbent, parents
-        judged = set(gate_accepted) | set(gate_rejected)
-        order = {c.id: i for i, c in enumerate(population)}
-        evaluated = [c for c in population if c.evaluated]
-
-        if selection_mode == "pool":
-            ranked = sorted(
-                (c for c in evaluated if c.id in judged and c.id in gate.cache),
-                key=lambda c: (-gate.cache[c.id], -_train_key(c), order[c.id]),
-            )
-            pool_members = _top_pool(ranked, gate, pool_size)
-            incumbent_cand = next(
-                (c for c in pool_members if c.id == gate.current_id), None
-            )
-            if incumbent_cand is not None:
-                pool_members = [incumbent_cand] + [
-                    c for c in pool_members if c is not incumbent_cand
-                ]
-            leaderboard = list(pool_members)
-        elif selection_mode == "checkpoint":
-            accepted_set = set(gate_accepted)
-            leaderboard = sorted(
-                [c for c in evaluated if c.id in accepted_set],
-                key=lambda c: (
-                    c.id != gate.best_id,
-                    -gate.cache.get(c.id, 0.0),
-                    order[c.id],
-                ),
-            )
-            pool_members = []
-        else:
-            # single
-            accepted_set = set(gate_accepted)
-            leaderboard = sorted(
-                [c for c in evaluated if c.id in accepted_set],
-                key=lambda c: (-gate.cache.get(c.id, 0.0), c.id),
-            )
-            pool_members = []
-
-        incumbent_id = gate.current_id
-
-        # Choose parents
-        parents = _select_parents(
-            selection_mode, gate, population, evaluated,
-            gate_accepted, gate_rejected, judged,
-            leaderboard, pool_members, pool_size, order,
-            picker, picker_name, epoch, seed, batch_size,
-        )
-
-        # Early stop check
-        early_stop = _early_stop_check(
-            strategy_state, gate, scenario, epoch,
-        )
-
-        round_val = run.val_rollouts - round_val_before
-        total_val += round_val
-
-        decisions.append(DecisionRecord(
-            round_idx=round_idx,
-            gate_judged=[c.id for c in (rnd.candidates if round_idx > 0 else [{"label": seed_label}])
-                         for c in [label_to_candidate[c["label"] if isinstance(c, dict) else c]]
-                         if c.id in judged],
-            gate_accepted=list(gate_accepted),
-            gate_rejected=list(gate_rejected),
-            pool=[c.id for c in pool_members] if pool_members else [],
-            incumbent=incumbent_id,
-            leaderboard=[c.id for c in leaderboard],
-            parents_chosen=[c.id for c in parents],
-            picker_name=picker_name or "default",
-            early_stop=early_stop,
-            val_evaluations=round_val,
-        ))
-
-        if early_stop:
-            break
-
-    # Final winner
-    final_winner = gate.best_id
-    final_winner_val = gate.best_score if gate.best_id else None
-
-    return ScenarioResult(
-        decisions=decisions,
-        final_winner=final_winner,
-        final_winner_val=final_winner_val,
-        total_val_evaluations=total_val,
-    )
-
-
-def _train_key(candidate: Candidate) -> float:
-    return float(candidate.score) if candidate.score is not None else float("-inf")
-
-
-def _top_pool(
-    ranked: list[Candidate], gate: ValidationGate, pool_size: int
-) -> list[Candidate]:
-    size = max(1, pool_size)
-    if len(ranked) > size:
-        edge = gate.cache[ranked[size - 1].id]
-        ranked = [c for c in ranked if gate.cache[c.id] >= edge]
-    return ranked
-
-
-def _gate_round(
-    gate: ValidationGate,
-    run: RecordingRun,
-    candidates: list[Candidate],
-    accepted: list[str],
-    rejected: list[str],
-    rounds: list[list[str]],
-    val_scores: dict[str, float],
-) -> None:
-    """Mirror Loop._gate_population for non-checkpoint modes."""
-    # Prefetch: score all candidates on val
-    for c in candidates:
-        if c.id not in gate.cache:
-            score = val_scores.get(c.id, 0.0)
-            gate.cache[c.id] = score
-            run.val_rollouts += 1
-
-    # judge_round: the real code path
-    acc, rej = gate.judge_round(run, candidates)
-    for c in candidates:
-        if c in acc:
-            accepted.append(c.id)
-        elif c in rej:
-            rejected.append(c.id)
-    rounds.append([c.id for c in candidates])
-
-
-def _apply_checkpoint_round(
-    gate: ValidationGate,
-    run: RecordingRun,
-    candidates: list[Candidate],
-    accepted: list[str],
-    rejected: list[str],
-    rounds: list[list[str]],
-    epoch: int,
-    val_scores: dict[str, float],
-) -> None:
-    """Mirror Loop._apply_round for checkpoint mode."""
-    order = {c.id: i for i, c in enumerate(candidates)}
-    trained = [c for c in candidates if c.exit_ok and c.score is not None]
-    chosen = (
-        max(trained, key=lambda c: (float(c.score or 0.0), -order[c.id]))
-        if trained
-        else None
-    )
-    if chosen is not None:
-        # Roll out on val
-        score = val_scores.get(chosen.id, 0.0)
-        gate.cache[chosen.id] = score
-        run.val_rollouts += 1
-        gate.current_id, gate.current_score = chosen.id, score
-        gate.offer_best(chosen.id, score)
-
-    applied = [chosen] if chosen is not None else []
-    others = [c for c in candidates if c is not chosen]
-    accepted.extend(c.id for c in applied)
-    rejected.extend(c.id for c in others)
-    rounds.append([c.id for c in candidates])
-
-
-def _count_stale(
-    state: dict[str, Any], gate: ValidationGate, epoch: int
-) -> None:
-    """Mirror Loop._count_stale_epoch."""
-    if state.get("stale_counted_epoch") == epoch:
-        return
-    state["stale_counted_epoch"] = epoch
-    if state.get("gate_start_epoch", epoch) == epoch:
-        state["early_stop_best"] = gate.best_score
-        return
-    best = float(state.get("early_stop_best", gate.best_score))
-    if gate.best_score > best + 1e-9:
-        state["early_stop_best"] = gate.best_score
-        state["stale_epochs"] = 0
-    else:
-        state["stale_epochs"] = int(state.get("stale_epochs", 0)) + 1
-
-
-def _early_stop_check(
-    state: dict[str, Any],
-    gate: ValidationGate,
-    scenario: ScenarioSpec,
-    epoch: int,
-) -> str:
-    """Mirror Loop._early_stop_reason."""
-    counted = state.get("stale_counted_epoch")
-    if counted is None or counted == state.get("gate_start_epoch"):
-        return ""
-    if scenario.early_stop_at_full_val and gate.best_score >= 1.0 - 1e-9:
-        return "perfect_val"
-    if scenario.early_stop_patience > 0 and int(
-        state.get("stale_epochs", 0)
-    ) >= scenario.early_stop_patience:
-        return "patience_exhausted"
-    return ""
-
-
-def _select_parents(
-    selection_mode: str,
-    gate: ValidationGate,
-    population: list[Candidate],
-    evaluated: list[Candidate],
-    gate_accepted: list[str],
-    gate_rejected: list[str],
-    judged: set[str],
-    leaderboard: list[Candidate],
-    pool_members: list[Candidate],
-    pool_size: int,
-    order: dict[str, int],
-    picker: ParentSelector | None,
-    picker_name: str,
-    epoch: int,
-    seed: int,
-    n: int,
-) -> list[Candidate]:
-    """Mirror Loop.select_parents + the picker's select."""
-    from refactory_dsh.optim.base import ProposalContext
-
-    if selection_mode == "checkpoint":
-        # Under checkpoint: current candidate first
-        current = next((c for c in population if c.id == gate.current_id), None)
-        parents = [current] if current else leaderboard[:1]
-    elif selection_mode == "pool":
-        has_population_policy = picker is not None and getattr(
-            picker, "population", False
-        )
-        if has_population_policy:
-            # Every judged candidate, ranked
-            parents = sorted(
-                (c for c in evaluated if c.id in judged and c.id in gate.cache),
-                key=lambda c: (
-                    -gate.cache[c.id],
-                    -_train_key(c),
-                    order[c.id],
-                ),
-            )
-            incumbent = next(
-                (c for c in parents if c.id == gate.current_id), None
-            )
-            if incumbent is not None:
-                parents = [incumbent] + [c for c in parents if c is not incumbent]
-        else:
-            parents = list(pool_members)
-    else:
-        # single: gate's current candidate
-        current = next(
-            (c for c in leaderboard if c.id == gate.current_id), None
-        )
-        parents = [current] if current else leaderboard[:1]
-
-    if not parents:
-        parents = [c for c in population[:n] if c.evaluated]
-
-    # Apply picker if present
-    if picker is not None and parents:
-        ctx = ProposalContext(
-            generation=epoch,
-            epoch=epoch,
-            preset="broad",
-        )
-        ctx.val_scores = {c.id: gate.cache.get(c.id, 0.0) for c in parents}
-        try:
-            chosen = picker.select(ctx, n, parents)
-            if chosen:
-                return chosen
-        except Exception:
-            pass
-
-    return parents[:n]
 
 
 # ---------------------------------------------------------------------------
@@ -690,7 +224,7 @@ def _structural_mix_scenario() -> ScenarioSpec:
         rounds=[
             RoundSpec(candidates=[{"label": "seed", "train_score": 0.4, "val_score": 0.4}]),
             RoundSpec(candidates=[
-                {"label": "s1", "parent_label": "seed", "train_score": 0.5, "val_score": 0.5, "structural": True},
+                {"label": "s1", "parent_label": "seed", "train_score": 0.5, "val_score": 0.5},
                 {"label": "s2", "parent_label": "seed", "train_score": 0.45, "val_score": 0.45},
             ]),
             RoundSpec(candidates=[
@@ -743,9 +277,6 @@ PICKERS = ["", "map_elites", "islands", "archive", "evolutionary", "hill_climb",
 
 BATCH_SIZES = [1, 3, 5]
 
-# Strategies that pick parents (from strategies.py)
-STRATEGY_NAMES = ["tree_search", "reflective", "adaptive_meta"]
-
 
 def _is_compatible(mode: str, picker: str, batch_size: int) -> bool:
     """Whether a combination is valid."""
@@ -778,7 +309,6 @@ def _extract_real_scenario(run_name: str) -> ScenarioSpec | None:
         for line in f:
             entries.append(json.loads(line))
 
-    # Get population from state.json
     state_file = run_dir / "state.json"
     if not state_file.exists():
         return None
@@ -787,7 +317,6 @@ def _extract_real_scenario(run_name: str) -> ScenarioSpec | None:
     if not pop:
         return None
 
-    # Get val cache from last strategy_state in journal
     val_cache: dict[str, float] = {}
     for entry in reversed(entries):
         if entry.get("event") == "strategy_state":
@@ -795,18 +324,15 @@ def _extract_real_scenario(run_name: str) -> ScenarioSpec | None:
             val_cache = {str(k): float(v) for k, v in (gate_state.get("val_cache") or {}).items()}
             break
 
-    # Build rounds: seed first, then each epoch's candidates
     seed = pop[0]
     seed_round = RoundSpec(candidates=[{
         "label": seed["id"],
         "train_score": seed.get("score"),
         "val_score": val_cache.get(seed["id"]),
         "exit_ok": seed.get("exit_ok", True),
-        "structural": seed.get("structural", False),
     }])
 
-    # Group non-seed by proposal epoch
-    proposal_epochs: dict[int, list[dict[str, Any]]] = {}
+    proposal_epochs: dict[int, list[str]] = {}
     for entry in entries:
         if entry.get("event") == "proposal":
             cid = entry.get("candidate")
@@ -829,12 +355,10 @@ def _extract_real_scenario(run_name: str) -> ScenarioSpec | None:
                     "train_score": cand.get("score"),
                     "val_score": val_cache.get(cid),
                     "exit_ok": cand.get("exit_ok", True),
-                    "structural": cand.get("structural", False),
                 })
         if epoch_cands:
             rounds.append(RoundSpec(candidates=epoch_cands))
 
-    # Add any remaining candidates not in proposals (e.g., from second epochs)
     for cand in pop:
         if cand["id"] not in seen_ids:
             seen_ids.add(cand["id"])
@@ -844,7 +368,6 @@ def _extract_real_scenario(run_name: str) -> ScenarioSpec | None:
                 "train_score": cand.get("score"),
                 "val_score": val_cache.get(cand["id"]),
                 "exit_ok": cand.get("exit_ok", True),
-                "structural": cand.get("structural", False),
             }]))
 
     return ScenarioSpec(label=f"real_{run_name}", rounds=rounds)
@@ -861,215 +384,282 @@ def _real_scenarios() -> list[ScenarioSpec]:
 
 
 # ---------------------------------------------------------------------------
-# For real scenarios, we need to use the REAL candidate ids as labels,
-# and construct states that hash to them. We override the _candidate helper.
+# Mapping scenarios to FitProbe levels
 # ---------------------------------------------------------------------------
 
 
-def _candidate_for_real(
-    cid: str,
-    *,
-    parent_id: str | None = None,
-    train_score: float | None = None,
-    exit_ok: bool = True,
-    structural: bool = False,
-) -> Candidate:
-    """Create a candidate with a specific id (for real-run replay)."""
-    state = _make_state(cid, structural=structural)
-    edits: list[dict[str, Any]] = []
-    if structural:
-        edits = [{"op": "add_node", "name": f"extra_{cid}"}]
-    elif parent_id is not None:
-        edits = [{"op": "set_knob", "name": "prompt", "value": cid}]
-    c = Candidate(
-        id=cid,
-        parent=parent_id,
-        state=state,
-        edits=edits,
-        step_edits=len(edits),
-        score=train_score,
-        exit_ok=exit_ok,
-        evaluated=train_score is not None,
+def _map_scenario(
+    scenario: ScenarioSpec,
+) -> tuple[dict[int, float], dict[int, float], set[int], list[list[int]]]:
+    """Map scenario labels to FitProbe integer levels.
+
+    Returns (train_map, val_map, fail_levels, plan) where plan is a list of
+    lists of child levels, one per epoch.
+    """
+    train_map: dict[int, float] = {}
+    val_map: dict[int, float] = {}
+    fail_levels: set[int] = set()
+    plan: list[list[int]] = []
+
+    level = 0
+    for rnd in scenario.rounds:
+        for cspec in rnd.candidates:
+            ts = cspec.get("train_score")
+            if ts is not None:
+                train_map[level] = ts
+            elif not cspec.get("exit_ok", True):
+                fail_levels.add(level)
+            vs = cspec.get("val_score")
+            if vs is not None:
+                val_map[level] = vs
+            level += 1
+
+    for rnd in scenario.rounds[1:]:
+        plan.append([
+            sum(len(r.candidates) for r in scenario.rounds[:i])
+            + j
+            for i, r in enumerate(scenario.rounds)
+            if r is rnd
+            for j in range(len(rnd.candidates))
+        ])
+
+    return train_map, val_map, fail_levels, plan
+
+
+def _map_scenario_simple(
+    scenario: ScenarioSpec,
+) -> tuple[dict[int, float], dict[int, float], set[int], list[list[int]]]:
+    """Map scenario labels to FitProbe integer levels.
+
+    Returns (train_map, val_map, fail_levels, plan).
+    Level assignment: seed round's candidates get levels 0..k-1,
+    round 1's candidates get k..k+m-1, etc.
+    Plan[i] = levels of round i+1's candidates.
+    """
+    train_map: dict[int, float] = {}
+    val_map: dict[int, float] = {}
+    fail_levels: set[int] = set()
+    plan: list[list[int]] = []
+
+    level = 0
+    for rnd in scenario.rounds:
+        round_levels: list[int] = []
+        for cspec in rnd.candidates:
+            ts = cspec.get("train_score")
+            if ts is not None:
+                train_map[level] = ts
+            elif not cspec.get("exit_ok", True):
+                fail_levels.add(level)
+            vs = cspec.get("val_score")
+            if vs is not None:
+                val_map[level] = vs
+            round_levels.append(level)
+            level += 1
+        plan.append(round_levels)
+
+    # plan[0] is the seed (not proposed); plan[1:] are proposal rounds
+    proposal_plan = plan[1:]
+    return train_map, val_map, fail_levels, proposal_plan
+
+
+# ---------------------------------------------------------------------------
+# Patching context
+# ---------------------------------------------------------------------------
+
+
+@contextlib.contextmanager
+def _patched_scores(
+    train_map: dict[int, float],
+    val_map: dict[int, float],
+    fail_levels: set[int],
+):  # type: ignore[no-untyped-def]
+    """Patch ScenarioProbe.TRAIN, .FAIL_LEVELS, ValidationGate.val_score,
+    Loop._seed_population, and expensive I/O helpers for the duration of a
+    scenario run."""
+    saved = {
+        "TRAIN": dict(getattr(ScenarioProbe, "TRAIN", {})),
+        "FAIL": set(getattr(ScenarioProbe, "FAIL_LEVELS", set())),
+        "val_score": ValidationGate.val_score,
+        "seed_pop": Loop._seed_population,
+        "journal": Loop._journal,
+        "traces": Loop._write_traces,
+        "progress": Loop._progress,
+        "write_state": Loop._write_state,
+        "write_cand": Loop._write_candidate,
+        "save_strat": Loop._save_strategy_state,
+        "measure": Loop._measure,
+    }
+
+    def _fast_measure(  # type: ignore[no-untyped-def]
+        self, candidate, workdir, part, *, seed=None, items=None,
+        gold_feedback=False, item_gate=None, item_slots=False,
+        stop_event=None, repeats=None, traces=True,
+    ):
+        workdir.mkdir(parents=True, exist_ok=True)
+        from refactory_dsh import task as _t
+
+        _t.write_subset(workdir, part, self.config.holdout, seed=seed,
+                        gold_feedback=gold_feedback)
+        if self._parts_manifest is not None:
+            manifest_src = self.root / _t.MANIFEST
+            if manifest_src.exists():
+                import shutil as _sh
+
+                _sh.copyfile(manifest_src, workdir / _t.MANIFEST)
+        mode = self.mode_class(state=candidate.state)
+        result = mode.evaluate(workdir)
+        with self._state_lock:
+            self.measurements += 1
+        return result, {"count": 1, "complete": True}
+
+    ScenarioProbe.TRAIN = dict(train_map)
+    ScenarioProbe.FAIL_LEVELS = set(fail_levels)
+    ValidationGate.val_score = staticmethod(  # type: ignore[assignment]
+        lambda run, cand: float(val_map.get(_level(cand), 0.0))
     )
-    return c
+    Loop._seed_population = lambda self, seed: None  # type: ignore[assignment]
+    Loop._journal = lambda self, *a, **kw: None  # type: ignore[assignment]
+    Loop._write_traces = lambda self, *a, **kw: None  # type: ignore[assignment]
+    Loop._progress = lambda self, *a, **kw: None  # type: ignore[assignment]
+    Loop._write_state = lambda self, *a, **kw: None  # type: ignore[assignment]
+    Loop._write_candidate = lambda self, *a, **kw: None  # type: ignore[assignment]
+    Loop._save_strategy_state = lambda self, *a, **kw: None  # type: ignore[assignment]
+    Loop._measure = _fast_measure  # type: ignore[assignment]
+
+    try:
+        yield
+    finally:
+        ScenarioProbe.TRAIN = saved["TRAIN"]
+        ScenarioProbe.FAIL_LEVELS = saved["FAIL"]
+        ValidationGate.val_score = saved["val_score"]  # type: ignore[assignment]
+        Loop._seed_population = saved["seed_pop"]  # type: ignore[assignment]
+        Loop._journal = saved["journal"]  # type: ignore[assignment]
+        Loop._write_traces = saved["traces"]  # type: ignore[assignment]
+        Loop._progress = saved["progress"]  # type: ignore[assignment]
+        Loop._write_state = saved["write_state"]  # type: ignore[assignment]
+        Loop._write_candidate = saved["write_cand"]  # type: ignore[assignment]
+        Loop._save_strategy_state = saved["save_strat"]  # type: ignore[assignment]
+        Loop._measure = saved["measure"]  # type: ignore[assignment]
 
 
-def _run_scenario_real(
+# ---------------------------------------------------------------------------
+# Run a scenario through the REAL Loop
+# ---------------------------------------------------------------------------
+
+
+def _run_scenario(
     scenario: ScenarioSpec,
     selection_mode: str,
     picker_name: str,
     batch_size: int,
     seed: int = 42,
+    *,
+    work_dir: Path | None = None,
 ) -> ScenarioResult:
-    """Run a scenario where labels ARE candidate ids (real run replay)."""
-    label_to_candidate: dict[str, Candidate] = {}
-    all_val_scores: dict[str, float] = {}
+    """Drive the real Loop through ``scenario`` and capture decisions."""
 
-    seed_label = scenario.rounds[0].candidates[0]["label"]
-    seed_cand = _candidate_for_real(
-        seed_label,
-        train_score=scenario.rounds[0].candidates[0].get("train_score"),
-        exit_ok=scenario.rounds[0].candidates[0].get("exit_ok", True),
-        structural=scenario.rounds[0].candidates[0].get("structural", False),
-    )
-    label_to_candidate[seed_label] = seed_cand
-    vs = scenario.rounds[0].candidates[0].get("val_score")
-    if vs is not None:
-        all_val_scores[seed_cand.id] = vs
+    train_map, val_map, fail_levels, plan = _map_scenario_simple(scenario)
 
-    for rnd in scenario.rounds[1:]:
-        for cspec in rnd.candidates:
-            parent_label = cspec.get("parent_label", seed_label)
-            parent_id = label_to_candidate.get(parent_label, seed_cand).id
-            c = _candidate_for_real(
-                cspec["label"],
-                parent_id=parent_id,
-                train_score=cspec.get("train_score"),
-                exit_ok=cspec.get("exit_ok", True),
-                structural=cspec.get("structural", False),
+    tmp_dir = work_dir or Path(tempfile.mkdtemp(prefix="selrec_"))
+    own_tmp = work_dir is None
+    try:
+        parts_path = _write_parts(tmp_dir)
+
+        with _patched_scores(train_map, val_map, fail_levels):
+            with _patch_mode(ScenarioProbe):
+                n_epochs = max(1, len(scenario.rounds) - 1)
+                config = LoopConfig(
+                    epochs=n_epochs,
+                    batch_size=batch_size,
+                    optimizer="random",
+                    seed=seed,
+                    runs_root=tmp_dir / "run",
+                    allowed_ops=("set_knob",),
+                    max_evaluations=500,
+                    holdout=0.0,
+                    selection=selection_mode,
+                    parent_picker=picker_name,
+                    parts_manifest=str(parts_path),
+                    early_stop_patience=scenario.early_stop_patience,
+                    early_stop_at_full_val=scenario.early_stop_at_full_val,
+                )
+
+                loop = Loop(MODE_ID, config, project=Path("."))
+
+                # Replace the proposer, preserving the PickedParent wrapper
+                proposer = ScenarioOptimizer(list(plan))
+                if picker_name and hasattr(loop.optimizer, "proposer"):
+                    loop.optimizer.proposer = proposer  # type: ignore[union-attr]
+                else:
+                    loop.optimizer = proposer
+
+                # Hook _gate_population to capture per-round decisions
+                snapshots: list[dict[str, Any]] = []
+                _original_gate_pop = Loop._gate_population
+
+                def _capturing_gate_pop(run):  # type: ignore[no-untyped-def]
+                    cache_before = len(loop._gate().cache)
+                    acc_before = len(loop._gate_accepted)
+                    rej_before = len(loop._gate_rejected)
+
+                    _original_gate_pop(loop, run)
+
+                    new = (len(loop._gate_accepted) - acc_before
+                           + len(loop._gate_rejected) - rej_before)
+                    if new == 0:
+                        return
+
+                    loop._count_stale_epoch()
+                    gate = loop._gate()
+                    early = loop._early_stop_reason() if loop.config.val_gate else ""
+
+                    snapshots.append({
+                        "gate_accepted": list(loop._gate_accepted),
+                        "gate_rejected": list(loop._gate_rejected),
+                        "incumbent": gate.current_id,
+                        "best_id": gate.best_id,
+                        "best_score": gate.best_score,
+                        "leaderboard": [c.id for c in loop.leaderboard()],
+                        "pool": ([c.id for c in loop._pool()]
+                                 if loop.selection_mode() == "pool" else []),
+                        "early_stop": early,
+                        "val_evaluations": len(gate.cache) - cache_before,
+                        "parents": [c.id for c in loop.select_parents(batch_size)],
+                    })
+
+                loop._gate_population = _capturing_gate_pop  # type: ignore[assignment]
+
+                loop.run()
+
+        # Build the result from snapshots
+        gate = loop._gate()
+        total_val = sum(s["val_evaluations"] for s in snapshots)
+
+        decisions = [
+            DecisionRecord(
+                round_idx=i,
+                gate_accepted=s["gate_accepted"],
+                gate_rejected=s["gate_rejected"],
+                pool=s["pool"],
+                incumbent=s["incumbent"],
+                leaderboard=s["leaderboard"],
+                parents_chosen=s["parents"],
+                picker_name=picker_name or "default",
+                early_stop=s["early_stop"],
+                val_evaluations=s["val_evaluations"],
             )
-            label_to_candidate[cspec["label"]] = c
-            v = cspec.get("val_score")
-            if v is not None:
-                all_val_scores[c.id] = v
+            for i, s in enumerate(snapshots)
+        ]
 
-    gate = ValidationGate(seed=seed)
-    run = RecordingRun(all_val_scores)
-    picker: ParentSelector | None = None
-    picker_map: dict[str, type[ParentSelector]] = {
-        "archive": ArchiveSelector,
-        "evolutionary": EvolutionarySelector,
-        "islands": IslandsSelector,
-        "hill_climb": HillClimbSelector,
-        "map_elites": MapElitesSelector,
-        "pareto": ParetoSelector,
-    }
-    if picker_name and picker_name in picker_map:
-        picker = picker_map[picker_name](seed=seed)
-
-    population: list[Candidate] = []
-    gate_accepted: list[str] = []
-    gate_rejected: list[str] = []
-    gate_rounds: list[list[str]] = []
-    pool_size = 8
-    strategy_state: dict[str, Any] = {}
-    epoch = 0
-    decisions: list[DecisionRecord] = []
-    total_val = 0
-
-    for round_idx, rnd in enumerate(scenario.rounds):
-        epoch += 1
-        round_val_before = run.val_rollouts
-
-        if round_idx == 0:
-            c = label_to_candidate[seed_label]
-            population.append(c)
-            if selection_mode == "checkpoint":
-                if c.id in all_val_scores:
-                    gate.cache[c.id] = all_val_scores[c.id]
-                gate.start(run, c)
-            else:
-                gate.start(run, c)
-            gate_accepted.append(c.id)
-            gate_rounds.append([c.id])
-            strategy_state["gate_start_epoch"] = epoch
-        else:
-            new_candidates = []
-            for cspec in rnd.candidates:
-                c = label_to_candidate[cspec["label"]]
-                population.append(c)
-                new_candidates.append(c)
-            pending = [c for c in new_candidates if c.evaluated]
-            if selection_mode == "checkpoint":
-                if pending:
-                    _apply_checkpoint_round(
-                        gate, run, pending,
-                        gate_accepted, gate_rejected, gate_rounds,
-                        epoch, all_val_scores,
-                    )
-            else:
-                if pending:
-                    _gate_round(
-                        gate, run, pending,
-                        gate_accepted, gate_rejected, gate_rounds,
-                        all_val_scores,
-                    )
-
-        if scenario.early_stop_patience or scenario.early_stop_at_full_val:
-            _count_stale(strategy_state, gate, epoch)
-
-        judged = set(gate_accepted) | set(gate_rejected)
-        order = {c.id: i for i, c in enumerate(population)}
-        evaluated = [c for c in population if c.evaluated]
-
-        if selection_mode == "pool":
-            ranked = sorted(
-                (c for c in evaluated if c.id in judged and c.id in gate.cache),
-                key=lambda c: (-gate.cache[c.id], -_train_key(c), order[c.id]),
-            )
-            pool_members = _top_pool(ranked, gate, pool_size)
-            incumbent_cand = next(
-                (c for c in pool_members if c.id == gate.current_id), None
-            )
-            if incumbent_cand is not None:
-                pool_members = [incumbent_cand] + [
-                    c for c in pool_members if c is not incumbent_cand
-                ]
-            leaderboard = list(pool_members)
-        elif selection_mode == "checkpoint":
-            accepted_set = set(gate_accepted)
-            leaderboard = sorted(
-                [c for c in evaluated if c.id in accepted_set],
-                key=lambda c: (
-                    c.id != gate.best_id,
-                    -gate.cache.get(c.id, 0.0),
-                    order[c.id],
-                ),
-            )
-            pool_members = []
-        else:
-            accepted_set = set(gate_accepted)
-            leaderboard = sorted(
-                [c for c in evaluated if c.id in accepted_set],
-                key=lambda c: (-gate.cache.get(c.id, 0.0), c.id),
-            )
-            pool_members = []
-
-        incumbent_id = gate.current_id
-        parents = _select_parents(
-            selection_mode, gate, population, evaluated,
-            gate_accepted, gate_rejected, judged,
-            leaderboard, pool_members, pool_size, order,
-            picker, picker_name, epoch, seed, batch_size,
+        return ScenarioResult(
+            decisions=decisions,
+            final_winner=gate.best_id,
+            final_winner_val=gate.best_score if gate.best_id else None,
+            total_val_evaluations=total_val,
         )
-        early_stop = _early_stop_check(strategy_state, gate, scenario, epoch)
-        round_val = run.val_rollouts - round_val_before
-        total_val += round_val
-
-        decisions.append(DecisionRecord(
-            round_idx=round_idx,
-            gate_judged=[c.id for cspec in (rnd.candidates if round_idx > 0 else [{"label": seed_label}])
-                         for c in [label_to_candidate[cspec["label"]]]
-                         if c.id in judged],
-            gate_accepted=list(gate_accepted),
-            gate_rejected=list(gate_rejected),
-            pool=[c.id for c in pool_members] if pool_members else [],
-            incumbent=incumbent_id,
-            leaderboard=[c.id for c in leaderboard],
-            parents_chosen=[c.id for c in parents],
-            picker_name=picker_name or "default",
-            early_stop=early_stop,
-            val_evaluations=round_val,
-        ))
-        if early_stop:
-            break
-
-    return ScenarioResult(
-        decisions=decisions,
-        final_winner=gate.best_id,
-        final_winner_val=gate.best_score if gate.best_id else None,
-        total_val_evaluations=total_val,
-    )
+    finally:
+        if own_tmp:
+            shutil.rmtree(tmp_dir, ignore_errors=True)
 
 
 # ---------------------------------------------------------------------------
@@ -1103,28 +693,30 @@ def _result_to_dict(r: ScenarioResult) -> dict[str, Any]:
 def generate_record() -> dict[str, Any]:
     """Run all scenarios under all compatible combinations and return the record."""
     record: dict[str, Any] = {}
+    tmp_root = Path(tempfile.mkdtemp(prefix="selrec_root_"))
+    combo = 0
 
-    for scenario_fn in SYNTHETIC_SCENARIOS:
-        scenario = scenario_fn()
-        for mode in SELECTION_MODES:
-            for picker in PICKERS:
-                for batch in BATCH_SIZES:
-                    if not _is_compatible(mode, picker, batch):
-                        continue
-                    key = f"{scenario.label}|{mode}|{picker or 'none'}|batch{batch}"
-                    result = _run_scenario(scenario, mode, picker, batch)
-                    record[key] = _result_to_dict(result)
+    try:
+        all_scenarios = [(fn, fn()) for fn in SYNTHETIC_SCENARIOS]
+        for real in _real_scenarios():
+            all_scenarios.append((None, real))
 
-    # Real scenarios: run under every mode
-    for scenario in _real_scenarios():
-        for mode in SELECTION_MODES:
-            for picker in PICKERS:
-                for batch in BATCH_SIZES:
-                    if not _is_compatible(mode, picker, batch):
-                        continue
-                    key = f"{scenario.label}|{mode}|{picker or 'none'}|batch{batch}"
-                    result = _run_scenario_real(scenario, mode, picker, batch)
-                    record[key] = _result_to_dict(result)
+        for _fn, scenario in all_scenarios:
+            for mode in SELECTION_MODES:
+                for picker in PICKERS:
+                    for batch in BATCH_SIZES:
+                        if not _is_compatible(mode, picker, batch):
+                            continue
+                        key = f"{scenario.label}|{mode}|{picker or 'none'}|batch{batch}"
+                        work = tmp_root / str(combo)
+                        work.mkdir()
+                        result = _run_scenario(
+                            scenario, mode, picker, batch, work_dir=work,
+                        )
+                        record[key] = _result_to_dict(result)
+                        combo += 1
+    finally:
+        shutil.rmtree(tmp_root, ignore_errors=True)
 
     return record
 
