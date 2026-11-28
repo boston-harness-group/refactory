@@ -1,0 +1,1371 @@
+{
+  "edit_preset": "broad",
+  "frozen": [],
+  "mode": "spreadsheetbench_v2/agent",
+  "refusals": [
+    {
+      "edit": {
+        "after": "solve_check_judge_inputs",
+        "id": "solve_verify",
+        "kind": "agent",
+        "op": "insert",
+        "sees": [
+          "input.xlsx",
+          "solution.py",
+          "run_solution.py",
+          "task.md"
+        ],
+        "takes_over": "solve_check_judge",
+        "text": "Verify the spreadsheet solution by running it and checking the output file.\n\n1. Read task.md to understand what was required\n2. Run: python run_solution.py\n3. Write and run a Python comparison script using openpyxl:\n   - Load input.xlsx and the output file (check OUTPUT_PATH in solution.py)\n   - For each sheet, compare cell values between input and output\n   - Print cells that changed (first 30)\n   - Flag cells that went from None to a value (potential regression)\n   - Flag cells that went from a value to None (potential missing output)\n   - Spot-check 5 changed cells: verify signs match neighboring cells in the same column/row, magnitudes are reasonable\n4. Give your verdict based on what you found\n\nCRITICAL FORMAT RULE: Your final response MUST begin with exactly one word alone on its first line:\nreloop\nor\nproceed\nNo other text, preamble, or analysis may appear before that word.\n\nExample correct format:\nreloop\n\nCell X5 changed from None to 3500 but the task does not require filling that cell.\n\nExample correct format:\nproceed\n\nAll 35 changed cells match task requirements. Signs and magnitudes verified.",
+        "tools": [
+          "Bash",
+          "Read"
+        ]
+      },
+      "expected": {
+        "accepted": false,
+        "codes": [
+          "E-precondition"
+        ],
+        "reasons": [
+          "E-precondition: 'solve_check_judge' does not run before the new step on every path to it (missing on the has_case --skip--> finalize path); 'takes_over' names a step every run passes before the new one (not a step after it, on a sibling branch or on a branch a route can skip)"
+        ]
+      },
+      "parent_state_ref": "b7a493bde3fe53b6",
+      "provenance": [
+        "experiments_sb-v2-20261123_shake-OL"
+      ],
+      "recorded_codes": [
+        "E-precondition",
+        "E-smoke"
+      ],
+      "recorded_reasons": [
+        "E-precondition: 'tools' lists the tools a new step uses, from bash; ['Bash', 'Read'] is not such a list",
+        "E-smoke: a smoke run on 2 train item(s) the parent ran without an error failed: SnippetError at node solve_check (item sb2-2c0db3bfd7b4): verdict gate 'solve_check': neither the first word of file 'solve_check_judge.txt' ('VERDICT', in its first line 'VERDICT: proceed') nor its last line ('All 6 task requirements addressed with correct formulas/values. No regressions found.') is one of its answers ['proceed', 'reloop', 'halt'] (its o… [the proposal as a slim repair call fixed it]"
+      ]
+    },
+    {
+      "edit": {
+        "after": "solve_check_judge_inputs",
+        "id": "solve_verify",
+        "kind": "agent",
+        "op": "insert",
+        "sees": [
+          "input.xlsx",
+          "solution.py",
+          "run_solution.py",
+          "task.md"
+        ],
+        "takes_over": "solve_check_judge",
+        "text": "Verify the spreadsheet solution by running it and checking the output.\n\n1. Read task.md to understand what cells the task requires\n2. Run: python run_solution.py\n3. Write and run a Python verification script:\n   - Find OUTPUT_PATH in solution.py\n   - Load input.xlsx and the output file with openpyxl\n   - Find all cells that differ between input and output (print first 30)\n   - Flag any cell that changed from None/empty to a value — this is a regression unless the task explicitly requires that cell\n   - Flag any cell whose value has the opposite sign from neighboring populated cells in the same column\n   - Count total changes and compare to what the task requires\n4. If you find regressions (None to value outside task scope), sign errors, or missing required cells, say reloop with specific fixes needed. Otherwise say proceed.\n\nFORMAT RULE — your response MUST begin with exactly one word alone on the first line:\nreloop\nor\nproceed\nNothing else before that word. No label, no preamble, no VERDICT: prefix, no reasoning before it.\n\nCorrect example:\nreloop\n\nCell C42 is None in the input but got value 8004 in the output. The task does not require this cell.\n\nCorrect example:\nproceed\n\nAll 35 changed cells are within the task scope. Signs and magnitudes verified.",
+        "tools": [
+          "bash"
+        ]
+      },
+      "expected": {
+        "accepted": false,
+        "codes": [
+          "E-precondition"
+        ],
+        "reasons": [
+          "E-precondition: 'solve_check_judge' does not run before the new step on every path to it (missing on the has_case --skip--> finalize path); 'takes_over' names a step every run passes before the new one (not a step after it, on a sibling branch or on a branch a route can skip)"
+        ]
+      },
+      "parent_state_ref": "b7a493bde3fe53b6",
+      "provenance": [
+        "experiments_sb-v2-20261123_shake-OL"
+      ],
+      "recorded_codes": [
+        "E-precondition"
+      ],
+      "recorded_reasons": [
+        "E-precondition: 'solve_check_judge' does not run before the new step on every path to it; 'takes_over' names a step every run passes before the new one (not a step after it, on a sibling branch or on a branch a route can skip)"
+      ]
+    }
+  ],
+  "sections": [
+    {
+      "provenance": [
+        "experiments_sb-v2-20261123_shake-OL"
+      ],
+      "sections": {
+        "composition": "### How nodes compose\nThe pipeline is made of four kinds of step, and any of them may be put anywhere the validator's rules (listed below) allow:\n- **agent**: one model call. Its prompt fills each `{{name}}` from a fact (or knob) produced upstream; its reply is written to its first `writes` file and, when it declares `produces`, also becomes that fact. A new agent without `tools` sees only its prompt and the files it names in `sees` (they become its declared reads, pasted in after the prompt): hand it anything else as `{{facts}}`. A file's text becomes a fact through an op that reads the file and `produces` the fact, or when the agent that writes the file declares `produces`.\n- **where `{{fact}}` is filled in**: only in an agent's `prompt_template` (its `<id>__task` knob) and its system prompt (its `<id>__system_prompt` knob). Any other knob is read as written, so a `{{fact}}` there would never arrive and is refused (V20).\n- **tools**: every existing step keeps its own tool rules, and in this run a new step has no tools.\n- **gate**: routes by a verdict, to the out-edge whose `condition` is that verdict. Give each out-edge a single-word condition (`proceed`, `reloop`, `revise` ...). Any declared upstream output can be the verdict: with `\"evaluator\": \"refactory_dsh.snippet:verdict\"` the gate reads the verdict from its first `required_reads` file (or, with none, its first `inputs` fact) -- whatever an agent or a code op upstream wrote there: its first word, or else its last line when that is the word alone or the word then `:`, `—`, `–`, `-` or `.` and more (leading markdown or quotes are skipped; a list item or a code fence is not read) -- and the rest of the text is the reason. The word must be one of the conditions (any case) or `halt`, which ends the whole run. Anything else fails that item's run, and so does a first word and a last line that name different verdicts, so tell the writer to start with the word or put it alone on the last line.\n- **loop**: a gate's out-edge back to an earlier step. The `loop` operation makes one around a step (step -> gate; gate -> step on `reloop`, gate -> the step's old successor on `proceed`); a reloop hands the gate's reason to the step it goes back to as feedback, and the gate's `max_iterations` bounds how often it may. When a gate would reloop once more than that, its `on_exhausted` decides: `continue` (the default inside the per-item pass) goes on along `proceed` with the last attempt, which is graded as it stands; `fail_item` fails that item only; `halt` ends the whole run (no later item runs). A gate with no forward `proceed` edge defaults to `fail_item`. The last step of the pass can be looped too: the loop then adds a step after the gate to end the pass.\n- **running out of output**: a model call that uses its whole output allowance without answering is the model failing that question. It is not retried unless the step opts in (retry.on): the step has no answer, and the item goes on without it (a gate after it sees no answer and may reloop; a fork's join sees that branch without one; a code op's `inp['files']` holds only the files that exist; an item left with nothing to grade scores 0).\n- **running out of turns**: an agent that uses its whole turn cap without finishing is the model failing that question, like running out of output. It is not retried unless the step opts in (retry.on): the step has no answer, and the item goes on without it, as above.\n- **crashes**: when the worker or product fails (not the model's own output or turn cap), an agent step in the per-item pass that is safe to rerun (no tools, its own report files only, or a workspace) is run again in a fresh session, up to 2 more times; if every session crashes it has no answer, as above. An item that times out is a harness timeout: not caused by the pipeline's design; not a target.\n- **fork**: steps run at once between a fork and a join; branches write distinct files and facts. `parallelize` and `branch` wire what the branches make into the step after the join; the written-out `parallel` operation leaves that to you.\n\nOne example of each composition shape, with this graph's ids (how to write it; none is preferred):\n- a new agent step: {\"op\": \"insert\", \"before\": \"solve\", \"kind\": \"agent\", \"text\": \"<what the new step does>\"}\n- a verdict loop (a judge that can send a step back): {\"op\": \"loop\", \"step\": \"solve\", \"judge\": \"agent\", \"text\": \"<what to check>\"}\n- a route (a judge choosing the next step): {\"op\": \"route\", \"after\": \"solve\", \"judge\": \"agent\", \"text\": \"<how to choose>\"}\nShapes not shown here, with the refusal of the forms tried: a parallel fork and join: nothing reads the output of new step 'solve_branch1', so it changes no result (no step can read it) / nothing reads the output of new step 'solve_copy1', so it changes no result (insert one seeing it with 'takes_over': solve).\n",
+        "operator_lines": "\nThe structural operators, each one line: what kind of step (`agent`, `op` or `code`), where (a step id), and its text (a prompt, or code). The system does the wiring, as each operator's line below says. Ids, files and facts are generated; each text goes into a knob of its own (`<id>__task`, `<id>__code`) for a later `set_knob`; the candidate says what was wired. Every text has a default (the neighbour's, or a neutral line), and each operator counts as one change. The written-out operations in the table above stay for what these do not express.\n- `insert` (after, before, kind, text, system, sees, to, id, call, reads, tools, takes_over, sealed, produces, writes): a new step after (or before) a step; 'before' puts it on every edge into that step, so 'sees' must name only what every path carries there: 'kind' agent (text = its prompt; 'system' its system prompt), code (text = Python) or op (with 'call' and 'reads'); it sees what that step sees plus its outputs; its output goes into the nearest prompt after it that can take it -- an agent's own prompt knob, or the one text knob an op fills facts into -- or where 'to' says (a prompt knob, or a step: an agent whose prompt is no knob gets a section for it); with neither, refused unless a step reads it; 'tools' (an agent): e.g. [\"bash\"]; a new step may have them though the steps beside it have none or refuse theirs (an existing step keeps its own tool rules); it runs sealed: only the files it sees (in the per-item part, without 'sees', the item's input files too), no network, no grader files; 'sealed' true on a code step: its code runs in the Task's tool environment (its Python interpreter, its extra commands) sealed -- the files it sees read-only, no network, no grader files -- so it may import any package the Task provides (openpyxl, pandas, numpy) and read item files; the import allowlist does not apply; the Task must declare a tool environment; 'takes_over' an earlier step: the new step writes that step's outputs, so what read them reads the new step's (a choice among attempts reaching what is scored), and that step's own go under new names; 'takes_over' as [step, output, ...] takes only those outputs (the new step writes them and its own; the rest pass through unchanged, so downstream steps keep reading them from the original step). E.g. {\"op\": \"insert\", \"after\": \"<step>\", \"kind\": \"agent\", \"text\": \"<what the new step does>\"}\n- `remove` (step, keep): take a step out and reconnect around it (a fork branch too); on a gate, 'keep' names the verdict whose path stays. E.g. {\"op\": \"remove\", \"step\": \"<step>\"}\n- `parallelize` (steps, copies, after, new, sees): run consecutive 'steps' at once, or one step beside 'copies' of itself, or 'new' steps after 'after', between a fork and a join. E.g. {\"op\": \"parallelize\", \"steps\": [\"solve\"], \"copies\": 2}\n- `serialize` (fork): run a fork's branches one after another, in their order. E.g. {\"op\": \"serialize\", \"fork\": \"<fork>\"}\n- `branch` (fork, kind, text, system, sees, optional, id, to, tools, sealed, produces, writes): a new step as another branch of a fork ('optional': true lets it fail without failing the item; 'sees' names its inputs: \"task\", step ids, or single fact or file names there before the fork; 'system' as insert's); its output goes into the nearest prompt after the join that can take it -- an agent's own prompt knob, or the one text knob an op fills facts into -- or where 'to' says (a prompt knob, or a step: an agent whose prompt is no knob gets a section for it); with neither, refused unless a step reads it; 'tools' as insert's (sealed); 'sealed' as insert's on a code step. E.g. {\"op\": \"branch\", \"fork\": \"<fork>\", \"kind\": \"agent\", \"text\": \"<what this branch does>\"}\n- `rewire` (step, sees, text): change what a step sees: \"task\" (the task's own input, once, as the model steps receive it: never a step's output or a knob's text (an op's output carries the knobs the op declares for it in `knob_outputs`, else every knob the op reads)), step ids (their outputs), or single fact or file names there before it (that input alone); 'text' gives an agent step new instructions too, in place: the same id, outputs and place in a fork or join (so a branch can work from the task alone); with 'text' and no 'sees' it keeps what it sees. E.g. {\"op\": \"rewire\", \"step\": \"solve\", \"sees\": [\"task\"]}\n- `loop` (step, back_to, judge, text, sees, tools, max_iterations, id, sealed): a judge after a step that can send it back with its reason -- or, with 'back_to', send the work back to an earlier agent step, so every step from there to the judge runs again (a fork in between whole); 'back_to' is one every run passes before the step, in the same per-item pass and fork branch: 'judge' agent (text = what to check; its answer starts with proceed or reloop, then why), code (text = Python returning {'verdict': 'proceed' or 'reloop', 'reason': why}) or a callable. The judge is handed what the step read and wrote, unless 'sees' says otherwise, as text (a binary or very long file only named); with 'tools' (an agent judge, as insert's) it runs sealed instead, with the files it sees in its workspace, and its reply starts with the verdict; with 'sealed' true on a code judge, it runs in the Task's tool environment sealed, as insert's 'sealed' on a code step. The reason reaches the step sent back, with that step's own last output; it is sent back at most 'max_iterations' times, so it runs at most that many times plus one (default 2: up to 3 runs; 1 to 5; afterwards the knob <gate>__max_iterations, the gate being <step>_check unless 'id' names it), then the run goes on. E.g. {\"op\": \"loop\", \"step\": \"solve\", \"judge\": \"agent\", \"text\": \"<what to check>\", \"max_iterations\": 2}\n- `route` (after, judge, text, to, sees, tools, id, sealed): a judge after a step chooses one labelled next step ('to': label -> step id or a new step, whose 'takes_over' rewrites an earlier step's outputs on that way); the branches rejoin; with no 'to', proceed or redo the step in place; 'tools' as loop's judge. E.g. {\"op\": \"route\", \"after\": \"<step>\", \"judge\": \"agent\", \"text\": \"<how to choose>\", \"to\": {\"proceed\": \"<next step>\", \"revise\": {\"kind\": \"agent\", \"text\": \"<what it does>\"}}}\n- `split` (step, into: one or two steps, each like {kind, text, sees}): replace a step by two new steps run in turn ('into' two), or by one ('into' one: replace); the last takes over its outputs. E.g. {\"op\": \"split\", \"step\": \"<step>\", \"into\": [{\"kind\": \"agent\", \"text\": \"<first part>\"}, {\"kind\": \"agent\", \"text\": \"<second part>\"}]}\n- `merge` (steps, kind, text, system, id, tools, sealed): two consecutive steps as one, with the first's inputs and the second's outputs; 'system' as insert's; 'tools' as insert's (sealed), else a sealed step's own come along; 'sealed' as insert's on a code step. E.g. {\"op\": \"merge\", \"steps\": [\"<step>\", \"<next step>\"], \"text\": \"<what the merged step does>\"}\n- `fallback` (step, kind, text, system, sees, id, call, reads, tools, sealed): a step run instead when 'step' (one run per item) fails -- it raises, crashes past its retries, hits its output limit, its turn cap, its prompt limit, or is still writing at the session time limit (backstop); never for a timeout (the harness's, a declared wall or the step's own) or a harness fault: it writes that step's outputs, so what reads them still gets an answer; 'kind' as in insert; it sees what 'step' sees; when the step writes more than one file, the fallback must be a code step or an agent with tools (a plain agent writes only its reply); 'sealed' as insert's on a code step. E.g. {\"op\": \"fallback\", \"step\": \"<step>\", \"kind\": \"agent\", \"text\": \"<a simpler way to the same output>\"}\n- `map` (after, over, text, system, sees, max, combine, id, to, tools): after a step, a new agent step run once per element of 'over' (a list there: a fact, a file or a step's output), one model call each, all at once: a JSON array gives its items, a bulleted, numbered or lettered list its items, other text its non-empty lines; at most 'max' run (default 4, up to 8; past it the first 'max', and the combine is told so); 'text' says what to do with one element; 'combine' (a step as in insert) sees every result and writes one output, placed as insert's is; 'system' as insert's, for each run; 'tools' as insert's: each run sealed; remove the elements step or the combine and the whole map goes. E.g. {\"op\": \"map\", \"after\": \"<step>\", \"over\": \"<step>\", \"text\": \"<what to do with one element>\", \"combine\": {\"kind\": \"agent\", \"text\": \"<how to combine the results>\"}}\n- in the per-item part `data`, a step with `tools` runs its commands with python3 (and python) = Python 3.12 with openpyxl 3.1.5, pandas 2.3.3, numpy 2.5.4",
+        "pipeline_view": "The pipeline, one line per step, generated from the graph in the operators' own words: `sees` lists a step's inputs as `\"sees\"` names them, `name@maker` (`@run`: no step makes it); a plain op that only assembles a model step's input is folded in as `name (via op: its inputs)`; an agent with tools sees the run dir, its own workspace, or a sealed one (its inputs only); `told` is each knob whose text reaches the step, its opening words (`*` frozen; `?` read by an op with several outputs, for all of them), or a code step's code; `->` what it writes; a per-item block's `item files` are files the task lays into each item's pass, under the same name for every item, and the steps that read them: a new step reads one by naming it (or the data step) in 'sees'; `parallel fork { ... } -> join`; `loop(step, judge ..., max N -> N+1 runs)`; `loop(back_to … step, judge ..., max N -> N+1 runs)`; `route(after step, judge ..., {label: step})`; `fallback(step fails -> step)`; `map(step … step over list, max N)`; `per item (data -> its writes; item files: path seen by step, ...) { ... }`; `step agent on model=M effort=E max_completion_tokens=N`; a loop that does not go on with its last attempt past its cap says so: `past the cap: fail_item` (only that item fails) or `past the cap: halt` (the whole run stops); `[optional]`; `[protected]`.\n```text\nper item (data -> current_item.json, item/input.xlsx; item files: item/input.xlsx seen by finalize, prepare) {\n  prepare op  sees current_item.json@data, item/input.xlsx@data  -> input.xlsx, .agents/skills/skillopt-target/SKILL.md, task.md, run_solution.py, turn.json, target_system_prompt.txt, target_user_prompt.txt, spreadsheet_preview.txt, has_case\n  route(after prepare, judge refactory_packages.spreadsheetbench.ops:has_case, {skip: finalize, proceed: solve})\n    on proceed:\n      solve agent  sees sealed workspace (tools: Read, Bash), .agents/skills/skillopt-target/SKILL.md@prepare, input.xlsx@prepare, run_solution.py@prepare, task.md@prepare  told solve__system_prompt* \"\"; solve__prompt_template* \"Use the workspace files to solve the task. Read…\"  -> reply.txt, solution.py\n  [protected] finalize op  sees current_item.json@data, item/input.xlsx@data, reply.txt@solve, solution.py@solve, turn.json@prepare  -> final.json, conversation.json, pred.xlsx, code.py, raw.txt, finished\n}\n```"
+      },
+      "state_ref": "8d9c9db3387c613f"
+    },
+    {
+      "provenance": [
+        "experiments_sb-v2-20261123_shake-OL"
+      ],
+      "sections": {
+        "composition": "### How nodes compose\nThe pipeline is made of four kinds of step, and any of them may be put anywhere the validator's rules (listed below) allow:\n- **agent**: one model call. Its prompt fills each `{{name}}` from a fact (or knob) produced upstream; its reply is written to its first `writes` file and, when it declares `produces`, also becomes that fact. A new agent without `tools` sees only its prompt and the files it names in `sees` (they become its declared reads, pasted in after the prompt): hand it anything else as `{{facts}}`. A file's text becomes a fact through an op that reads the file and `produces` the fact, or when the agent that writes the file declares `produces`.\n- **where `{{fact}}` is filled in**: only in an agent's `prompt_template` (its `<id>__task` knob) and its system prompt (its `<id>__system_prompt` knob). Any other knob is read as written, so a `{{fact}}` there would never arrive and is refused (V20).\n- **tools**: every existing step keeps its own tool rules, and in this run a new step has no tools.\n- **gate**: routes by a verdict, to the out-edge whose `condition` is that verdict. Give each out-edge a single-word condition (`proceed`, `reloop`, `revise` ...). Any declared upstream output can be the verdict: with `\"evaluator\": \"refactory_dsh.snippet:verdict\"` the gate reads the verdict from its first `required_reads` file (or, with none, its first `inputs` fact) -- whatever an agent or a code op upstream wrote there: its first word, or else its last line when that is the word alone or the word then `:`, `—`, `–`, `-` or `.` and more (leading markdown or quotes are skipped; a list item or a code fence is not read) -- and the rest of the text is the reason. The word must be one of the conditions (any case) or `halt`, which ends the whole run. Anything else fails that item's run, and so does a first word and a last line that name different verdicts, so tell the writer to start with the word or put it alone on the last line.\n- **loop**: a gate's out-edge back to an earlier step. The `loop` operation makes one around a step (step -> gate; gate -> step on `reloop`, gate -> the step's old successor on `proceed`); a reloop hands the gate's reason to the step it goes back to as feedback, and the gate's `max_iterations` bounds how often it may. When a gate would reloop once more than that, its `on_exhausted` decides: `continue` (the default inside the per-item pass) goes on along `proceed` with the last attempt, which is graded as it stands; `fail_item` fails that item only; `halt` ends the whole run (no later item runs). A gate with no forward `proceed` edge defaults to `fail_item`. The last step of the pass can be looped too: the loop then adds a step after the gate to end the pass.\n- **running out of output**: a model call that uses its whole output allowance without answering is the model failing that question. It is not retried unless the step opts in (retry.on): the step has no answer, and the item goes on without it (a gate after it sees no answer and may reloop; a fork's join sees that branch without one; a code op's `inp['files']` holds only the files that exist; an item left with nothing to grade scores 0).\n- **running out of turns**: an agent that uses its whole turn cap without finishing is the model failing that question, like running out of output. It is not retried unless the step opts in (retry.on): the step has no answer, and the item goes on without it, as above.\n- **crashes**: when the worker or product fails (not the model's own output or turn cap), an agent step in the per-item pass that is safe to rerun (no tools, its own report files only, or a workspace) is run again in a fresh session, up to 2 more times; if every session crashes it has no answer, as above. An item that times out is a harness timeout: not caused by the pipeline's design; not a target.\n- **fork**: steps run at once between a fork and a join; branches write distinct files and facts. `parallelize` and `branch` wire what the branches make into the step after the join; the written-out `parallel` operation leaves that to you.\n\nOne example of each composition shape, with this graph's ids (how to write it; none is preferred):\n- a new agent step: {\"op\": \"insert\", \"before\": \"solve\", \"kind\": \"agent\", \"text\": \"<what the new step does>\"}\n- a parallel fork and join: {\"op\": \"parallelize\", \"after\": \"solve\", \"new\": [{\"kind\": \"agent\", \"text\": \"<what one branch does>\"}, {\"kind\": \"agent\", \"text\": \"<what another branch does>\"}]}\n- a verdict loop (a judge that can send a step back): {\"op\": \"loop\", \"step\": \"solve\", \"judge\": \"agent\", \"text\": \"<what to check>\"}\n- a route (a judge choosing the next step): {\"op\": \"route\", \"after\": \"solve\", \"judge\": \"agent\", \"text\": \"<how to choose>\"}\n",
+        "operator_lines": "\nThe structural operators, each one line: what kind of step (`agent`, `op` or `code`), where (a step id), and its text (a prompt, or code). The system does the wiring, as each operator's line below says. Ids, files and facts are generated; each text goes into a knob of its own (`<id>__task`, `<id>__code`) for a later `set_knob`; the candidate says what was wired. Every text has a default (the neighbour's, or a neutral line), and each operator counts as one change. The written-out operations in the table above stay for what these do not express.\n- `insert` (after, before, kind, text, system, sees, to, id, call, reads, tools, takes_over, sealed, produces, writes): a new step after (or before) a step; 'before' puts it on every edge into that step, so 'sees' must name only what every path carries there: 'kind' agent (text = its prompt; 'system' its system prompt), code (text = Python) or op (with 'call' and 'reads'); it sees what that step sees plus its outputs; its output goes into the nearest prompt after it that can take it -- an agent's own prompt knob, or the one text knob an op fills facts into -- or where 'to' says (a prompt knob, or a step: an agent whose prompt is no knob gets a section for it); with neither, refused unless a step reads it; 'tools' (an agent): e.g. [\"bash\"]; a new step may have them though the steps beside it have none or refuse theirs (an existing step keeps its own tool rules); it runs sealed: only the files it sees (in the per-item part, without 'sees', the item's input files too), no network, no grader files; 'sealed' true on a code step: its code runs in the Task's tool environment (its Python interpreter, its extra commands) sealed -- the files it sees read-only, no network, no grader files -- so it may import any package the Task provides (openpyxl, pandas, numpy) and read item files; the import allowlist does not apply; the Task must declare a tool environment; 'takes_over' an earlier step: the new step writes that step's outputs, so what read them reads the new step's (a choice among attempts reaching what is scored), and that step's own go under new names; 'takes_over' as [step, output, ...] takes only those outputs (the new step writes them and its own; the rest pass through unchanged, so downstream steps keep reading them from the original step). E.g. {\"op\": \"insert\", \"after\": \"solve\", \"kind\": \"agent\", \"text\": \"<what the new step does>\"}\n- `remove` (step, keep): take a step out and reconnect around it (a fork branch too); on a gate, 'keep' names the verdict whose path stays. E.g. {\"op\": \"remove\", \"step\": \"<step>\"}\n- `parallelize` (steps, copies, after, new, sees): run consecutive 'steps' at once, or one step beside 'copies' of itself, or 'new' steps after 'after', between a fork and a join. E.g. {\"op\": \"parallelize\", \"steps\": [\"solve\"], \"copies\": 2}\n- `serialize` (fork): run a fork's branches one after another, in their order. E.g. {\"op\": \"serialize\", \"fork\": \"<fork>\"}\n- `branch` (fork, kind, text, system, sees, optional, id, to, tools, sealed, produces, writes): a new step as another branch of a fork ('optional': true lets it fail without failing the item; 'sees' names its inputs: \"task\", step ids, or single fact or file names there before the fork; 'system' as insert's); its output goes into the nearest prompt after the join that can take it -- an agent's own prompt knob, or the one text knob an op fills facts into -- or where 'to' says (a prompt knob, or a step: an agent whose prompt is no knob gets a section for it); with neither, refused unless a step reads it; 'tools' as insert's (sealed); 'sealed' as insert's on a code step. E.g. {\"op\": \"branch\", \"fork\": \"<fork>\", \"kind\": \"agent\", \"text\": \"<what this branch does>\"}\n- `rewire` (step, sees, text): change what a step sees: \"task\" (the task's own input, once, as the model steps receive it: never a step's output or a knob's text (an op's output carries the knobs the op declares for it in `knob_outputs`, else every knob the op reads)), step ids (their outputs), or single fact or file names there before it (that input alone); 'text' gives an agent step new instructions too, in place: the same id, outputs and place in a fork or join (so a branch can work from the task alone); with 'text' and no 'sees' it keeps what it sees. E.g. {\"op\": \"rewire\", \"step\": \"solve\", \"sees\": [\"task\"]}\n- `loop` (step, back_to, judge, text, sees, tools, max_iterations, id, sealed): a judge after a step that can send it back with its reason -- or, with 'back_to', send the work back to an earlier agent step, so every step from there to the judge runs again (a fork in between whole); 'back_to' is one every run passes before the step, in the same per-item pass and fork branch: 'judge' agent (text = what to check; its answer starts with proceed or reloop, then why), code (text = Python returning {'verdict': 'proceed' or 'reloop', 'reason': why}) or a callable. The judge is handed what the step read and wrote, unless 'sees' says otherwise, as text (a binary or very long file only named); with 'tools' (an agent judge, as insert's) it runs sealed instead, with the files it sees in its workspace, and its reply starts with the verdict; with 'sealed' true on a code judge, it runs in the Task's tool environment sealed, as insert's 'sealed' on a code step. The reason reaches the step sent back, with that step's own last output; it is sent back at most 'max_iterations' times, so it runs at most that many times plus one (default 2: up to 3 runs; 1 to 5; afterwards the knob <gate>__max_iterations, the gate being <step>_check unless 'id' names it), then the run goes on. E.g. {\"op\": \"loop\", \"step\": \"solve\", \"judge\": \"agent\", \"text\": \"<what to check>\", \"max_iterations\": 2}\n- `route` (after, judge, text, to, sees, tools, id, sealed): a judge after a step chooses one labelled next step ('to': label -> step id or a new step, whose 'takes_over' rewrites an earlier step's outputs on that way); the branches rejoin; with no 'to', proceed or redo the step in place; 'tools' as loop's judge. E.g. {\"op\": \"route\", \"after\": \"solve\", \"judge\": \"agent\", \"text\": \"<how to choose>\", \"to\": {\"proceed\": \"solve_check_judge_inputs\", \"revise\": {\"kind\": \"agent\", \"text\": \"<what it does>\"}}}\n- `split` (step, into: one or two steps, each like {kind, text, sees}): replace a step by two new steps run in turn ('into' two), or by one ('into' one: replace); the last takes over its outputs. E.g. {\"op\": \"split\", \"step\": \"solve_check_judge\", \"into\": [{\"kind\": \"agent\", \"text\": \"<first part>\"}, {\"kind\": \"agent\", \"text\": \"<second part>\"}]}\n- `merge` (steps, kind, text, system, id, tools, sealed): two consecutive steps as one, with the first's inputs and the second's outputs; 'system' as insert's; 'tools' as insert's (sealed), else a sealed step's own come along; 'sealed' as insert's on a code step. E.g. {\"op\": \"merge\", \"steps\": [\"<step>\", \"<next step>\"], \"text\": \"<what the merged step does>\"}\n- `fallback` (step, kind, text, system, sees, id, call, reads, tools, sealed): a step run instead when 'step' (one run per item) fails -- it raises, crashes past its retries, hits its output limit, its turn cap, its prompt limit, or is still writing at the session time limit (backstop); never for a timeout (the harness's, a declared wall or the step's own) or a harness fault: it writes that step's outputs, so what reads them still gets an answer; 'kind' as in insert; it sees what 'step' sees; when the step writes more than one file, the fallback must be a code step or an agent with tools (a plain agent writes only its reply); 'sealed' as insert's on a code step. E.g. {\"op\": \"fallback\", \"step\": \"solve_check_judge\", \"kind\": \"agent\", \"text\": \"<a simpler way to the same output>\"}\n- `map` (after, over, text, system, sees, max, combine, id, to, tools): after a step, a new agent step run once per element of 'over' (a list there: a fact, a file or a step's output), one model call each, all at once: a JSON array gives its items, a bulleted, numbered or lettered list its items, other text its non-empty lines; at most 'max' run (default 4, up to 8; past it the first 'max', and the combine is told so); 'text' says what to do with one element; 'combine' (a step as in insert) sees every result and writes one output, placed as insert's is; 'system' as insert's, for each run; 'tools' as insert's: each run sealed; remove the elements step or the combine and the whole map goes. E.g. {\"op\": \"map\", \"after\": \"solve\", \"over\": \"solve\", \"text\": \"<what to do with one element>\", \"combine\": {\"kind\": \"agent\", \"text\": \"<how to combine the results>\"}}\n- in the per-item part `data`, a step with `tools` runs its commands with python3 (and python) = Python 3.12 with openpyxl 3.1.5, pandas 2.3.3, numpy 2.5.4",
+        "pipeline_view": "The pipeline, one line per step, generated from the graph in the operators' own words: `sees` lists a step's inputs as `\"sees\"` names them, `name@maker` (`@run`: no step makes it); a plain op that only assembles a model step's input is folded in as `name (via op: its inputs)`; an agent with tools sees the run dir, its own workspace, or a sealed one (its inputs only); `told` is each knob whose text reaches the step, its opening words (`*` frozen; `?` read by an op with several outputs, for all of them), or a code step's code; `->` what it writes; a per-item block's `item files` are files the task lays into each item's pass, under the same name for every item, and the steps that read them: a new step reads one by naming it (or the data step) in 'sees'; `parallel fork { ... } -> join`; `loop(step, judge ..., max N -> N+1 runs)`; `loop(back_to … step, judge ..., max N -> N+1 runs)`; `route(after step, judge ..., {label: step})`; `fallback(step fails -> step)`; `map(step … step over list, max N)`; `per item (data -> its writes; item files: path seen by step, ...) { ... }`; `step agent on model=M effort=E max_completion_tokens=N`; a loop that does not go on with its last attempt past its cap says so: `past the cap: fail_item` (only that item fails) or `past the cap: halt` (the whole run stops); `[optional]`; `[protected]`.\n```text\nper item (data -> current_item.json, item/input.xlsx; item files: item/input.xlsx seen by finalize, prepare) {\n  prepare op  sees current_item.json@data, item/input.xlsx@data  -> input.xlsx, .agents/skills/skillopt-target/SKILL.md, task.md, run_solution.py, turn.json, target_system_prompt.txt, target_user_prompt.txt, spreadsheet_preview.txt, has_case\n  route(after prepare, judge refactory_packages.spreadsheetbench.ops:has_case, {skip: finalize, proceed: solve})\n    on proceed:\n      solve agent  sees sealed workspace (tools: Read, Bash), .agents/skills/skillopt-target/SKILL.md@prepare, input.xlsx@prepare, run_solution.py@prepare, task.md@prepare  told solve__system_prompt* \"\"; solve__prompt_template* \"Use the workspace files to solve the task. Read…\"  -> reply.txt, solution.py\n      loop(solve, judge solve_check_judge (sees solve_check_judge_inputs (via solve_check_judge_inputs: .agents/skills/skillopt-target/SKILL.md@prepare, input.xlsx@prepare, reply.txt@solve, run_solution.py@prepare, solution.py@solve, task.md@prepare)  told solve_check_judge__system_prompt \"You are one step of a pipeline.\"; solve_check_judge__task \"You are verifying a spreadsheet manipulation so…\" + appended by the system: \"Start your answer with one word, proceed or reloop, alone or followed by why; nothing before it.\"  -> solve_check_judge.txt), max 1 -> 2 runs, knob solve_check__max_iterations)\n  [protected] finalize op  sees current_item.json@data, item/input.xlsx@data, reply.txt@solve, solution.py@solve, turn.json@prepare  -> final.json, conversation.json, pred.xlsx, code.py, raw.txt, finished\n}\n```"
+      },
+      "state_ref": "b7a493bde3fe53b6"
+    },
+    {
+      "provenance": [
+        "experiments_sb-v2-20261123_shake-OL"
+      ],
+      "sections": {
+        "composition": "### How nodes compose\nThe pipeline is made of four kinds of step, and any of them may be put anywhere the validator's rules (listed below) allow:\n- **agent**: one model call. Its prompt fills each `{{name}}` from a fact (or knob) produced upstream; its reply is written to its first `writes` file and, when it declares `produces`, also becomes that fact. A new agent without `tools` sees only its prompt and the files it names in `sees` (they become its declared reads, pasted in after the prompt): hand it anything else as `{{facts}}`. A file's text becomes a fact through an op that reads the file and `produces` the fact, or when the agent that writes the file declares `produces`.\n- **where `{{fact}}` is filled in**: only in an agent's `prompt_template` (its `<id>__task` knob) and its system prompt (its `<id>__system_prompt` knob). Any other knob is read as written, so a `{{fact}}` there would never arrive and is refused (V20).\n- **tools**: every existing step keeps its own tool rules, and in this run a new step has no tools.\n- **gate**: routes by a verdict, to the out-edge whose `condition` is that verdict. Give each out-edge a single-word condition (`proceed`, `reloop`, `revise` ...). Any declared upstream output can be the verdict: with `\"evaluator\": \"refactory_dsh.snippet:verdict\"` the gate reads the verdict from its first `required_reads` file (or, with none, its first `inputs` fact) -- whatever an agent or a code op upstream wrote there: its first word, or else its last line when that is the word alone or the word then `:`, `—`, `–`, `-` or `.` and more (leading markdown or quotes are skipped; a list item or a code fence is not read) -- and the rest of the text is the reason. The word must be one of the conditions (any case) or `halt`, which ends the whole run. Anything else fails that item's run, and so does a first word and a last line that name different verdicts, so tell the writer to start with the word or put it alone on the last line.\n- **loop**: a gate's out-edge back to an earlier step. The `loop` operation makes one around a step (step -> gate; gate -> step on `reloop`, gate -> the step's old successor on `proceed`); a reloop hands the gate's reason to the step it goes back to as feedback, and the gate's `max_iterations` bounds how often it may. When a gate would reloop once more than that, its `on_exhausted` decides: `continue` (the default inside the per-item pass) goes on along `proceed` with the last attempt, which is graded as it stands; `fail_item` fails that item only; `halt` ends the whole run (no later item runs). A gate with no forward `proceed` edge defaults to `fail_item`. The last step of the pass can be looped too: the loop then adds a step after the gate to end the pass.\n- **running out of output**: a model call that uses its whole output allowance without answering is the model failing that question. It is not retried unless the step opts in (retry.on): the step has no answer, and the item goes on without it (a gate after it sees no answer and may reloop; a fork's join sees that branch without one; a code op's `inp['files']` holds only the files that exist; an item left with nothing to grade scores 0).\n- **running out of turns**: an agent that uses its whole turn cap without finishing is the model failing that question, like running out of output. It is not retried unless the step opts in (retry.on): the step has no answer, and the item goes on without it, as above.\n- **crashes**: when the worker or product fails (not the model's own output or turn cap), an agent step in the per-item pass that is safe to rerun (no tools, its own report files only, or a workspace) is run again in a fresh session, up to 2 more times; if every session crashes it has no answer, as above. An item that times out is a harness timeout: not caused by the pipeline's design; not a target.\n- **fork**: steps run at once between a fork and a join; branches write distinct files and facts. `parallelize` and `branch` wire what the branches make into the step after the join; the written-out `parallel` operation leaves that to you.\n\nOne example of each composition shape, with this graph's ids (how to write it; none is preferred):\n- a new agent step: {\"op\": \"insert\", \"before\": \"solve\", \"kind\": \"agent\", \"text\": \"<what the new step does>\"}\n- a parallel fork and join: {\"op\": \"parallelize\", \"after\": \"solve\", \"new\": [{\"kind\": \"agent\", \"text\": \"<what one branch does>\"}, {\"kind\": \"agent\", \"text\": \"<what another branch does>\"}]}\n- a verdict loop (a judge that can send a step back): {\"op\": \"loop\", \"step\": \"solve\", \"judge\": \"agent\", \"text\": \"<what to check>\"}\n- a route (a judge choosing the next step): {\"op\": \"route\", \"after\": \"solve\", \"judge\": \"agent\", \"text\": \"<how to choose>\"}\n",
+        "operator_lines": "\nThe structural operators, each one line: what kind of step (`agent`, `op` or `code`), where (a step id), and its text (a prompt, or code). The system does the wiring, as each operator's line below says. Ids, files and facts are generated; each text goes into a knob of its own (`<id>__task`, `<id>__code`) for a later `set_knob`; the candidate says what was wired. Every text has a default (the neighbour's, or a neutral line), and each operator counts as one change. The written-out operations in the table above stay for what these do not express.\n- `insert` (after, before, kind, text, system, sees, to, id, call, reads, tools, takes_over, sealed, produces, writes): a new step after (or before) a step; 'before' puts it on every edge into that step, so 'sees' must name only what every path carries there: 'kind' agent (text = its prompt; 'system' its system prompt), code (text = Python) or op (with 'call' and 'reads'); it sees what that step sees plus its outputs; its output goes into the nearest prompt after it that can take it -- an agent's own prompt knob, or the one text knob an op fills facts into -- or where 'to' says (a prompt knob, or a step: an agent whose prompt is no knob gets a section for it); with neither, refused unless a step reads it; 'tools' (an agent): e.g. [\"bash\"]; a new step may have them though the steps beside it have none or refuse theirs (an existing step keeps its own tool rules); it runs sealed: only the files it sees (in the per-item part, without 'sees', the item's input files too), no network, no grader files; 'sealed' true on a code step: its code runs in the Task's tool environment (its Python interpreter, its extra commands) sealed -- the files it sees read-only, no network, no grader files -- so it may import any package the Task provides (openpyxl, pandas, numpy) and read item files; the import allowlist does not apply; the Task must declare a tool environment; 'takes_over' an earlier step: the new step writes that step's outputs, so what read them reads the new step's (a choice among attempts reaching what is scored), and that step's own go under new names; 'takes_over' as [step, output, ...] takes only those outputs (the new step writes them and its own; the rest pass through unchanged, so downstream steps keep reading them from the original step). E.g. {\"op\": \"insert\", \"after\": \"solve\", \"kind\": \"agent\", \"text\": \"<what the new step does>\"}\n- `remove` (step, keep): take a step out and reconnect around it (a fork branch too); on a gate, 'keep' names the verdict whose path stays. E.g. {\"op\": \"remove\", \"step\": \"solve_check_judge\"}\n- `parallelize` (steps, copies, after, new, sees): run consecutive 'steps' at once, or one step beside 'copies' of itself, or 'new' steps after 'after', between a fork and a join. E.g. {\"op\": \"parallelize\", \"steps\": [\"solve\"], \"copies\": 2}\n- `serialize` (fork): run a fork's branches one after another, in their order. E.g. {\"op\": \"serialize\", \"fork\": \"<fork>\"}\n- `branch` (fork, kind, text, system, sees, optional, id, to, tools, sealed, produces, writes): a new step as another branch of a fork ('optional': true lets it fail without failing the item; 'sees' names its inputs: \"task\", step ids, or single fact or file names there before the fork; 'system' as insert's); its output goes into the nearest prompt after the join that can take it -- an agent's own prompt knob, or the one text knob an op fills facts into -- or where 'to' says (a prompt knob, or a step: an agent whose prompt is no knob gets a section for it); with neither, refused unless a step reads it; 'tools' as insert's (sealed); 'sealed' as insert's on a code step. E.g. {\"op\": \"branch\", \"fork\": \"<fork>\", \"kind\": \"agent\", \"text\": \"<what this branch does>\"}\n- `rewire` (step, sees, text): change what a step sees: \"task\" (the task's own input, once, as the model steps receive it: never a step's output or a knob's text (an op's output carries the knobs the op declares for it in `knob_outputs`, else every knob the op reads)), step ids (their outputs), or single fact or file names there before it (that input alone); 'text' gives an agent step new instructions too, in place: the same id, outputs and place in a fork or join (so a branch can work from the task alone); with 'text' and no 'sees' it keeps what it sees. E.g. {\"op\": \"rewire\", \"step\": \"solve\", \"sees\": [\"task\"]}\n- `loop` (step, back_to, judge, text, sees, tools, max_iterations, id, sealed): a judge after a step that can send it back with its reason -- or, with 'back_to', send the work back to an earlier agent step, so every step from there to the judge runs again (a fork in between whole); 'back_to' is one every run passes before the step, in the same per-item pass and fork branch: 'judge' agent (text = what to check; its answer starts with proceed or reloop, then why), code (text = Python returning {'verdict': 'proceed' or 'reloop', 'reason': why}) or a callable. The judge is handed what the step read and wrote, unless 'sees' says otherwise, as text (a binary or very long file only named); with 'tools' (an agent judge, as insert's) it runs sealed instead, with the files it sees in its workspace, and its reply starts with the verdict; with 'sealed' true on a code judge, it runs in the Task's tool environment sealed, as insert's 'sealed' on a code step. The reason reaches the step sent back, with that step's own last output; it is sent back at most 'max_iterations' times, so it runs at most that many times plus one (default 2: up to 3 runs; 1 to 5; afterwards the knob <gate>__max_iterations, the gate being <step>_check unless 'id' names it), then the run goes on. E.g. {\"op\": \"loop\", \"step\": \"solve\", \"judge\": \"agent\", \"text\": \"<what to check>\", \"max_iterations\": 2}\n- `route` (after, judge, text, to, sees, tools, id, sealed): a judge after a step chooses one labelled next step ('to': label -> step id or a new step, whose 'takes_over' rewrites an earlier step's outputs on that way); the branches rejoin; with no 'to', proceed or redo the step in place; 'tools' as loop's judge. E.g. {\"op\": \"route\", \"after\": \"solve\", \"judge\": \"agent\", \"text\": \"<how to choose>\", \"to\": {\"proceed\": \"solve_check_judge_inputs\", \"revise\": {\"kind\": \"agent\", \"text\": \"<what it does>\"}}}\n- `split` (step, into: one or two steps, each like {kind, text, sees}): replace a step by two new steps run in turn ('into' two), or by one ('into' one: replace); the last takes over its outputs. E.g. {\"op\": \"split\", \"step\": \"solve_check_judge\", \"into\": [{\"kind\": \"agent\", \"text\": \"<first part>\"}, {\"kind\": \"agent\", \"text\": \"<second part>\"}]}\n- `merge` (steps, kind, text, system, id, tools, sealed): two consecutive steps as one, with the first's inputs and the second's outputs; 'system' as insert's; 'tools' as insert's (sealed), else a sealed step's own come along; 'sealed' as insert's on a code step. E.g. {\"op\": \"merge\", \"steps\": [\"solve_check_judge\", \"solve_verify\"], \"text\": \"<what the merged step does>\"}\n- `fallback` (step, kind, text, system, sees, id, call, reads, tools, sealed): a step run instead when 'step' (one run per item) fails -- it raises, crashes past its retries, hits its output limit, its turn cap, its prompt limit, or is still writing at the session time limit (backstop); never for a timeout (the harness's, a declared wall or the step's own) or a harness fault: it writes that step's outputs, so what reads them still gets an answer; 'kind' as in insert; it sees what 'step' sees; when the step writes more than one file, the fallback must be a code step or an agent with tools (a plain agent writes only its reply); 'sealed' as insert's on a code step. E.g. {\"op\": \"fallback\", \"step\": \"solve_check_judge\", \"kind\": \"agent\", \"text\": \"<a simpler way to the same output>\"}\n- `map` (after, over, text, system, sees, max, combine, id, to, tools): after a step, a new agent step run once per element of 'over' (a list there: a fact, a file or a step's output), one model call each, all at once: a JSON array gives its items, a bulleted, numbered or lettered list its items, other text its non-empty lines; at most 'max' run (default 4, up to 8; past it the first 'max', and the combine is told so); 'text' says what to do with one element; 'combine' (a step as in insert) sees every result and writes one output, placed as insert's is; 'system' as insert's, for each run; 'tools' as insert's: each run sealed; remove the elements step or the combine and the whole map goes. E.g. {\"op\": \"map\", \"after\": \"solve\", \"over\": \"solve\", \"text\": \"<what to do with one element>\", \"combine\": {\"kind\": \"agent\", \"text\": \"<how to combine the results>\"}}\n- in the per-item part `data`, a step with `tools` runs its commands with python3 (and python) = Python 3.12 with openpyxl 3.1.5, pandas 2.3.3, numpy 2.5.4",
+        "pipeline_view": "The pipeline, one line per step, generated from the graph in the operators' own words: `sees` lists a step's inputs as `\"sees\"` names them, `name@maker` (`@run`: no step makes it); a plain op that only assembles a model step's input is folded in as `name (via op: its inputs)`; an agent with tools sees the run dir, its own workspace, or a sealed one (its inputs only); `told` is each knob whose text reaches the step, its opening words (`*` frozen; `?` read by an op with several outputs, for all of them), or a code step's code; `->` what it writes; a per-item block's `item files` are files the task lays into each item's pass, under the same name for every item, and the steps that read them: a new step reads one by naming it (or the data step) in 'sees'; `parallel fork { ... } -> join`; `loop(step, judge ..., max N -> N+1 runs)`; `loop(back_to … step, judge ..., max N -> N+1 runs)`; `route(after step, judge ..., {label: step})`; `fallback(step fails -> step)`; `map(step … step over list, max N)`; `per item (data -> its writes; item files: path seen by step, ...) { ... }`; `step agent on model=M effort=E max_completion_tokens=N`; a loop that does not go on with its last attempt past its cap says so: `past the cap: fail_item` (only that item fails) or `past the cap: halt` (the whole run stops); `[optional]`; `[protected]`.\n```text\nper item (data -> current_item.json, item/input.xlsx; item files: item/input.xlsx seen by finalize, prepare) {\n  prepare op  sees current_item.json@data, item/input.xlsx@data  -> input.xlsx, .agents/skills/skillopt-target/SKILL.md, task.md, run_solution.py, turn.json, target_system_prompt.txt, target_user_prompt.txt, spreadsheet_preview.txt, has_case\n  route(after prepare, judge refactory_packages.spreadsheetbench.ops:has_case, {skip: finalize, proceed: solve})\n    on proceed:\n      solve agent  sees sealed workspace (tools: Read, Bash), .agents/skills/skillopt-target/SKILL.md@prepare, input.xlsx@prepare, run_solution.py@prepare, task.md@prepare  told solve__system_prompt* \"\"; solve__prompt_template* \"Use the workspace files to solve the task. Read…\"  -> reply.txt, solution.py\n      solve_check_judge agent  sees solve_check_judge_inputs (via solve_check_judge_inputs: .agents/skills/skillopt-target/SKILL.md@prepare, input.xlsx@prepare, reply.txt@solve, run_solution.py@prepare, solution.py@solve, task.md@prepare)  told solve_check_judge__system_prompt \"You are one step of a pipeline.\"; solve_check_judge__task \"You are verifying a spreadsheet manipulation so…\"  -> solve_check_judge_own_solve_check_judge.txt\n      loop(solve … solve_check_judge, judge solve_verify (sees sealed workspace (tools: bash), input.xlsx@prepare, run_solution.py@prepare, solution.py@solve, task.md@prepare  told solve_verify__system_prompt \"You are one step of a pipeline.\"; solve_verify__task \"Verify the spreadsheet solution by running it a…\"  -> solve_check_judge.txt), max 1 -> 2 runs, knob solve_check__max_iterations)\n  [protected] finalize op  sees current_item.json@data, item/input.xlsx@data, reply.txt@solve, solution.py@solve, turn.json@prepare  -> final.json, conversation.json, pred.xlsx, code.py, raw.txt, finished\n}\n```"
+      },
+      "state_ref": "de98a06fdabf3c5a"
+    }
+  ],
+  "seed_state_digest": "8d9c9db3387c613f",
+  "states": {
+    "8d9c9db3387c613f": {
+      "graph": {
+        "edges": [
+          {
+            "condition": "skip",
+            "source": "has_case",
+            "target": "finalize"
+          },
+          {
+            "condition": "proceed",
+            "source": "has_case",
+            "target": "solve"
+          },
+          {
+            "condition": null,
+            "source": "prepare",
+            "target": "has_case"
+          },
+          {
+            "condition": null,
+            "source": "solve",
+            "target": "finalize"
+          }
+        ],
+        "nodes": {
+          "data": {
+            "blocking": true,
+            "call": "",
+            "evaluator": "",
+            "id": "data",
+            "kind": "data",
+            "knobs": [
+              "data_parallelism"
+            ],
+            "max_iterations": 1,
+            "notes": "",
+            "parallelism_knob": "data_parallelism",
+            "produces": [
+              "item_scores"
+            ],
+            "prompt_template": "",
+            "reads": [],
+            "role": "ceo",
+            "score_effect": "affects",
+            "subgraph_entry": "prepare",
+            "subgraph_exit": "finalize",
+            "task_ref": "refactory_packages.spreadsheetbench_v2.tasks:SpreadsheetBenchV2Task",
+            "tools": [],
+            "writes": [
+              "current_item.json",
+              "item/input.xlsx"
+            ]
+          },
+          "finalize": {
+            "blocking": true,
+            "call": "refactory_packages.spreadsheetbench_v2.agent_ops:finalize",
+            "evaluator": "",
+            "id": "finalize",
+            "kind": "op",
+            "knobs": [],
+            "max_iterations": 1,
+            "notes": "run the solution and record the item's outcome before grading",
+            "produces": [
+              "finished"
+            ],
+            "prompt_template": "",
+            "reads": [
+              "current_item.json",
+              "turn.json",
+              "reply.txt",
+              "solution.py",
+              "item/input.xlsx"
+            ],
+            "role": "ceo",
+            "score_effect": "affects",
+            "tools": [],
+            "writes": [
+              "final.json",
+              "conversation.json",
+              "pred.xlsx",
+              "code.py",
+              "raw.txt"
+            ]
+          },
+          "has_case": {
+            "blocking": true,
+            "call": "",
+            "evaluator": "refactory_packages.spreadsheetbench.ops:has_case",
+            "id": "has_case",
+            "inputs": [
+              "has_case"
+            ],
+            "kind": "gate",
+            "knobs": [],
+            "max_iterations": 1,
+            "notes": "an item with no test case skips the call",
+            "produces": [],
+            "prompt_template": "",
+            "reads": [],
+            "role": "ceo",
+            "score_effect": "affects",
+            "tools": [],
+            "writes": []
+          },
+          "prepare": {
+            "blocking": true,
+            "call": "refactory_packages.spreadsheetbench_v2.agent_ops:prepare",
+            "evaluator": "",
+            "id": "prepare",
+            "kind": "op",
+            "knob_outputs": {
+              ".agents/skills/skillopt-target/SKILL.md": [
+                "skill"
+              ],
+              "has_case": [],
+              "input.xlsx": [],
+              "run_solution.py": [],
+              "spreadsheet_preview.txt": [],
+              "target_system_prompt.txt": [
+                "skill"
+              ],
+              "target_user_prompt.txt": [],
+              "task.md": [],
+              "turn.json": []
+            },
+            "knobs": [
+              "skill"
+            ],
+            "max_iterations": 1,
+            "notes": "record the item's start and write SkillOpt's workspace files",
+            "produces": [
+              "has_case"
+            ],
+            "prompt_template": "",
+            "reads": [
+              "current_item.json",
+              "item/input.xlsx"
+            ],
+            "role": "ceo",
+            "score_effect": "affects",
+            "tools": [],
+            "writes": [
+              "input.xlsx",
+              ".agents/skills/skillopt-target/SKILL.md",
+              "task.md",
+              "run_solution.py",
+              "turn.json",
+              "target_system_prompt.txt",
+              "target_user_prompt.txt",
+              "spreadsheet_preview.txt"
+            ]
+          },
+          "solve": {
+            "blocking": true,
+            "call": "",
+            "evaluator": "",
+            "field_bindings": [
+              [
+                "prompt_template",
+                "solve__prompt_template"
+              ],
+              [
+                "system_prompt_template",
+                "solve__system_prompt"
+              ],
+              [
+                "route.max_thinking_tokens",
+                "max_thinking_tokens"
+              ]
+            ],
+            "id": "solve",
+            "kind": "agent",
+            "knobs": [
+              "solve__prompt_template",
+              "solve__system_prompt",
+              "max_thinking_tokens"
+            ],
+            "max_iterations": 1,
+            "notes": "one sealed Claude Code session (Read, Bash) writes solution.py",
+            "produces": [],
+            "prompt_template": "Use the workspace files to solve the task. Read task.md and the skill at .agents/skills/skillopt-target/SKILL.md before answering. If ATTACHMENTS.md exists, read it and inspect the listed local files. Do not call a Skill tool; the ReflACT guidance is a local markdown file. Do not ask for permission. You may modify files in the workspace when the task asks you to create an artifact. Return only the final answer text, keeping any required <answer>...</answer> tags exactly.\n\nRead `.agents/skills/skillopt-target/SKILL.md` directly; do not call a Skill tool.\nRead `task.md`, inspect `input.xlsx` if useful, and write the final solution to `solution.py`.\nYou may run `python run_solution.py` to validate the script locally.\nIn your final response, briefly confirm whether `solution.py` was written and summarize the approach.",
+            "reads": [
+              "input.xlsx",
+              ".agents/skills/skillopt-target/SKILL.md",
+              "task.md",
+              "run_solution.py"
+            ],
+            "retry": {
+              "on": [
+                "crash"
+              ],
+              "timeout_factor": 2,
+              "times": 1
+            },
+            "role": "solver",
+            "score_effect": "affects",
+            "tools": [
+              "Read",
+              "Bash"
+            ],
+            "workspace": {
+              "collect": "files",
+              "kind": "scratch"
+            },
+            "writes": [
+              "reply.txt",
+              "solution.py"
+            ]
+          }
+        },
+        "start": "data"
+      },
+      "knobs": {
+        "data_parallelism": {
+          "spec": {
+            "default": 8,
+            "description": "concurrent items",
+            "enum": [],
+            "frozen": true,
+            "hi": 64,
+            "kind": "int",
+            "lo": 1,
+            "required": false,
+            "values": []
+          },
+          "value": 24
+        },
+        "max_thinking_tokens": {
+          "spec": {
+            "default": 16384,
+            "description": "the solve call's thinking budget (SkillOpt's --max-thinking-tokens)",
+            "enum": [],
+            "frozen": true,
+            "hi": null,
+            "kind": "int",
+            "lo": 1,
+            "required": false,
+            "values": []
+          },
+          "value": 16384
+        },
+        "skill": {
+          "spec": {
+            "default": "# Spreadsheet Manipulation Skill (xlsx)\n\n## Overview\nThis skill guides agents in manipulating Excel (.xlsx) spreadsheets using Python.\n\n**Primary libraries**: `openpyxl` (structure-preserving read/write), `pandas` (data transformation).\nNever use any other third-party libraries.\n\n---\n\n## Common Workflow\n\n1. **Explore** the input file: list sheets, inspect headers, check dimensions.\n2. **Write `solution.py`** with `INPUT_PATH` and `OUTPUT_PATH` defined at the top.\n3. **Execute** `python solution.py` and verify the output file was created.\n4. **Confirm** the target cells/range contain the expected values.\n\n---\n\n## Library Selection\n\n| Use case | Library |\n|----------|---------|\n| Preserve formulas, formatting, named ranges | `openpyxl` |\n| Bulk data transformation, aggregation, sorting | `pandas` → write back with `openpyxl` |\n| Simple cell read/write | `openpyxl` |\n\n**Warning**: `pandas.to_excel()` silently destroys existing formulas and named ranges.\nWhen writing back to a spreadsheet that contains formulas, always use `openpyxl.save()`.\n\n---\n\n## solution.py Template\n\n```python\nimport openpyxl\nimport pandas as pd\n\nINPUT_PATH  = \"...\"   # set to the actual input path\nOUTPUT_PATH = \"...\"   # set to the actual output path\n\nwb = openpyxl.load_workbook(INPUT_PATH)\nws = wb.active  # or wb[\"SheetName\"]\n\n# --- perform manipulation ---\n\nwb.save(OUTPUT_PATH)\n```\n\n---\n\n## Output Requirements\n\n- Save the result to `OUTPUT_PATH`.\n- Do not hardcode row counts or column letters — iterate over actual rows in the workbook.\n- Preserve sheets and cells not mentioned in the instruction.\n",
+            "description": "the skill, written to the agent's SKILL.md",
+            "enum": [],
+            "frozen": false,
+            "hi": null,
+            "kind": "str",
+            "lo": null,
+            "required": false,
+            "values": []
+          },
+          "value": "# Spreadsheet Manipulation Skill (xlsx)\n\n## Overview\nThis skill guides agents in manipulating Excel (.xlsx) spreadsheets using Python.\n\n**Primary libraries**: `openpyxl` (structure-preserving read/write), `pandas` (data transformation).\nNever use any other third-party libraries.\n\n---\n\n## Common Workflow\n\n1. **Explore** the input file: list sheets, inspect headers, check dimensions.\n2. **Write `solution.py`** with `INPUT_PATH` and `OUTPUT_PATH` defined at the top.\n3. **Execute** `python solution.py` and verify the output file was created.\n4. **Confirm** the target cells/range contain the expected values.\n\n---\n\n## Library Selection\n\n| Use case | Library |\n|----------|---------|\n| Preserve formulas, formatting, named ranges | `openpyxl` |\n| Bulk data transformation, aggregation, sorting | `pandas` → write back with `openpyxl` |\n| Simple cell read/write | `openpyxl` |\n\n**Warning**: `pandas.to_excel()` silently destroys existing formulas and named ranges.\nWhen writing back to a spreadsheet that contains formulas, always use `openpyxl.save()`.\n\n---\n\n## solution.py Template\n\n```python\nimport openpyxl\nimport pandas as pd\n\nINPUT_PATH  = \"...\"   # set to the actual input path\nOUTPUT_PATH = \"...\"   # set to the actual output path\n\nwb = openpyxl.load_workbook(INPUT_PATH)\nws = wb.active  # or wb[\"SheetName\"]\n\n# --- perform manipulation ---\n\nwb.save(OUTPUT_PATH)\n```\n\n---\n\n## Output Requirements\n\n- Save the result to `OUTPUT_PATH`.\n- Do not hardcode row counts or column letters — iterate over actual rows in the workbook.\n- Preserve sheets and cells not mentioned in the instruction.\n"
+        },
+        "solve__prompt_template": {
+          "spec": {
+            "default": "Use the workspace files to solve the task. Read task.md and the skill at .agents/skills/skillopt-target/SKILL.md before answering. If ATTACHMENTS.md exists, read it and inspect the listed local files. Do not call a Skill tool; the ReflACT guidance is a local markdown file. Do not ask for permission. You may modify files in the workspace when the task asks you to create an artifact. Return only the final answer text, keeping any required <answer>...</answer> tags exactly.\n\nRead `.agents/skills/skillopt-target/SKILL.md` directly; do not call a Skill tool.\nRead `task.md`, inspect `input.xlsx` if useful, and write the final solution to `solution.py`.\nYou may run `python run_solution.py` to validate the script locally.\nIn your final response, briefly confirm whether `solution.py` was written and summarize the approach.",
+            "description": "the solve call's prompt (frozen; use the skill knob)",
+            "enum": [],
+            "frozen": true,
+            "hi": null,
+            "kind": "str",
+            "lo": null,
+            "required": false,
+            "values": []
+          },
+          "value": "Use the workspace files to solve the task. Read task.md and the skill at .agents/skills/skillopt-target/SKILL.md before answering. If ATTACHMENTS.md exists, read it and inspect the listed local files. Do not call a Skill tool; the ReflACT guidance is a local markdown file. Do not ask for permission. You may modify files in the workspace when the task asks you to create an artifact. Return only the final answer text, keeping any required <answer>...</answer> tags exactly.\n\nRead `.agents/skills/skillopt-target/SKILL.md` directly; do not call a Skill tool.\nRead `task.md`, inspect `input.xlsx` if useful, and write the final solution to `solution.py`.\nYou may run `python run_solution.py` to validate the script locally.\nIn your final response, briefly confirm whether `solution.py` was written and summarize the approach."
+        },
+        "solve__system_prompt": {
+          "spec": {
+            "default": "",
+            "description": "text appended to Claude Code's system prompt for the solve call: none, as SkillOpt's CLI (frozen; use the skill knob)",
+            "enum": [],
+            "frozen": true,
+            "hi": null,
+            "kind": "str",
+            "lo": null,
+            "required": false,
+            "values": []
+          },
+          "value": ""
+        }
+      },
+      "memory": [],
+      "ports": [],
+      "version": 1
+    },
+    "b7a493bde3fe53b6": {
+      "graph": {
+        "edges": [
+          {
+            "condition": "skip",
+            "source": "has_case",
+            "target": "finalize"
+          },
+          {
+            "condition": "proceed",
+            "source": "has_case",
+            "target": "solve"
+          },
+          {
+            "condition": null,
+            "source": "prepare",
+            "target": "has_case"
+          },
+          {
+            "condition": null,
+            "source": "solve",
+            "target": "solve_check_judge_inputs"
+          },
+          {
+            "condition": "proceed",
+            "source": "solve_check",
+            "target": "finalize"
+          },
+          {
+            "condition": "reloop",
+            "source": "solve_check",
+            "target": "solve"
+          },
+          {
+            "condition": null,
+            "source": "solve_check_judge",
+            "target": "solve_check"
+          },
+          {
+            "condition": null,
+            "source": "solve_check_judge_inputs",
+            "target": "solve_check_judge"
+          }
+        ],
+        "nodes": {
+          "data": {
+            "blocking": true,
+            "call": "",
+            "evaluator": "",
+            "id": "data",
+            "kind": "data",
+            "knobs": [
+              "data_parallelism"
+            ],
+            "max_iterations": 1,
+            "notes": "",
+            "parallelism_knob": "data_parallelism",
+            "produces": [
+              "item_scores"
+            ],
+            "prompt_template": "",
+            "reads": [],
+            "role": "ceo",
+            "score_effect": "affects",
+            "subgraph_entry": "prepare",
+            "subgraph_exit": "finalize",
+            "task_ref": "refactory_packages.spreadsheetbench_v2.tasks:SpreadsheetBenchV2Task",
+            "tools": [],
+            "writes": [
+              "current_item.json",
+              "item/input.xlsx"
+            ]
+          },
+          "finalize": {
+            "blocking": true,
+            "call": "refactory_packages.spreadsheetbench_v2.agent_ops:finalize",
+            "evaluator": "",
+            "id": "finalize",
+            "kind": "op",
+            "knobs": [],
+            "max_iterations": 1,
+            "notes": "run the solution and record the item's outcome before grading",
+            "produces": [
+              "finished"
+            ],
+            "prompt_template": "",
+            "reads": [
+              "current_item.json",
+              "turn.json",
+              "reply.txt",
+              "solution.py",
+              "item/input.xlsx"
+            ],
+            "role": "ceo",
+            "score_effect": "affects",
+            "tools": [],
+            "writes": [
+              "final.json",
+              "conversation.json",
+              "pred.xlsx",
+              "code.py",
+              "raw.txt"
+            ]
+          },
+          "has_case": {
+            "blocking": true,
+            "call": "",
+            "evaluator": "refactory_packages.spreadsheetbench.ops:has_case",
+            "id": "has_case",
+            "inputs": [
+              "has_case"
+            ],
+            "kind": "gate",
+            "knobs": [],
+            "max_iterations": 1,
+            "notes": "an item with no test case skips the call",
+            "produces": [],
+            "prompt_template": "",
+            "reads": [],
+            "role": "ceo",
+            "score_effect": "affects",
+            "tools": [],
+            "writes": []
+          },
+          "prepare": {
+            "blocking": true,
+            "call": "refactory_packages.spreadsheetbench_v2.agent_ops:prepare",
+            "evaluator": "",
+            "id": "prepare",
+            "kind": "op",
+            "knob_outputs": {
+              ".agents/skills/skillopt-target/SKILL.md": [
+                "skill"
+              ],
+              "has_case": [],
+              "input.xlsx": [],
+              "run_solution.py": [],
+              "spreadsheet_preview.txt": [],
+              "target_system_prompt.txt": [
+                "skill"
+              ],
+              "target_user_prompt.txt": [],
+              "task.md": [],
+              "turn.json": []
+            },
+            "knobs": [
+              "skill"
+            ],
+            "max_iterations": 1,
+            "notes": "record the item's start and write SkillOpt's workspace files",
+            "produces": [
+              "has_case"
+            ],
+            "prompt_template": "",
+            "reads": [
+              "current_item.json",
+              "item/input.xlsx"
+            ],
+            "role": "ceo",
+            "score_effect": "affects",
+            "tools": [],
+            "writes": [
+              "input.xlsx",
+              ".agents/skills/skillopt-target/SKILL.md",
+              "task.md",
+              "run_solution.py",
+              "turn.json",
+              "target_system_prompt.txt",
+              "target_user_prompt.txt",
+              "spreadsheet_preview.txt"
+            ]
+          },
+          "solve": {
+            "blocking": true,
+            "call": "",
+            "evaluator": "",
+            "field_bindings": [
+              [
+                "prompt_template",
+                "solve__prompt_template"
+              ],
+              [
+                "system_prompt_template",
+                "solve__system_prompt"
+              ],
+              [
+                "route.max_thinking_tokens",
+                "max_thinking_tokens"
+              ]
+            ],
+            "id": "solve",
+            "kind": "agent",
+            "knobs": [
+              "solve__prompt_template",
+              "solve__system_prompt",
+              "max_thinking_tokens"
+            ],
+            "max_iterations": 1,
+            "notes": "one sealed Claude Code session (Read, Bash) writes solution.py",
+            "produces": [],
+            "prompt_template": "Use the workspace files to solve the task. Read task.md and the skill at .agents/skills/skillopt-target/SKILL.md before answering. If ATTACHMENTS.md exists, read it and inspect the listed local files. Do not call a Skill tool; the ReflACT guidance is a local markdown file. Do not ask for permission. You may modify files in the workspace when the task asks you to create an artifact. Return only the final answer text, keeping any required <answer>...</answer> tags exactly.\n\nRead `.agents/skills/skillopt-target/SKILL.md` directly; do not call a Skill tool.\nRead `task.md`, inspect `input.xlsx` if useful, and write the final solution to `solution.py`.\nYou may run `python run_solution.py` to validate the script locally.\nIn your final response, briefly confirm whether `solution.py` was written and summarize the approach.",
+            "reads": [
+              "input.xlsx",
+              ".agents/skills/skillopt-target/SKILL.md",
+              "task.md",
+              "run_solution.py"
+            ],
+            "retry": {
+              "on": [
+                "crash"
+              ],
+              "timeout_factor": 2,
+              "times": 1
+            },
+            "role": "solver",
+            "score_effect": "affects",
+            "tools": [
+              "Read",
+              "Bash"
+            ],
+            "workspace": {
+              "collect": "files",
+              "kind": "scratch"
+            },
+            "writes": [
+              "reply.txt",
+              "solution.py"
+            ]
+          },
+          "solve_check": {
+            "blocking": true,
+            "call": "",
+            "evaluator": "refactory_dsh.snippet:verdict",
+            "field_bindings": [
+              [
+                "max_iterations",
+                "solve_check__max_iterations"
+              ]
+            ],
+            "id": "solve_check",
+            "kind": "gate",
+            "knobs": [
+              "solve_check__max_iterations"
+            ],
+            "max_iterations": 1,
+            "notes": "",
+            "on_exhausted": "continue",
+            "produces": [],
+            "prompt_template": "",
+            "reads": [
+              "solve_check_judge.txt"
+            ],
+            "required_reads": [
+              "solve_check_judge.txt"
+            ],
+            "role": "ceo",
+            "score_effect": "affects",
+            "tools": [],
+            "writes": []
+          },
+          "solve_check_judge": {
+            "blocking": true,
+            "call": "",
+            "evaluator": "",
+            "field_bindings": [
+              [
+                "system_prompt_template",
+                "solve_check_judge__system_prompt"
+              ],
+              [
+                "prompt_template",
+                "solve_check_judge__task"
+              ]
+            ],
+            "id": "solve_check_judge",
+            "kind": "agent",
+            "knobs": [
+              "solve_check_judge__system_prompt",
+              "solve_check_judge__task"
+            ],
+            "max_iterations": 1,
+            "notes": "",
+            "produces": [],
+            "prompt_template": "You are verifying a spreadsheet manipulation solution. Read task.md to understand what was asked, then read solution.py to check the implementation.\n\nCheck for these common errors:\n1. SCOPE: Does the code write to cells not explicitly required by the task? Any cell write outside the task's scope is a regression risk.\n2. SIGNS: Are expenses, deductions, or adjustments using consistent signs? Look for hardcoded negation that may contradict the spreadsheet's convention. The code should read existing neighbors to determine sign convention.\n3. RATES: Are annual rates applied where monthly are needed (or vice versa)? If the task mentions annual rent but the code uses monthly values without multiplying by 12, that is wrong.\n4. REFERENCES: Do cross-sheet references use correct row/column mappings? Check that the code reads header rows to confirm alignment before writing.\n5. SENSITIVITY TABLES: If the code fills a data table or sensitivity grid, does each cell formula reference both its row and column varying input?\n6. VALIDATION: Does the code include a post-write comparison of output vs input to catch regressions?\n\nIf you find a likely error, start your answer with: reloop\nThen explain each specific error and what to fix.\n\nIf the code looks correct on all checks, start your answer with: proceed\n\n## Files from earlier steps (solve_check_judge_inputs)\n{{solve_check_judge_inputs}}\n\nStart your answer with one word, proceed or reloop, alone or followed by why; nothing before it.",
+            "reads": [],
+            "role": "solver",
+            "score_effect": "affects",
+            "system_prompt_template": "You are one step of a pipeline.",
+            "tool_policy": "none",
+            "tools": [],
+            "writes": [
+              "solve_check_judge.txt"
+            ]
+          },
+          "solve_check_judge_inputs": {
+            "blocking": true,
+            "call": "refactory_dsh.nn.operators:collect",
+            "evaluator": "",
+            "id": "solve_check_judge_inputs",
+            "kind": "op",
+            "knobs": [],
+            "max_iterations": 1,
+            "notes": "Hands solve_check_judge the files it sees.",
+            "produces": [
+              "solve_check_judge_inputs"
+            ],
+            "prompt_template": "",
+            "reads": [
+              ".agents/skills/skillopt-target/SKILL.md",
+              "input.xlsx",
+              "reply.txt",
+              "run_solution.py",
+              "solution.py",
+              "task.md"
+            ],
+            "role": "ceo",
+            "score_effect": "none",
+            "tools": [],
+            "writes": []
+          }
+        },
+        "start": "data"
+      },
+      "knobs": {
+        "data_parallelism": {
+          "spec": {
+            "default": 8,
+            "description": "concurrent items",
+            "enum": [],
+            "frozen": true,
+            "hi": 64,
+            "kind": "int",
+            "lo": 1,
+            "required": false,
+            "values": []
+          },
+          "value": 24
+        },
+        "max_thinking_tokens": {
+          "spec": {
+            "default": 16384,
+            "description": "the solve call's thinking budget (SkillOpt's --max-thinking-tokens)",
+            "enum": [],
+            "frozen": true,
+            "hi": null,
+            "kind": "int",
+            "lo": 1,
+            "required": false,
+            "values": []
+          },
+          "value": 16384
+        },
+        "skill": {
+          "spec": {
+            "default": "# Spreadsheet Manipulation Skill (xlsx)\n\n## Overview\nThis skill guides agents in manipulating Excel (.xlsx) spreadsheets using Python.\n\n**Primary libraries**: `openpyxl` (structure-preserving read/write), `pandas` (data transformation).\nNever use any other third-party libraries.\n\n---\n\n## Common Workflow\n\n1. **Explore** the input file: list sheets, inspect headers, check dimensions.\n2. **Write `solution.py`** with `INPUT_PATH` and `OUTPUT_PATH` defined at the top.\n3. **Execute** `python solution.py` and verify the output file was created.\n4. **Confirm** the target cells/range contain the expected values.\n\n---\n\n## Library Selection\n\n| Use case | Library |\n|----------|---------|\n| Preserve formulas, formatting, named ranges | `openpyxl` |\n| Bulk data transformation, aggregation, sorting | `pandas` → write back with `openpyxl` |\n| Simple cell read/write | `openpyxl` |\n\n**Warning**: `pandas.to_excel()` silently destroys existing formulas and named ranges.\nWhen writing back to a spreadsheet that contains formulas, always use `openpyxl.save()`.\n\n---\n\n## solution.py Template\n\n```python\nimport openpyxl\nimport pandas as pd\n\nINPUT_PATH  = \"...\"   # set to the actual input path\nOUTPUT_PATH = \"...\"   # set to the actual output path\n\nwb = openpyxl.load_workbook(INPUT_PATH)\nws = wb.active  # or wb[\"SheetName\"]\n\n# --- perform manipulation ---\n\nwb.save(OUTPUT_PATH)\n```\n\n---\n\n## Output Requirements\n\n- Save the result to `OUTPUT_PATH`.\n- Do not hardcode row counts or column letters — iterate over actual rows in the workbook.\n- Preserve sheets and cells not mentioned in the instruction.\n",
+            "description": "the skill, written to the agent's SKILL.md",
+            "enum": [],
+            "frozen": false,
+            "hi": null,
+            "kind": "str",
+            "lo": null,
+            "required": false,
+            "values": []
+          },
+          "value": "# Spreadsheet Manipulation Skill (xlsx)\n\n## Overview\nThis skill guides agents in manipulating Excel (.xlsx) spreadsheets using Python.\n\n**Primary libraries**: `openpyxl` (structure-preserving read/write), `pandas` (data transformation).\nNever use any other third-party libraries.\n\n---\n\n## Common Workflow\n\n1. **Explore** the input file: list sheets, inspect headers, check dimensions.\n2. **Write `solution.py`** with `INPUT_PATH` and `OUTPUT_PATH` defined at the top.\n3. **Execute** `python solution.py` and verify the output file was created.\n4. **Confirm** the target cells/range contain the expected values.\n\n---\n\n## Library Selection\n\n| Use case | Library |\n|----------|---------|\n| Preserve formulas, formatting, named ranges | `openpyxl` |\n| Bulk data transformation, aggregation, sorting | `pandas` → write back with `openpyxl` |\n| Simple cell read/write | `openpyxl` |\n\n**Warning**: `pandas.to_excel()` silently destroys existing formulas and named ranges.\nWhen writing back to a spreadsheet that contains formulas, always use `openpyxl.save()`.\n\n---\n\n## solution.py Template\n\n```python\nimport openpyxl\nimport pandas as pd\n\nINPUT_PATH  = \"...\"   # set to the actual input path\nOUTPUT_PATH = \"...\"   # set to the actual output path\n\nwb = openpyxl.load_workbook(INPUT_PATH)\nws = wb.active  # or wb[\"SheetName\"]\n\n# --- perform manipulation ---\n\nwb.save(OUTPUT_PATH)\n```\n\n---\n\n## Output Requirements\n\n- Save the result to `OUTPUT_PATH`.\n- Do not hardcode row counts or column letters — iterate over actual rows in the workbook.\n- Preserve sheets and cells not mentioned in the instruction.\n\n---\n\n## Critical Verification Steps\n\n### 1. Minimize Blast Radius\n- Identify exactly which cells the task requires you to change. Only write to those cells.\n- Before saving, print the list of cells you will modify and confirm each is required by the task.\n- For debugging/audit tasks: only fix cells with clear evidence of error (#REF!, #DIV/0!, demonstrably broken references). Do NOT fix cells that look unusual but may be intentionally set.\n- Cells whose expected value is None/empty must remain empty — never fill them with computed values.\n\n### 2. Sign Conventions\n- Before writing expense, deduction, or liability rows, read 3–5 existing populated cells in the same section to determine the sign convention (are expenses positive or negative?).\n- Match the convention of neighboring cells. Common traps:\n  - Tax rates and expense ratios: check if stored as positive or negative in existing rows\n  - NCI on consolidated balance sheets: typically positive (credit balance)\n  - Elimination entries in M&A consolidations: must net to zero across columns\n- After writing, print each written value beside its neighbors to confirm sign consistency.\n\n### 3. Rate and Period Verification\n- Before applying any rate, check whether it is annual or monthly by inspecting labels and existing values.\n- Rent rolls: rows labelled 'Annual Rent' must use monthly rent × 12. $/Unit or $/SF columns use annual total ÷ units (or SF).\n- For DCF: verify terminal value is reasonable relative to the last projected cash flow. Check discount factor periodicity.\n- Values off by exactly 12× indicate monthly/annual confusion.\n\n### 4. Row/Column Mapping\n- Before writing any formula, read the target cell's row header AND column header to confirm the cell address matches the intended line item and period.\n- For multi-sheet cross-references, print the column-to-year mapping from header rows across all relevant sheets before writing formulas.\n- For sensitivity/data tables: each cell must reference BOTH its row and column assumption. After writing, read back a sample to confirm values differ along both axes.\n\n### 5. Post-Write Validation\n- After running solution.py, load the output file and compare against the input:\n  - Count changed cells and spot-check 3–5 against task expectations.\n  - Verify no cells outside the task scope were changed.\n  - Check balance sheet identity (Assets = Liabilities + Equity) if applicable.\n  - If any value seems off by an order of magnitude or has the wrong sign, investigate and fix before finalizing.\n"
+        },
+        "solve__prompt_template": {
+          "spec": {
+            "default": "Use the workspace files to solve the task. Read task.md and the skill at .agents/skills/skillopt-target/SKILL.md before answering. If ATTACHMENTS.md exists, read it and inspect the listed local files. Do not call a Skill tool; the ReflACT guidance is a local markdown file. Do not ask for permission. You may modify files in the workspace when the task asks you to create an artifact. Return only the final answer text, keeping any required <answer>...</answer> tags exactly.\n\nRead `.agents/skills/skillopt-target/SKILL.md` directly; do not call a Skill tool.\nRead `task.md`, inspect `input.xlsx` if useful, and write the final solution to `solution.py`.\nYou may run `python run_solution.py` to validate the script locally.\nIn your final response, briefly confirm whether `solution.py` was written and summarize the approach.",
+            "description": "the solve call's prompt (frozen; use the skill knob)",
+            "enum": [],
+            "frozen": true,
+            "hi": null,
+            "kind": "str",
+            "lo": null,
+            "required": false,
+            "values": []
+          },
+          "value": "Use the workspace files to solve the task. Read task.md and the skill at .agents/skills/skillopt-target/SKILL.md before answering. If ATTACHMENTS.md exists, read it and inspect the listed local files. Do not call a Skill tool; the ReflACT guidance is a local markdown file. Do not ask for permission. You may modify files in the workspace when the task asks you to create an artifact. Return only the final answer text, keeping any required <answer>...</answer> tags exactly.\n\nRead `.agents/skills/skillopt-target/SKILL.md` directly; do not call a Skill tool.\nRead `task.md`, inspect `input.xlsx` if useful, and write the final solution to `solution.py`.\nYou may run `python run_solution.py` to validate the script locally.\nIn your final response, briefly confirm whether `solution.py` was written and summarize the approach."
+        },
+        "solve__system_prompt": {
+          "spec": {
+            "default": "",
+            "description": "text appended to Claude Code's system prompt for the solve call: none, as SkillOpt's CLI (frozen; use the skill knob)",
+            "enum": [],
+            "frozen": true,
+            "hi": null,
+            "kind": "str",
+            "lo": null,
+            "required": false,
+            "values": []
+          },
+          "value": ""
+        },
+        "solve_check__max_iterations": {
+          "spec": {
+            "default": 1,
+            "description": "how often solve_check may send the work back",
+            "enum": [],
+            "frozen": false,
+            "hi": 5,
+            "kind": "int",
+            "lo": 1,
+            "required": false,
+            "values": []
+          },
+          "value": 1
+        },
+        "solve_check_judge__system_prompt": {
+          "spec": {
+            "default": "You are one step of a pipeline.",
+            "description": "system prompt for solve_check_judge",
+            "enum": [],
+            "frozen": false,
+            "hi": null,
+            "kind": "str",
+            "lo": null,
+            "required": false,
+            "values": []
+          },
+          "value": "You are one step of a pipeline."
+        },
+        "solve_check_judge__task": {
+          "spec": {
+            "default": "You are verifying a spreadsheet manipulation solution. Read task.md to understand what was asked, then read solution.py to check the implementation.\n\nCheck for these common errors:\n1. SCOPE: Does the code write to cells not explicitly required by the task? Any cell write outside the task's scope is a regression risk.\n2. SIGNS: Are expenses, deductions, or adjustments using consistent signs? Look for hardcoded negation that may contradict the spreadsheet's convention. The code should read existing neighbors to determine sign convention.\n3. RATES: Are annual rates applied where monthly are needed (or vice versa)? If the task mentions annual rent but the code uses monthly values without multiplying by 12, that is wrong.\n4. REFERENCES: Do cross-sheet references use correct row/column mappings? Check that the code reads header rows to confirm alignment before writing.\n5. SENSITIVITY TABLES: If the code fills a data table or sensitivity grid, does each cell formula reference both its row and column varying input?\n6. VALIDATION: Does the code include a post-write comparison of output vs input to catch regressions?\n\nIf you find a likely error, start your answer with: reloop\nThen explain each specific error and what to fix.\n\nIf the code looks correct on all checks, start your answer with: proceed\n\n## Files from earlier steps (solve_check_judge_inputs)\n{{solve_check_judge_inputs}}\n\nStart your answer with one word, proceed or reloop, alone or followed by why; nothing before it.",
+            "description": "task text (prompt) for solve_check_judge",
+            "enum": [],
+            "frozen": false,
+            "hi": null,
+            "kind": "str",
+            "lo": null,
+            "required": false,
+            "values": []
+          },
+          "value": "You are verifying a spreadsheet manipulation solution. Read task.md to understand what was asked, then read solution.py to check the implementation.\n\nCheck for these common errors:\n1. SCOPE: Does the code write to cells not explicitly required by the task? Any cell write outside the task's scope is a regression risk.\n2. SIGNS: Are expenses, deductions, or adjustments using consistent signs? Look for hardcoded negation that may contradict the spreadsheet's convention. The code should read existing neighbors to determine sign convention.\n3. RATES: Are annual rates applied where monthly are needed (or vice versa)? If the task mentions annual rent but the code uses monthly values without multiplying by 12, that is wrong.\n4. REFERENCES: Do cross-sheet references use correct row/column mappings? Check that the code reads header rows to confirm alignment before writing.\n5. SENSITIVITY TABLES: If the code fills a data table or sensitivity grid, does each cell formula reference both its row and column varying input?\n6. VALIDATION: Does the code include a post-write comparison of output vs input to catch regressions?\n\nIf you find a likely error, start your answer with: reloop\nThen explain each specific error and what to fix.\n\nIf the code looks correct on all checks, start your answer with: proceed\n\n## Files from earlier steps (solve_check_judge_inputs)\n{{solve_check_judge_inputs}}\n\nStart your answer with one word, proceed or reloop, alone or followed by why; nothing before it."
+        }
+      },
+      "memory": [],
+      "ports": [],
+      "version": 1
+    },
+    "de98a06fdabf3c5a": {
+      "graph": {
+        "edges": [
+          {
+            "condition": "skip",
+            "source": "has_case",
+            "target": "finalize"
+          },
+          {
+            "condition": "proceed",
+            "source": "has_case",
+            "target": "solve"
+          },
+          {
+            "condition": null,
+            "source": "prepare",
+            "target": "has_case"
+          },
+          {
+            "condition": null,
+            "source": "solve",
+            "target": "solve_check_judge_inputs"
+          },
+          {
+            "condition": "proceed",
+            "source": "solve_check",
+            "target": "finalize"
+          },
+          {
+            "condition": "reloop",
+            "source": "solve_check",
+            "target": "solve"
+          },
+          {
+            "condition": null,
+            "source": "solve_check_judge",
+            "target": "solve_verify"
+          },
+          {
+            "condition": null,
+            "source": "solve_check_judge_inputs",
+            "target": "solve_check_judge"
+          },
+          {
+            "condition": null,
+            "source": "solve_verify",
+            "target": "solve_check"
+          }
+        ],
+        "nodes": {
+          "data": {
+            "blocking": true,
+            "call": "",
+            "evaluator": "",
+            "id": "data",
+            "kind": "data",
+            "knobs": [
+              "data_parallelism"
+            ],
+            "max_iterations": 1,
+            "notes": "",
+            "parallelism_knob": "data_parallelism",
+            "produces": [
+              "item_scores"
+            ],
+            "prompt_template": "",
+            "reads": [],
+            "role": "ceo",
+            "score_effect": "affects",
+            "subgraph_entry": "prepare",
+            "subgraph_exit": "finalize",
+            "task_ref": "refactory_packages.spreadsheetbench_v2.tasks:SpreadsheetBenchV2Task",
+            "tools": [],
+            "writes": [
+              "current_item.json",
+              "item/input.xlsx"
+            ]
+          },
+          "finalize": {
+            "blocking": true,
+            "call": "refactory_packages.spreadsheetbench_v2.agent_ops:finalize",
+            "evaluator": "",
+            "id": "finalize",
+            "kind": "op",
+            "knobs": [],
+            "max_iterations": 1,
+            "notes": "run the solution and record the item's outcome before grading",
+            "produces": [
+              "finished"
+            ],
+            "prompt_template": "",
+            "reads": [
+              "current_item.json",
+              "turn.json",
+              "reply.txt",
+              "solution.py",
+              "item/input.xlsx"
+            ],
+            "role": "ceo",
+            "score_effect": "affects",
+            "tools": [],
+            "writes": [
+              "final.json",
+              "conversation.json",
+              "pred.xlsx",
+              "code.py",
+              "raw.txt"
+            ]
+          },
+          "has_case": {
+            "blocking": true,
+            "call": "",
+            "evaluator": "refactory_packages.spreadsheetbench.ops:has_case",
+            "id": "has_case",
+            "inputs": [
+              "has_case"
+            ],
+            "kind": "gate",
+            "knobs": [],
+            "max_iterations": 1,
+            "notes": "an item with no test case skips the call",
+            "produces": [],
+            "prompt_template": "",
+            "reads": [],
+            "role": "ceo",
+            "score_effect": "affects",
+            "tools": [],
+            "writes": []
+          },
+          "prepare": {
+            "blocking": true,
+            "call": "refactory_packages.spreadsheetbench_v2.agent_ops:prepare",
+            "evaluator": "",
+            "id": "prepare",
+            "kind": "op",
+            "knob_outputs": {
+              ".agents/skills/skillopt-target/SKILL.md": [
+                "skill"
+              ],
+              "has_case": [],
+              "input.xlsx": [],
+              "run_solution.py": [],
+              "spreadsheet_preview.txt": [],
+              "target_system_prompt.txt": [
+                "skill"
+              ],
+              "target_user_prompt.txt": [],
+              "task.md": [],
+              "turn.json": []
+            },
+            "knobs": [
+              "skill"
+            ],
+            "max_iterations": 1,
+            "notes": "record the item's start and write SkillOpt's workspace files",
+            "produces": [
+              "has_case"
+            ],
+            "prompt_template": "",
+            "reads": [
+              "current_item.json",
+              "item/input.xlsx"
+            ],
+            "role": "ceo",
+            "score_effect": "affects",
+            "tools": [],
+            "writes": [
+              "input.xlsx",
+              ".agents/skills/skillopt-target/SKILL.md",
+              "task.md",
+              "run_solution.py",
+              "turn.json",
+              "target_system_prompt.txt",
+              "target_user_prompt.txt",
+              "spreadsheet_preview.txt"
+            ]
+          },
+          "solve": {
+            "blocking": true,
+            "call": "",
+            "evaluator": "",
+            "field_bindings": [
+              [
+                "prompt_template",
+                "solve__prompt_template"
+              ],
+              [
+                "system_prompt_template",
+                "solve__system_prompt"
+              ],
+              [
+                "route.max_thinking_tokens",
+                "max_thinking_tokens"
+              ]
+            ],
+            "id": "solve",
+            "kind": "agent",
+            "knobs": [
+              "solve__prompt_template",
+              "solve__system_prompt",
+              "max_thinking_tokens"
+            ],
+            "max_iterations": 1,
+            "notes": "one sealed Claude Code session (Read, Bash) writes solution.py",
+            "produces": [],
+            "prompt_template": "Use the workspace files to solve the task. Read task.md and the skill at .agents/skills/skillopt-target/SKILL.md before answering. If ATTACHMENTS.md exists, read it and inspect the listed local files. Do not call a Skill tool; the ReflACT guidance is a local markdown file. Do not ask for permission. You may modify files in the workspace when the task asks you to create an artifact. Return only the final answer text, keeping any required <answer>...</answer> tags exactly.\n\nRead `.agents/skills/skillopt-target/SKILL.md` directly; do not call a Skill tool.\nRead `task.md`, inspect `input.xlsx` if useful, and write the final solution to `solution.py`.\nYou may run `python run_solution.py` to validate the script locally.\nIn your final response, briefly confirm whether `solution.py` was written and summarize the approach.",
+            "reads": [
+              "input.xlsx",
+              ".agents/skills/skillopt-target/SKILL.md",
+              "task.md",
+              "run_solution.py"
+            ],
+            "retry": {
+              "on": [
+                "crash"
+              ],
+              "timeout_factor": 2,
+              "times": 1
+            },
+            "role": "solver",
+            "score_effect": "affects",
+            "tools": [
+              "Read",
+              "Bash"
+            ],
+            "workspace": {
+              "collect": "files",
+              "kind": "scratch"
+            },
+            "writes": [
+              "reply.txt",
+              "solution.py"
+            ]
+          },
+          "solve_check": {
+            "blocking": true,
+            "call": "",
+            "evaluator": "refactory_dsh.snippet:verdict",
+            "field_bindings": [
+              [
+                "max_iterations",
+                "solve_check__max_iterations"
+              ]
+            ],
+            "id": "solve_check",
+            "kind": "gate",
+            "knobs": [
+              "solve_check__max_iterations"
+            ],
+            "max_iterations": 1,
+            "notes": "",
+            "on_exhausted": "continue",
+            "produces": [],
+            "prompt_template": "",
+            "reads": [
+              "solve_check_judge.txt"
+            ],
+            "required_reads": [
+              "solve_check_judge.txt"
+            ],
+            "role": "ceo",
+            "score_effect": "affects",
+            "tools": [],
+            "writes": []
+          },
+          "solve_check_judge": {
+            "blocking": true,
+            "call": "",
+            "evaluator": "",
+            "field_bindings": [
+              [
+                "system_prompt_template",
+                "solve_check_judge__system_prompt"
+              ],
+              [
+                "prompt_template",
+                "solve_check_judge__task"
+              ]
+            ],
+            "id": "solve_check_judge",
+            "kind": "agent",
+            "knobs": [
+              "solve_check_judge__system_prompt",
+              "solve_check_judge__task"
+            ],
+            "max_iterations": 1,
+            "notes": "",
+            "produces": [],
+            "prompt_template": "You are verifying a spreadsheet manipulation solution. Read task.md to understand what was asked, then read solution.py to check the implementation.\n\nCheck for these common errors:\n1. SCOPE: Does the code write to cells not explicitly required by the task? Any cell write outside the task's scope is a regression risk.\n2. SIGNS: Are expenses, deductions, or adjustments using consistent signs? Look for hardcoded negation that may contradict the spreadsheet's convention. The code should read existing neighbors to determine sign convention.\n3. RATES: Are annual rates applied where monthly are needed (or vice versa)? If the task mentions annual rent but the code uses monthly values without multiplying by 12, that is wrong.\n4. REFERENCES: Do cross-sheet references use correct row/column mappings? Check that the code reads header rows to confirm alignment before writing.\n5. SENSITIVITY TABLES: If the code fills a data table or sensitivity grid, does each cell formula reference both its row and column varying input?\n6. VALIDATION: Does the code include a post-write comparison of output vs input to catch regressions?\n\nIf you find a likely error, start your answer with: reloop\nThen explain each specific error and what to fix.\n\nIf the code looks correct on all checks, start your answer with: proceed\n\n## Files from earlier steps (solve_check_judge_inputs)\n{{solve_check_judge_inputs}}\n\nStart your answer with one word, proceed or reloop, alone or followed by why; nothing before it.",
+            "reads": [],
+            "role": "solver",
+            "score_effect": "affects",
+            "system_prompt_template": "You are one step of a pipeline.",
+            "tool_policy": "none",
+            "tools": [],
+            "writes": [
+              "solve_check_judge_own_solve_check_judge.txt"
+            ]
+          },
+          "solve_check_judge_inputs": {
+            "blocking": true,
+            "call": "refactory_dsh.nn.operators:collect",
+            "evaluator": "",
+            "id": "solve_check_judge_inputs",
+            "kind": "op",
+            "knobs": [],
+            "max_iterations": 1,
+            "notes": "Hands solve_check_judge the files it sees.",
+            "produces": [
+              "solve_check_judge_inputs"
+            ],
+            "prompt_template": "",
+            "reads": [
+              ".agents/skills/skillopt-target/SKILL.md",
+              "input.xlsx",
+              "reply.txt",
+              "run_solution.py",
+              "solution.py",
+              "task.md"
+            ],
+            "role": "ceo",
+            "score_effect": "none",
+            "tools": [],
+            "writes": []
+          },
+          "solve_verify": {
+            "blocking": true,
+            "call": "",
+            "evaluator": "",
+            "field_bindings": [
+              [
+                "system_prompt_template",
+                "solve_verify__system_prompt"
+              ],
+              [
+                "prompt_template",
+                "solve_verify__task"
+              ]
+            ],
+            "id": "solve_verify",
+            "kind": "agent",
+            "knobs": [
+              "solve_verify__system_prompt",
+              "solve_verify__task"
+            ],
+            "max_iterations": 1,
+            "notes": "",
+            "produces": [],
+            "prompt_template": "Verify the spreadsheet solution by running it and checking the output.\n\n1. Read task.md to understand what cells the task requires\n2. Run: python run_solution.py\n3. Write and run a Python verification script:\n   - Find OUTPUT_PATH in solution.py\n   - Load input.xlsx and the output file with openpyxl\n   - Find all cells that differ between input and output (print first 30)\n   - Flag any cell that changed from None/empty to a value — this is a regression unless the task explicitly requires that cell\n   - Flag any cell whose value has the opposite sign from neighboring populated cells in the same column\n   - Count total changes and compare to what the task requires\n4. If you find regressions (None to value outside task scope), sign errors, or missing required cells, say reloop with specific fixes needed. Otherwise say proceed.\n\nFORMAT RULE — your response MUST begin with exactly one word alone on the first line:\nreloop\nor\nproceed\nNothing else before that word. No label, no preamble, no VERDICT: prefix, no reasoning before it.\n\nCorrect example:\nreloop\n\nCell C42 is None in the input but got value 8004 in the output. The task does not require this cell.\n\nCorrect example:\nproceed\n\nAll 35 changed cells are within the task scope. Signs and magnitudes verified.",
+            "reads": [
+              "input.xlsx",
+              "run_solution.py",
+              "solution.py",
+              "task.md"
+            ],
+            "role": "solver",
+            "score_effect": "affects",
+            "system_prompt_template": "You are one step of a pipeline.",
+            "tools": [
+              "bash"
+            ],
+            "workspace": {
+              "collect": "files",
+              "kind": "scratch"
+            },
+            "writes": [
+              "solve_check_judge.txt"
+            ]
+          }
+        },
+        "start": "data"
+      },
+      "knobs": {
+        "data_parallelism": {
+          "spec": {
+            "default": 8,
+            "description": "concurrent items",
+            "enum": [],
+            "frozen": true,
+            "hi": 64,
+            "kind": "int",
+            "lo": 1,
+            "required": false,
+            "values": []
+          },
+          "value": 24
+        },
+        "max_thinking_tokens": {
+          "spec": {
+            "default": 16384,
+            "description": "the solve call's thinking budget (SkillOpt's --max-thinking-tokens)",
+            "enum": [],
+            "frozen": true,
+            "hi": null,
+            "kind": "int",
+            "lo": 1,
+            "required": false,
+            "values": []
+          },
+          "value": 16384
+        },
+        "skill": {
+          "spec": {
+            "default": "# Spreadsheet Manipulation Skill (xlsx)\n\n## Overview\nThis skill guides agents in manipulating Excel (.xlsx) spreadsheets using Python.\n\n**Primary libraries**: `openpyxl` (structure-preserving read/write), `pandas` (data transformation).\nNever use any other third-party libraries.\n\n---\n\n## Common Workflow\n\n1. **Explore** the input file: list sheets, inspect headers, check dimensions.\n2. **Write `solution.py`** with `INPUT_PATH` and `OUTPUT_PATH` defined at the top.\n3. **Execute** `python solution.py` and verify the output file was created.\n4. **Confirm** the target cells/range contain the expected values.\n\n---\n\n## Library Selection\n\n| Use case | Library |\n|----------|---------|\n| Preserve formulas, formatting, named ranges | `openpyxl` |\n| Bulk data transformation, aggregation, sorting | `pandas` → write back with `openpyxl` |\n| Simple cell read/write | `openpyxl` |\n\n**Warning**: `pandas.to_excel()` silently destroys existing formulas and named ranges.\nWhen writing back to a spreadsheet that contains formulas, always use `openpyxl.save()`.\n\n---\n\n## solution.py Template\n\n```python\nimport openpyxl\nimport pandas as pd\n\nINPUT_PATH  = \"...\"   # set to the actual input path\nOUTPUT_PATH = \"...\"   # set to the actual output path\n\nwb = openpyxl.load_workbook(INPUT_PATH)\nws = wb.active  # or wb[\"SheetName\"]\n\n# --- perform manipulation ---\n\nwb.save(OUTPUT_PATH)\n```\n\n---\n\n## Output Requirements\n\n- Save the result to `OUTPUT_PATH`.\n- Do not hardcode row counts or column letters — iterate over actual rows in the workbook.\n- Preserve sheets and cells not mentioned in the instruction.\n",
+            "description": "the skill, written to the agent's SKILL.md",
+            "enum": [],
+            "frozen": false,
+            "hi": null,
+            "kind": "str",
+            "lo": null,
+            "required": false,
+            "values": []
+          },
+          "value": "# Spreadsheet Manipulation Skill (xlsx)\n\n## Overview\nThis skill guides agents in manipulating Excel (.xlsx) spreadsheets using Python.\n\n**Primary libraries**: `openpyxl` (structure-preserving read/write), `pandas` (data transformation).\nNever use any other third-party libraries.\n\n---\n\n## Common Workflow\n\n1. **Explore** the input file: list sheets, inspect headers, check dimensions.\n2. **Write `solution.py`** with `INPUT_PATH` and `OUTPUT_PATH` defined at the top.\n3. **Execute** `python solution.py` and verify the output file was created.\n4. **Confirm** the target cells/range contain the expected values.\n\n---\n\n## Library Selection\n\n| Use case | Library |\n|----------|---------|\n| Preserve formulas, formatting, named ranges | `openpyxl` |\n| Bulk data transformation, aggregation, sorting | `pandas` → write back with `openpyxl` |\n| Simple cell read/write | `openpyxl` |\n\n**Warning**: `pandas.to_excel()` silently destroys existing formulas and named ranges.\nWhen writing back to a spreadsheet that contains formulas, always use `openpyxl.save()`.\n\n---\n\n## solution.py Template\n\n```python\nimport openpyxl\nimport pandas as pd\n\nINPUT_PATH  = \"...\"   # set to the actual input path\nOUTPUT_PATH = \"...\"   # set to the actual output path\n\nwb = openpyxl.load_workbook(INPUT_PATH)\nws = wb.active  # or wb[\"SheetName\"]\n\n# --- perform manipulation ---\n\nwb.save(OUTPUT_PATH)\n```\n\n---\n\n## Output Requirements\n\n- Save the result to `OUTPUT_PATH`.\n- Do not hardcode row counts or column letters — iterate over actual rows in the workbook.\n- Preserve sheets and cells not mentioned in the instruction.\n\n---\n\n## Critical Verification Steps\n\n### 1. Minimize Blast Radius\n- Identify exactly which cells the task requires you to change. Only write to those cells.\n- Before saving, print the list of cells you will modify and confirm each is required by the task.\n- For debugging/audit tasks: only fix cells with clear evidence of error (#REF!, #DIV/0!, demonstrably broken references). Do NOT fix cells that look unusual but may be intentionally set.\n- Cells whose expected value is None/empty must remain empty — never fill them with computed values.\n\n### 2. Sign Conventions\n- Before writing expense, deduction, or liability rows, read 3–5 existing populated cells in the same section to determine the sign convention (are expenses positive or negative?).\n- Match the convention of neighboring cells. Common traps:\n  - Tax rates and expense ratios: check if stored as positive or negative in existing rows\n  - NCI on consolidated balance sheets: typically positive (credit balance)\n  - Elimination entries in M&A consolidations: must net to zero across columns\n- After writing, print each written value beside its neighbors to confirm sign consistency.\n\n### 3. Rate and Period Verification\n- Before applying any rate, check whether it is annual or monthly by inspecting labels and existing values.\n- Rent rolls: rows labelled 'Annual Rent' must use monthly rent × 12. $/Unit or $/SF columns use annual total ÷ units (or SF).\n- For DCF: verify terminal value is reasonable relative to the last projected cash flow. Check discount factor periodicity.\n- Values off by exactly 12× indicate monthly/annual confusion.\n\n### 4. Row/Column Mapping\n- Before writing any formula, read the target cell's row header AND column header to confirm the cell address matches the intended line item and period.\n- For multi-sheet cross-references, print the column-to-year mapping from header rows across all relevant sheets before writing formulas.\n- For sensitivity/data tables: each cell must reference BOTH its row and column assumption. After writing, read back a sample to confirm values differ along both axes.\n\n### 5. Post-Write Validation\n- After running solution.py, load the output file and compare against the input:\n  - Count changed cells and spot-check 3–5 against task expectations.\n  - Verify no cells outside the task scope were changed.\n  - Check balance sheet identity (Assets = Liabilities + Equity) if applicable.\n  - If any value seems off by an order of magnitude or has the wrong sign, investigate and fix before finalizing.\n"
+        },
+        "solve__prompt_template": {
+          "spec": {
+            "default": "Use the workspace files to solve the task. Read task.md and the skill at .agents/skills/skillopt-target/SKILL.md before answering. If ATTACHMENTS.md exists, read it and inspect the listed local files. Do not call a Skill tool; the ReflACT guidance is a local markdown file. Do not ask for permission. You may modify files in the workspace when the task asks you to create an artifact. Return only the final answer text, keeping any required <answer>...</answer> tags exactly.\n\nRead `.agents/skills/skillopt-target/SKILL.md` directly; do not call a Skill tool.\nRead `task.md`, inspect `input.xlsx` if useful, and write the final solution to `solution.py`.\nYou may run `python run_solution.py` to validate the script locally.\nIn your final response, briefly confirm whether `solution.py` was written and summarize the approach.",
+            "description": "the solve call's prompt (frozen; use the skill knob)",
+            "enum": [],
+            "frozen": true,
+            "hi": null,
+            "kind": "str",
+            "lo": null,
+            "required": false,
+            "values": []
+          },
+          "value": "Use the workspace files to solve the task. Read task.md and the skill at .agents/skills/skillopt-target/SKILL.md before answering. If ATTACHMENTS.md exists, read it and inspect the listed local files. Do not call a Skill tool; the ReflACT guidance is a local markdown file. Do not ask for permission. You may modify files in the workspace when the task asks you to create an artifact. Return only the final answer text, keeping any required <answer>...</answer> tags exactly.\n\nRead `.agents/skills/skillopt-target/SKILL.md` directly; do not call a Skill tool.\nRead `task.md`, inspect `input.xlsx` if useful, and write the final solution to `solution.py`.\nYou may run `python run_solution.py` to validate the script locally.\nIn your final response, briefly confirm whether `solution.py` was written and summarize the approach."
+        },
+        "solve__system_prompt": {
+          "spec": {
+            "default": "",
+            "description": "text appended to Claude Code's system prompt for the solve call: none, as SkillOpt's CLI (frozen; use the skill knob)",
+            "enum": [],
+            "frozen": true,
+            "hi": null,
+            "kind": "str",
+            "lo": null,
+            "required": false,
+            "values": []
+          },
+          "value": ""
+        },
+        "solve_check__max_iterations": {
+          "spec": {
+            "default": 1,
+            "description": "how often solve_check may send the work back",
+            "enum": [],
+            "frozen": false,
+            "hi": 5,
+            "kind": "int",
+            "lo": 1,
+            "required": false,
+            "values": []
+          },
+          "value": 1
+        },
+        "solve_check_judge__system_prompt": {
+          "spec": {
+            "default": "You are one step of a pipeline.",
+            "description": "system prompt for solve_check_judge",
+            "enum": [],
+            "frozen": false,
+            "hi": null,
+            "kind": "str",
+            "lo": null,
+            "required": false,
+            "values": []
+          },
+          "value": "You are one step of a pipeline."
+        },
+        "solve_check_judge__task": {
+          "spec": {
+            "default": "You are verifying a spreadsheet manipulation solution. Read task.md to understand what was asked, then read solution.py to check the implementation.\n\nCheck for these common errors:\n1. SCOPE: Does the code write to cells not explicitly required by the task? Any cell write outside the task's scope is a regression risk.\n2. SIGNS: Are expenses, deductions, or adjustments using consistent signs? Look for hardcoded negation that may contradict the spreadsheet's convention. The code should read existing neighbors to determine sign convention.\n3. RATES: Are annual rates applied where monthly are needed (or vice versa)? If the task mentions annual rent but the code uses monthly values without multiplying by 12, that is wrong.\n4. REFERENCES: Do cross-sheet references use correct row/column mappings? Check that the code reads header rows to confirm alignment before writing.\n5. SENSITIVITY TABLES: If the code fills a data table or sensitivity grid, does each cell formula reference both its row and column varying input?\n6. VALIDATION: Does the code include a post-write comparison of output vs input to catch regressions?\n\nIf you find a likely error, start your answer with: reloop\nThen explain each specific error and what to fix.\n\nIf the code looks correct on all checks, start your answer with: proceed\n\n## Files from earlier steps (solve_check_judge_inputs)\n{{solve_check_judge_inputs}}\n\nStart your answer with one word, proceed or reloop, alone or followed by why; nothing before it.",
+            "description": "task text (prompt) for solve_check_judge",
+            "enum": [],
+            "frozen": false,
+            "hi": null,
+            "kind": "str",
+            "lo": null,
+            "required": false,
+            "values": []
+          },
+          "value": "You are verifying a spreadsheet manipulation solution. Read task.md to understand what was asked, then read solution.py to check the implementation.\n\nCheck for these common errors:\n1. SCOPE: Does the code write to cells not explicitly required by the task? Any cell write outside the task's scope is a regression risk.\n2. SIGNS: Are expenses, deductions, or adjustments using consistent signs? Look for hardcoded negation that may contradict the spreadsheet's convention. The code should read existing neighbors to determine sign convention.\n3. RATES: Are annual rates applied where monthly are needed (or vice versa)? If the task mentions annual rent but the code uses monthly values without multiplying by 12, that is wrong.\n4. REFERENCES: Do cross-sheet references use correct row/column mappings? Check that the code reads header rows to confirm alignment before writing.\n5. SENSITIVITY TABLES: If the code fills a data table or sensitivity grid, does each cell formula reference both its row and column varying input?\n6. VALIDATION: Does the code include a post-write comparison of output vs input to catch regressions?\n\nIf you find a likely error, start your answer with: reloop\nThen explain each specific error and what to fix.\n\nIf the code looks correct on all checks, start your answer with: proceed\n\n## Files from earlier steps (solve_check_judge_inputs)\n{{solve_check_judge_inputs}}\n\nStart your answer with one word, proceed or reloop, alone or followed by why; nothing before it."
+        },
+        "solve_verify__system_prompt": {
+          "spec": {
+            "default": "You are one step of a pipeline.",
+            "description": "system prompt for solve_verify",
+            "enum": [],
+            "frozen": false,
+            "hi": null,
+            "kind": "str",
+            "lo": null,
+            "required": false,
+            "values": []
+          },
+          "value": "You are one step of a pipeline."
+        },
+        "solve_verify__task": {
+          "spec": {
+            "default": "Verify the spreadsheet solution by running it and checking the output.\n\n1. Read task.md to understand what cells the task requires\n2. Run: python run_solution.py\n3. Write and run a Python verification script:\n   - Find OUTPUT_PATH in solution.py\n   - Load input.xlsx and the output file with openpyxl\n   - Find all cells that differ between input and output (print first 30)\n   - Flag any cell that changed from None/empty to a value — this is a regression unless the task explicitly requires that cell\n   - Flag any cell whose value has the opposite sign from neighboring populated cells in the same column\n   - Count total changes and compare to what the task requires\n4. If you find regressions (None to value outside task scope), sign errors, or missing required cells, say reloop with specific fixes needed. Otherwise say proceed.\n\nFORMAT RULE — your response MUST begin with exactly one word alone on the first line:\nreloop\nor\nproceed\nNothing else before that word. No label, no preamble, no VERDICT: prefix, no reasoning before it.\n\nCorrect example:\nreloop\n\nCell C42 is None in the input but got value 8004 in the output. The task does not require this cell.\n\nCorrect example:\nproceed\n\nAll 35 changed cells are within the task scope. Signs and magnitudes verified.",
+            "description": "task text (prompt) for solve_verify",
+            "enum": [],
+            "frozen": false,
+            "hi": null,
+            "kind": "str",
+            "lo": null,
+            "required": false,
+            "values": []
+          },
+          "value": "Verify the spreadsheet solution by running it and checking the output.\n\n1. Read task.md to understand what cells the task requires\n2. Run: python run_solution.py\n3. Write and run a Python verification script:\n   - Find OUTPUT_PATH in solution.py\n   - Load input.xlsx and the output file with openpyxl\n   - Find all cells that differ between input and output (print first 30)\n   - Flag any cell that changed from None/empty to a value — this is a regression unless the task explicitly requires that cell\n   - Flag any cell whose value has the opposite sign from neighboring populated cells in the same column\n   - Count total changes and compare to what the task requires\n4. If you find regressions (None to value outside task scope), sign errors, or missing required cells, say reloop with specific fixes needed. Otherwise say proceed.\n\nFORMAT RULE — your response MUST begin with exactly one word alone on the first line:\nreloop\nor\nproceed\nNothing else before that word. No label, no preamble, no VERDICT: prefix, no reasoning before it.\n\nCorrect example:\nreloop\n\nCell C42 is None in the input but got value 8004 in the output. The task does not require this cell.\n\nCorrect example:\nproceed\n\nAll 35 changed cells are within the task scope. Signs and magnitudes verified."
+        }
+      },
+      "memory": [],
+      "ports": [],
+      "version": 1
+    }
+  }
+}
